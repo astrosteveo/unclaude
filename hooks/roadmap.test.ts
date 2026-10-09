@@ -622,6 +622,31 @@ test('release and Unassign put a task under way back to todo, so next and the ba
   expect(scripts.some(one => one.includes("status='blocked'"))).toBe(true)
 })
 
+test('a failing add or update writes nothing, so a retry has nothing to duplicate', async ($, on) => {
+  const some = [item('E1'), item('T1', { parent: 'E1' })]
+  const writes: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    if (stdin.includes('BEGIN')) writes.push(stdin)
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const denied = async (input: Record<string, unknown>, why: RegExp) => {
+    expect(String((await call(input)).deny)).toMatch(why)
+    expect(writes).toEqual([])
+  }
+  await denied({ action: 'add', kind: 'task', title: 'x', relates_to: ['T99'] }, /No item T99/)
+  await denied({ action: 'add', kind: 'task', title: 'x', duplicates: 'T99' }, /No item T99/)
+  await denied({ action: 'add', kind: 'epic', title: 'x', checklist: ['done means'] }, /Only tasks carry a checklist/)
+  await denied({ action: 'add', kind: 'task', title: 'x', parent: 'T1' }, /cannot sit under/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', blocked_by: ['T99'] }, /No item T99/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', relates_to: ['T1'] }, /cannot link to itself/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', duplicates: 'T99' }, /No item T99/)
+  await denied({ action: 'update', id: 'E1', title: 'renamed', blocked_by: ['T1'] }, /Only tasks wait/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', parent: 'T1' }, /own parent|cannot sit under/)
+})
+
 test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {
   const activity: Activity[] = [
     { id: 1, item_id: 'T1', author: 'claude', type: 'comment', body: 'started on the parser', at: '2026-10-09T10:00:00Z' },

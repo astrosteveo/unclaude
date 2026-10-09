@@ -366,12 +366,19 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (!a.kind || !KINDS.includes(a.kind)) fail(`kind must be one of ${KINDS.join(', ')}`)
       if (!a.title?.trim()) fail('title is required')
       if (a.blocked_by !== undefined && a.kind !== 'task') fail('Only tasks wait on other tasks')
-      // Checked before the insert, against a placeholder id no existing task can wait on.
+      // All checked before the insert (links against a placeholder id no existing item has), so a call
+      // that fails leaves nothing behind for a retry to duplicate.
       const blockers = a.blocked_by === undefined ? [] : checkBlockers(snap.items, '\u0000new', idList(a.blocked_by))
+      const checklist = a.checklist === undefined ? [] : texts(a.checklist)
+      if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
+      const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
+      const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
+      const tags = a.labels === undefined ? [] : idList(a.labels)
+      const parent = checkParent(snap.items, a.kind!, a.parent)
       const id = await sql($, db.insert(actor, {
         kind: a.kind!,
         title: a.title!.trim(),
-        parent: checkParent(snap.items, a.kind!, a.parent),
+        parent,
         description: a.description,
         due: a.due,
         status: a.status,
@@ -379,11 +386,6 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         priority: a.priority || undefined,
         type: a.type || undefined,
       }))
-      const checklist = a.checklist === undefined ? [] : texts(a.checklist)
-      if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
-      const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
-      const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
-      const tags = a.labels === undefined ? [] : idList(a.labels)
       if (blockers.length || checklist.length || related.length || original.length || tags.length) {
         const created = find((await refresh($)).items, id) as Item
         if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
@@ -414,6 +416,12 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const left = progress(snap.items, it)
       if (isToReview && it.kind !== 'task' && left.done < left.total)
         fail(`${it.id} closes when its tasks are done; finish those (they close as you go when ${it.id} is assigned to you)`)
+      // Every argument checked before the first write, so a call that fails changes nothing.
+      if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks wait on other tasks')
+      const parent = a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id)
+      const blockers = a.blocked_by === undefined ? undefined : checkBlockers(snap.items, it.id, idList(a.blocked_by))
+      const related = a.relates_to === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.relates_to))
+      const original = a.duplicates === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.duplicates))
       const { script, notes } = db.change(actor, it, {
         title: a.title?.trim() || undefined,
         status: isToReview ? 'review' : a.status,
@@ -424,7 +432,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         ...(a.assignee === '' && a.status === undefined && it.assignee ? { status: letGo(it).status } : {}),
         priority: a.priority || undefined,
         type: a.type || undefined,
-        parent: a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id),
+        parent,
       })
       if (script) await sql($, script)
       if (a.checklist !== undefined) {
@@ -432,9 +440,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         if (set.script) await sql($, set.script)
         notes.push(...set.notes)
       }
-      if (a.blocked_by !== undefined) {
-        if (it.kind !== 'task') fail('Only tasks wait on other tasks')
-        const links = db.setBlockers(actor, it, checkBlockers(snap.items, it.id, idList(a.blocked_by)))
+      if (blockers !== undefined) {
+        const links = db.setBlockers(actor, it, blockers)
         if (links.script) await sql($, links.script)
         notes.push(...links.notes)
       }
@@ -443,13 +450,13 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         if (set.script) await sql($, set.script)
         notes.push(...set.notes)
       }
-      if (a.relates_to !== undefined) {
-        const set = db.setRelations(actor, it, 'relates', checkLinks(snap.items, it.id, idList(a.relates_to)))
+      if (related !== undefined) {
+        const set = db.setRelations(actor, it, 'relates', related)
         if (set.script) await sql($, set.script)
         notes.push(...set.notes)
       }
-      if (a.duplicates !== undefined) {
-        const set = db.setRelations(actor, it, 'duplicates', checkLinks(snap.items, it.id, idList(a.duplicates)))
+      if (original !== undefined) {
+        const set = db.setRelations(actor, it, 'duplicates', original)
         if (set.script) await sql($, set.script)
         notes.push(...set.notes)
       }
