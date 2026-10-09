@@ -100,8 +100,8 @@ async function actorFor($: EngineInterface, agentId: string | undefined, as: str
   const known = agentNames.get(agentId)
   if (known) return known
   const info = (await $.agent.list().catch(() => [])).find(one => one.id === agentId)
-  if (!info) return `agent-${agentId.slice(0, 8)}`
-  const name = agentName(info.type, info.description, info.teammateId)
+  // Kept either way: an agent's name holds for its whole run, and the list isn't asked on every tool call.
+  const name = info ? agentName(info.type, info.description, info.teammateId) : `agent-${agentId.slice(0, 8)}`
   agentNames.set(agentId, name)
   return name
 }

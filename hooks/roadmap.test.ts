@@ -705,6 +705,19 @@ test('show and find read the whole timeline, not only what the snapshot carries'
   expect(await call({ action: 'find', text: 'zebras' })).toContain('1 match:\nT1')
 })
 
+test('a subagent the agent list does not know is named once, and the list is asked once', async ($, on) => {
+  const scripts: string[] = []
+  let asked = 0
+  on('agent.list', () => (asked++, { value: [] }) as never)
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: [item('T1')], activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: 0 }) as never)
+  for (const body of ['one', 'two', 'three'])
+    await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'comment', id: 'T1', body, agentId: 'f00dfeed12345678' } as never)
+  expect(asked).toBe(1)
+  expect(scripts.filter(one => one.includes("'agent-f00dfeed'") && one.includes("'comment'")).length).toBe(3)
+})
+
 test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {
   const activity: Activity[] = [
     { id: 1, item_id: 'T1', author: 'claude', type: 'comment', body: 'started on the parser', at: '2026-10-09T10:00:00Z' },
