@@ -17,6 +17,30 @@ const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running'
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
 // Checks as one mark after a PR number on a board row.
 const CHECK_MARK: Record<Checks, string> = { none: '', pending: ' …', pass: ' ✓', fail: ' ✗' }
+// Docked cards: the fewest body rows that hold a board above a card, and the board's share of them.
+const DOCK_MIN_ROWS = 30
+const DOCK_SHARE = 0.4
+
+/**
+ * How many cards of each column fit in `budget` rows, by column, beside one another (`isWide`) or
+ * stacked: work under way and in review first, then blocked, todo and done. A column cut short spends
+ * a row on its "… more".
+ */
+export function columnCaps(lengths: Record<Status, number>, budget: number, isWide: boolean): Record<Status, number> {
+  const caps = { todo: 0, in_progress: 0, blocked: 0, review: 0, done: 0 } as Record<Status, number>
+  if (isWide) {
+    for (const status of STATUSES) caps[status] = lengths[status] <= budget - 1 ? lengths[status] : Math.max(0, budget - 2)
+    return caps
+  }
+  // Each column's heading, and a row kept for each non-empty one's "… more" in case it is cut.
+  let left = budget - STATUSES.length - STATUSES.filter(status => lengths[status] > 0).length
+  for (const status of ['in_progress', 'review', 'blocked', 'todo', 'done'] as Status[]) {
+    caps[status] = Math.max(0, Math.min(lengths[status], left))
+    left -= caps[status]
+  }
+  return caps
+}
+
 export const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', review: 'r', done: 'd' }
 
 /** What the pane draws from, read by the hooks module. */
@@ -125,7 +149,13 @@ export function drawPane(
   const isWide = width >= 100
   // Inline the pane gets about a third of the screen, so an open card there spends as few rows as it can.
   const isCompact = e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'inline'
-  const choose = (id: string | null) => () => act.open(id)
+  // On the terminal, the rows the pane's body has; elsewhere the tree just grows.
+  const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
+  // An open card docks under the board when the pane has room for both; the board keeps the top part.
+  const isDocked = Boolean(pick) && !isCompact && !draft && bodyRows !== undefined && bodyRows >= DOCK_MIN_ROWS
+  const topRows = isDocked ? Math.max(6, Math.floor(bodyRows! * DOCK_SHARE)) : Infinity
+  // Pressing the open card again closes it.
+  const choose = (id: string | null) => () => (id !== null && id === pick ? act.closeDetail(id) : act.open(id))
   const badge = (item: Item) => {
     const count = unread(snap, item.id, USER).length
     return count ? ` ● ${count}` : ''
@@ -208,13 +238,19 @@ export function drawPane(
   // A milestone or epic handed over whole is reviewed as one: it waits in Review, where its card approves and merges it.
   const scopes = items.filter(item => item.kind !== 'task' && isAgent(item.assignee) && statusOf(items, item) === 'review' && isShown(item))
   const colWidth = Math.floor((width - (STATUSES.length - 1)) / STATUSES.length)
+  const columns = Object.fromEntries(STATUSES.map(status =>
+    [status, [...(status === 'review' ? scopes : []), ...tasks.filter(task => task.status === status)]])) as Record<Status, Item[]>
+  // Docked, the board fits the rows above the card.
+  const caps = isDocked
+    ? columnCaps(Object.fromEntries(STATUSES.map(status => [status, columns[status].length])) as Record<Status, number>, topRows, isWide)
+    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? 8 : 15])) as Record<Status, number>)
   const board = (
     <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? 1 : 0}>
       {STATUSES.map(status => {
-        const column = [...(status === 'review' ? scopes : []), ...tasks.filter(task => task.status === status)]
-        const shown = column.slice(0, status === 'done' ? 8 : 15)
+        const column = columns[status]
+        const shown = column.slice(0, caps[status])
         return (
-          <Box key={`col-${status}`} flexDirection="column" width={isWide ? colWidth : undefined} marginBottom={isWide ? 0 : 1}>
+          <Box key={`col-${status}`} flexDirection="column" width={isWide ? colWidth : undefined} marginBottom={isWide || isDocked ? 0 : 1}>
             <Button key={`col-${status}-head`} plain hotkey={HOTKEY[status]}
               onPress={() => column[0] && act.focus(`card-${column[0].id}`)}>
               <Text bold color={COLOR[status]}>
@@ -230,16 +266,24 @@ export function drawPane(
     </Box>
   )
 
+  const treeRows = rows(items).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
+  // Docked, a window of rows that keeps the open item in sight.
+  const treeFrom = isDocked && treeRows.length > topRows
+    ? Math.max(0, Math.min(treeRows.findIndex(row => row.item.id === pick) - Math.floor(topRows / 2), treeRows.length - (topRows - 1)))
+    : 0
+  const treeShown = isDocked && treeRows.length > topRows ? treeRows.slice(treeFrom, treeFrom + topRows - 1) : treeRows
   const tree = (
     <Box flexDirection="column">
-      {rows(items).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!))).map(({ item, depth }) => {
+      {treeShown.map(({ item, depth }) => {
         const p = progress(items, item)
         const status = statusOf(items, item)
         return (
           <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
             {'  '.repeat(depth)}
             <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
-            <Text bold={item.kind === 'milestone'}>{item.title}</Text>
+            <Text bold={item.kind === 'milestone'}>
+              {isDocked && item.title.length > width - depth * 2 - item.id.length - 16 ? `${item.title.slice(0, Math.max(8, width - depth * 2 - item.id.length - 17))}…` : item.title}
+            </Text>
             <Text dimColor>
               {item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}
               {item.due ? `  due ${item.due}` : ''}
@@ -251,14 +295,17 @@ export function drawPane(
           </Button>
         )
       })}
+      {treeShown.length < treeRows.length && <Text key="tree-more" dimColor>…{treeRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
     </Box>
   )
 
   // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
-  const triage = backlog(items).filter(isShown)
+  const triageAll = backlog(items).filter(isShown)
+  const triage = isDocked ? triageAll.slice(0, Math.max(1, Math.floor((topRows - 1) / 2))) : triageAll
   const backlogView = (
     <Box flexDirection="column">
       {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
+      {triage.length < triageAll.length && <Text key="backlog-more" dimColor>…{triageAll.length - triage.length} more (close the card to see them all)</Text>}
       {triage.map(task => {
         const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
         const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
@@ -462,12 +509,13 @@ export function drawPane(
     ])
   }
   // On the terminal the window is ours: what fits under the fixed rows, with a mark for what is above or below.
+  // Docked, the board's rows above the card count among the fixed ones.
   // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
   // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
-  const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
   const tagLine = item?.labels?.length ? item.labels.map(one => `#${one}`).join(' ') : ''
   const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', tagLine, item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
-  const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 : 0)
+  // The title, beside the ✕ that closes the card.
+  const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 + 2 : 0)
   // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
   // The bar's two rows of buttons, as they wrap at this width ("[ label ]", one column apart).
   // How many rows pieces of these widths take, laid one column apart and wrapped at `room`.
@@ -519,7 +567,7 @@ export function drawPane(
     .join(' · ')
   // The footer is as wide as the pane, not the panel inside it.
   const footerRows = Math.max(1, Math.ceil(footer.length / Math.max(1, width)))
-  const fixed = (isCompact ? 0 : headerRows) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
+  const fixed = (isCompact ? 0 : headerRows) + (isDocked ? topRows : 0) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   const total = sections.reduce((sum, row) => sum + row.rows, 0)
   const isScrolling = space < total
@@ -548,13 +596,19 @@ export function drawPane(
 
   const panel = item && status && (
     <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}>
-      <Text>
-        <Text dimColor>
-          {item.kind} {item.id}
-        </Text>{' '}
-        <Text bold>{item.title}</Text>
-        {isCompact && <Text dimColor>  {meta}</Text>}
-      </Text>
+      <Box key="title-row" flexDirection="row" justifyContent="space-between">
+        <Text>
+          <Text dimColor>
+            {item.kind} {item.id}
+          </Text>{' '}
+          <Text bold>{item.title}</Text>
+          {isCompact && <Text dimColor>  {meta}</Text>}
+        </Text>
+        {/* Closing is a press away from wherever the eye is: here, Close in the bar, x, or the card on the board again. */}
+        <Button key="close-x" plain onPress={() => act.closeDetail(item.id)}>
+          <Text dimColor> ✕</Text>
+        </Button>
+      </Box>
       {/* The bar sits right under the title on every card, so its buttons never move with the content. */}
       <Box key="bar" flexDirection="column">
         {item.kind === 'task' ? (
@@ -709,7 +763,7 @@ export function drawPane(
       <Box flexDirection="column">
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
         {!(isCompact && (panel || form)) && header}
-        {!panel && !form && filterRow}
+        {(!panel || isDocked) && !form && filterRow}
         {!panel && !form && query && !items.some(isShown) && <Text key="no-match" dimColor>Nothing matches the filter.</Text>}
         {offer}
         {trouble ? (
@@ -719,8 +773,18 @@ export function drawPane(
         ) : items.length === 0 ? (
           <Text dimColor>No roadmap yet. Ask Claude to plan milestones, epics and tasks, or press n to add one.</Text>
         ) : (
-          // An open item stands in for the board, so a long board never pushes it off screen.
-          panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : backlogView)
+          // Docked, the board keeps its rows on top and the card sits under it; where there is no room for
+          // both, the open item stands in for the board, so a long board never pushes it off screen.
+          isDocked && panel ? (
+            <Box key="docked" flexDirection="column">
+              <Box key="top" flexDirection="column" height={topRows}>
+                {mode === 'board' ? board : mode === 'tree' ? tree : backlogView}
+              </Box>
+              {panel}
+            </Box>
+          ) : (
+            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : backlogView)
+          )
         )}
         {items.length > 0 && !trouble && (
           <Text dimColor>

@@ -40,6 +40,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Changed
 
+- An open card docks at the bottom of the pane, under the board (or tree, or backlog), which keeps the top part of the pane, fitted to it. Pressing another card swaps the docked one; pressing the open card again, or the ✕ on its title row, closes it. A pane too short for both shows the card alone, as before.
 - A card in review offers Approve and Request changes, and no longer Hand to Claude, which only resent the first ask.
 - Status roll-ups and item lookups are indexed once per snapshot, so a board of a couple of thousand items draws in milliseconds. Before, each roll-up walked the whole roadmap again.
 - An `update` that sets several things (fields, checklist, blockers, labels, links) is written as one transaction in one sqlite3 run: it lands whole or not at all.
