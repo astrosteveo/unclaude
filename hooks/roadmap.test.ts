@@ -208,3 +208,41 @@ test('commits and pull requests are linked to the tasks they name, and roll up t
   expect(refsText(e1)).toBe('Pull requests:\n  #7 [merged] Board polish  https://x/7\nCommits:\n  abc1234 2026-10-09 Ada: T2: claim fix')
   expect(refsFor(items, { commits, prs }, items[6]!)).toEqual({ commits: [], prs: [] })
 })
+
+test('the detail bar sits right under the title on every card, short or long, task or epic', async ($, on) => {
+  const long = item('T6', {
+    description: 'A long description. '.repeat(20),
+    checklist: [1, 2, 3, 4, 5].map(n => ({ n, text: `criterion ${n}`, done: n < 3 })),
+    blocked_by: ['T5'],
+  })
+  const snap = { items: [...items, long], activity: [], seen: {} }
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 80, placement: 'dock' } as never,
+  })
+  const barIndex = async () => {
+    const detail = await ui.find({ key: 'detail' })
+    return (detail?.children ?? []).findIndex(c => (c as { key?: string; props?: { key?: string } })?.key === 'bar'
+      || (c as { props?: { key?: string } })?.props?.key === 'bar')
+  }
+  const at: number[] = []
+  for (const open of ['card-T5', 'card-T6']) {
+    await ui.press({ key: open })
+    at.push(await barIndex())
+    expect((await ui.find({ key: 'set-todo' }))?.props.variant).toBe('primary')
+    expect((await ui.find({ key: 'set-done' }))?.props.variant).toBe('secondary')
+    await ui.press({ key: 'close' })
+  }
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'row-E1' })
+  at.push(await barIndex())
+  expect(await ui.find({ key: 'set-todo' })).toBeUndefined()
+  expect((await ui.find({ key: 'status-row' }))?.text).toContain('rolled up')
+  expect(await ui.find({ key: 'hand' })).toBeDefined()
+  expect(at).toEqual([1, 1, 1])
+  await ui.unmount()
+})

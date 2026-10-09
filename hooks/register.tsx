@@ -657,21 +657,47 @@ export const register: Register = on => {
     const status = item && statusOf(items, item)
     const where = item && path(items, item)
     const panel = item && status && (
-      <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}>
         <Text>
           <Text dimColor>
             {item.kind} {item.id}
           </Text>{' '}
           <Text bold>{item.title}</Text>
         </Text>
-        {where && <Text dimColor>in {where}</Text>}
+        {/* The bar sits right under the title on every card, so its buttons never move with the content. */}
+        <Box key="bar" flexDirection="column">
+          {item.kind === 'task' ? (
+            <Box key="status-row" flexDirection="row" gap={1} flexWrap="wrap">
+              {STATUSES.map((one, i) => (
+                <Button key={`set-${one}`} label={item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]}
+                  hotkey={String(i + 1)} variant={item.status === one ? 'primary' : 'secondary'}
+                  onPress={() => void userAct($, { action: 'update', id: item.id, status: one })} />
+              ))}
+            </Box>
+          ) : (
+            <Box key="status-row">
+              <Text>
+                <Text color={COLOR[status]}>
+                  {GLYPH[status]} {LABEL[status]}
+                </Text>
+                <Text dimColor>
+                  {'  '}rolled up from its tasks ({progress(items, item).done}/{progress(items, item).total} done)
+                </Text>
+              </Text>
+            </Box>
+          )}
+          <Box key="action-row" flexDirection="row" gap={1} flexWrap="wrap">
+            <Button key="hand" label="Hand to Claude" hotkey="h" onPress={() => void handToClaude($, item)} />
+            <Button key="mine" label="Assign me" hotkey="m" onPress={() => void userAct($, { action: 'update', id: item.id, assignee: USER })} />
+            <Button key="unassign" label="Unassign" hotkey="u" onPress={() => void userAct($, { action: 'update', id: item.id, assignee: '' })} />
+            <Button key="close" label="Close" hotkey="x" onPress={() => void closeDetail($, item.id)} />
+          </Box>
+        </Box>
         <Text>
-          <Text color={COLOR[status]}>
-            {GLYPH[status]} {LABEL[status]}
-          </Text>
-          <Text dimColor>  assignee </Text>
+          <Text dimColor>assignee </Text>
           <Text color="cyan">{item.assignee ?? 'none'}</Text>
           {item.due && <Text dimColor>  due {item.due}</Text>}
+          {where && <Text dimColor>  in {where}</Text>}
         </Text>
         {item.description && <Text>{item.description}</Text>}
         {(item.checklist ?? []).map(c => (
@@ -721,20 +747,6 @@ export const register: Register = on => {
               {one.id} {one.title}
             </Text>
           ))}
-        {item.kind === 'task' && (
-          <Box flexDirection="row" gap={1} flexWrap="wrap">
-            {STATUSES.map((one, i) => (
-              <Button key={`set-${one}`} label={LABEL[one]} hotkey={String(i + 1)} dimColor={item.status === one}
-                onPress={() => void userAct($, { action: 'update', id: item.id, status: one })} />
-            ))}
-          </Box>
-        )}
-        <Box flexDirection="row" gap={1} flexWrap="wrap">
-          <Button key="hand" label="Hand to Claude" hotkey="h" variant="primary" onPress={() => void handToClaude($, item)} />
-          <Button key="mine" label="Assign me" hotkey="m" onPress={() => void userAct($, { action: 'update', id: item.id, assignee: USER })} />
-          <Button key="unassign" label="Unassign" hotkey="u" onPress={() => void userAct($, { action: 'update', id: item.id, assignee: '' })} />
-          <Button key="close" label="Close" hotkey="x" onPress={() => void closeDetail($, item.id)} />
-        </Box>
         {Input && <Input key="comment" label="Comment" placeholder="A note for Claude; Enter posts it"
           onSubmit={(value: string) => void (value.trim() && userAct($, { action: 'comment', id: item.id, body: value }))} />}
         {timeline(snap.activity, item.id)
