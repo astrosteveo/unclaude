@@ -798,6 +798,8 @@ test('backlog: unheld todo tasks, homeless first then by priority; a row sets pr
   await ui.select({ key: 'prio-T1', value: 'p1' } as never)
   expect(scripts.some(one => one.includes("priority='p1'") && one.includes("WHERE id='T1'"))).toBe(true)
   await ui.press({ key: 'hand-T2' })
+  expect(submitted).toBe('')
+  await ui.press({ key: 'hand-yes' })
   expect(submitted).toContain('Work on roadmap task T2')
   await ui.press({ key: 'filter' })
   await ui.input({ key: 'filter-input', text: '#ui' } as never)
@@ -989,5 +991,35 @@ test('edit a card\'s checklist and blockers: reword, drop, add, and set what it 
   // T3 already waits on T1: T1 waiting on T3 would be a cycle, and says so.
   await ui.input({ key: 'edit-blockers', text: 'T3' } as never)
   expect(toast).toContain('cycle')
+  await ui.unmount()
+})
+
+test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work', async ($, on) => {
+  const some = [item('T1'), item('T2', { status: 'done' })]
+  let submitted = ''
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('prompt.submit', ($, e) => ((submitted = e.text), { text: e.text, origin: e.origin }))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  for (const key of ['hand', 'mine', 'unassign']) expect((await ui.find({ key }))?.props.hotkey).toBeUndefined()
+  expect(await ui.find({ text: /h hand to Claude|m\/u assign/ })).toBeUndefined()
+  await ui.press({ key: 'hand' })
+  expect(submitted).toBe('')
+  await ui.press({ key: 'hand-cancel' })
+  expect(await ui.find({ key: 'hand-yes' })).toBeUndefined()
+  expect(submitted).toBe('')
+  await ui.press({ key: 'hand' })
+  await ui.press({ key: 'hand-yes' })
+  expect(submitted).toContain('Work on roadmap task T1')
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ key: 'hand' })).toBeUndefined()
   await ui.unmount()
 })

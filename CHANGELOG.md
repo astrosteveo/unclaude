@@ -27,6 +27,8 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Changed
 
+- Handing work to Claude takes a confirm step (on a card or a backlog row), and the `h`, `m` and `u` keys are gone, so a stray key or an extra Enter no longer hands off or reassigns a task. A card never opens with focus on Hand to Claude, and a finished item doesn't offer it.
+
 - The board has five columns, and needs 100 columns of width to lay them side by side (90 before); narrower, they stack.
 - Agents can no longer act under the name `user`.
 

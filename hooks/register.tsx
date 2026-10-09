@@ -30,6 +30,8 @@ const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
 const draft = atom({ plugin: 'roadmap', key: 'draft' } as const, null as Draft | null)
 // Whether the open card shows its fields for editing.
 const editing = atom({ plugin: 'roadmap', key: 'editing' } as const, false)
+// The item waiting on a yes before it is handed to Claude.
+const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as string | null)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -571,6 +573,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, scrolled, () => 0)
   await update($, requesting, () => false)
   await update($, editing, () => false)
+  await update($, handing, () => null)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -578,7 +581,8 @@ async function open($: EngineInterface, id: string | null) {
   // panel, on the first unticked checklist entry when there is one.
   const item = find((await read($, snapshot)).items, id)
   const firstOpen = item?.checklist?.find(c => !c.done)
-  await focusOn($, firstOpen ? `check-${firstOpen.n}` : 'hand')
+  // Never on Hand to Claude: an Enter too many must not hand the task over.
+  await focusOn($, firstOpen ? `check-${firstOpen.n}` : 'close')
   try {
     await sql($, db.markSeen(USER, id))
     await refresh($)
@@ -599,7 +603,7 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
   await update($, requesting, () => false)
   await userAct($, { action: 'comment', id: item.id, body: `Changes requested: ${body}` })
   await userAct($, { action: 'update', id: item.id, status: 'in_progress' })
-  await focusOn($, 'hand')
+  await focusOn($, 'close')
   if (item.assignee && item.assignee !== USER)
     await $.prompt.submit({
       text: `The user sent roadmap ${item.kind} ${item.id} (${item.title}) back from review: ${body}. Read it with the roadmap tool (show ${item.id}), make the changes (adding tasks under it if that helps), comment, and set it done again when finished.`,
@@ -844,15 +848,19 @@ export const register: Register = on => {
       isFiltering: await read($, filtering),
       draft: await read($, draft),
       isEditing: await read($, editing),
+      handing: await read($, handing),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
     }
+    const pick = state.pick
     const actions: PaneActions = {
       open: id => void open($, id),
       closeDetail: id => void closeDetail($, id),
       userAct: a => void userAct($, a as Input),
-      handToClaude: item => void handToClaude($, item),
+      // The question opens on Cancel: only a deliberate move to Yes hands the item over.
+      askHand: id => void update($, handing, () => id).then(() => focusOn($, id ? 'hand-cancel' : pick ? 'close' : 'tab-board')),
+      handToClaude: item => void update($, handing, () => null).then(() => handToClaude($, item)),
       requestChanges: (item, what) => void requestChanges($, item, what),
       setView: mode => void update($, view, () => mode),
       setRequesting: isOn => void update($, requesting, () => isOn).then(() => (isOn ? focusOn($, 'changes') : undefined)),
