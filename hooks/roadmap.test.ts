@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, lastChange, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -222,7 +222,7 @@ test('batch: ops run in order on a trial copy, then land on the database in one 
   // Each op ran on the copy; the database got one script holding all of them, guarded by the stamp.
   expect(tried.length).toBeGreaterThanOrEqual(4)
   expect(real.length).toBe(1)
-  for (const part of ["status='blocked'", "'looked at it'", 'INSERT INTO items', "priority='p1'", "VALUES ('T2', 'T9')", "!= 41 THEN json("])
+  for (const part of ["status='blocked'", "'looked at it'", 'INSERT INTO items', "priority='p1'", "VALUES ('T2', 'T9')", "= 41) THEN json_extract("])
     expect(real[0]).toContain(part)
   expect(real[0]!.match(/BEGIN/g)?.length).toBe(1)
   expect(ran.some(argv => argv[0] === 'rm' && String(argv[2]).includes('-batch-'))).toBe(true)
@@ -1570,4 +1570,56 @@ test('review with a pull request: checks on the card; Approve offers to merge an
   await ui.input({ key: 'changes', text: 'split the migration' } as never)
   expect(ran.some(argv => argv.join(' ') === 'gh pr comment 8 --body Changes requested: split the migration')).toBe(true)
   await ui.unmount()
+})
+
+test('undo on the board: Undo (z) takes back the last change; a line on a card reverts that change; a refusal says why', async ($, on) => {
+  const some = [item('T1', { status: 'done' })]
+  const activity: Activity[] = [
+    { id: 6, item_id: 'T1', author: 'user', type: 'edit', body: 'priority → p1', at: '2026-10-09T10:00:00Z', op: 6, undone: null, undoable: true },
+    { id: 7, item_id: 'T1', author: 'user', type: 'status', body: 'status todo → done', at: '2026-10-09T10:01:00Z', op: 7, undone: null, undoable: true },
+    { id: 8, item_id: 'T1', author: 'claude', type: 'comment', body: 'mine', at: '2026-10-09T10:02:00Z', op: 8, undone: null, undoable: true },
+  ]
+  const stored = (id: number) => ({ ...activity.find(one => one.id === id)!, undo: `SELECT 'UNDO-${id}';`, redo: `SELECT 'REDO-${id}';`, reverts: null })
+  const writes: string[] = []
+  const toasts: string[] = []
+  let isStale = false
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    const asked = /FROM activity WHERE id IN \(([\d, ]+)\)/.exec(stdin)?.[1]
+    if (asked) return { value: { ...fakeSqlite('', null), stdout: JSON.stringify(asked.split(', ').map(Number).map(stored)) } }
+    if (stdin.startsWith('BEGIN')) {
+      writes.push(stdin)
+      if (isStale) return { value: { ...fakeSqlite('', null), exitCode: 1, stdout: '', stderr: "Error near line 3: bad JSON path: '!T1''s status has changed since; change it directly'" } }
+    }
+    return { value: fakeSqlite(stdin, { items: some, activity, seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  // The header's Undo takes back the person's newest change, not Claude's comment after it.
+  expect((await ui.find({ key: 'undo' }))?.props.hotkey).toBe('z')
+  await ui.press({ key: 'undo' })
+  expect(writes.at(-1)).toContain("SELECT 'UNDO-7';")
+  expect(writes.at(-1)).toContain('undid “status todo → done”')
+  expect(writes.at(-1)).not.toContain('UNDO-6')
+  expect(toasts.at(-1)).toBe('roadmap: Undid T1: status todo → done')
+  // On the card, each change still standing has its own revert, Claude's comment too.
+  await ui.press({ key: 'card-T1' })
+  for (const id of [6, 7, 8]) expect(await ui.find({ key: `revert-${id}` })).toBeDefined()
+  await ui.press({ key: 'revert-6' })
+  expect(writes.at(-1)).toContain("SELECT 'UNDO-6';")
+  // A change something later overwrote is refused, in the guard's words.
+  isStale = true
+  await ui.press({ key: 'revert-7' })
+  expect(toasts.at(-1)).toBe("roadmap: T1's status has changed since; change it directly")
+  await ui.unmount()
+  // Undone changes, undos and others' changes aren't the person's last change.
+  expect(lastChange({ items: some, activity: [{ ...activity[1]!, undone: 9 }, activity[0]!, activity[2]!], seen: {} }, 'user').map(one => one.id)).toEqual([6])
+  expect(lastChange({ items: some, activity: [activity[2]!], seen: {} }, 'user')).toEqual([])
 })

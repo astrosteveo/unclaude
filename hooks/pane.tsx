@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, lastChange, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -94,6 +94,8 @@ export type PaneActions = {
   setDraft: (draft: Draft | null) => void
   create: (draft: Draft, title: string) => void
   setEditing: (isOn: boolean) => void
+  /** Takes back the person's last change, or the logged entries `ids`. */
+  undo: (ids?: number[]) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -199,6 +201,9 @@ export function drawPane(
     )
   }
 
+  // What Undo would take back: the person's last change still standing.
+  const undoable = lastChange(snap, USER)
+  const canUndo = undoable.length > 0
   const unreadTotal = items.reduce((sum, item) => sum + unread(snap, item.id, USER).length, 0)
   const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
   const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done').length
@@ -222,6 +227,7 @@ export function drawPane(
       {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
         onPress={() => act.setFiltering(true)} />}
       {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
+      {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
       {/* With a card open, n adds under it (on the card's bar) instead. */}
       {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
     </Box>
@@ -489,21 +495,33 @@ export function drawPane(
         .map(one => {
           const when = one.at.slice(5, 16).replace('T', ' ')
           const who = <Text color={one.author === USER ? 'magenta' : 'cyan'}>{one.author}</Text>
+          // A change still standing can be taken back from its line; an undo, made again the same way.
+          const revert = one.undoable && !one.undone
+            ? <Button key={`revert-${one.id}`} plain onPress={() => act.undo([one.id])}><Text dimColor> {one.type === 'undo' ? '↷ redo' : '↶ undo'}</Text></Button>
+            : null
           return isMessage(one)
             ? { key: `act-${one.id}`, rows: 1 + tall(one.body, 2), node: (
                 <Box key={`act-${one.id}`} flexDirection="column">
-                  <Text>
-                    {who}
-                    {one.type === 'handoff' && <Text color="yellow"> handoff</Text>}
-                    <Text dimColor> {when}</Text>
-                  </Text>
+                  <Box flexDirection="row">
+                    <Text>
+                      {who}
+                      {one.type === 'handoff' && <Text color="yellow"> handoff</Text>}
+                      <Text dimColor> {when}</Text>
+                    </Text>
+                    {revert}
+                  </Box>
                   <Text>  {one.body}</Text>
                 </Box>
               ) }
-            : { key: `act-${one.id}`, rows: tall(`${when} ${one.author} ${one.body}`), node: (
-                <Text key={`act-${one.id}`} dimColor>
-                  {when} {one.author} {one.body}
-                </Text>
+            : { key: `act-${one.id}`, rows: tall(`${when} ${one.author} ${one.body} ↶ undo`), node: (
+                <Box key={`act-${one.id}`} flexDirection="row">
+                  <Box flexShrink={1}>
+                    <Text dimColor>
+                      {when} {one.author} {one.body}
+                    </Text>
+                  </Box>
+                  {revert}
+                </Box>
               ) }
         }),
     ])
@@ -537,6 +555,7 @@ export function drawPane(
     ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length] : []),
     ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
     ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
+    ...(canUndo ? ['Undo'.length + 4] : []),
   ], width)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
@@ -561,7 +580,7 @@ export function drawPane(
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
     ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', isEditing ? 'e done editing' : 'e edit', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', canUndo ? 'z undo' : '', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
   )
     .filter(Boolean)
     .join(' · ')

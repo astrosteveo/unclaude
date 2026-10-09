@@ -390,3 +390,129 @@ test('v3: milestones and epics already finished keep reading done; open ones are
   assert.equal(item('E1').status, 'done')
   assert.equal(item('M2').status, 'todo')
 })
+
+// Undo, as register.tsx's `undo` does it: comments and adds worked out at revert time, the rest stored.
+const entries = () => JSON.parse(sql('SELECT json_group_array(json_object(\'id\', id, \'op\', op, \'type\', type, \'body\', body, \'undone\', undone)) FROM (SELECT * FROM activity ORDER BY id);'))
+const lastOp = () => {
+  const all = entries()
+  const op = all.at(-1).op
+  return all.filter(one => one.op === op).map(one => one.id)
+}
+const revert = (ids, actor = 'user') => {
+  const stamp = sql(db.STAMP)
+  const found = JSON.parse(sql(db.entries(ids)))
+  const list = found.map(entry =>
+    entry.type === 'comment' || entry.type === 'handoff' ? { entry, undo: db.unsay(entry), redo: db.resay(entry) }
+    : entry.type === 'create' ? { entry, undo: db.removeRows([entry.item_id]), redo: db.restore(JSON.parse(sql(db.dump([entry.item_id])))) }
+    : { entry, undo: entry.undo, redo: entry.redo })
+  return sql(db.revert(actor, list, stamp))
+}
+const fields = one => one && Object.fromEntries(Object.entries(one).filter(([key]) => key !== 'updated_at' && key !== 'lease_at'))
+
+test('undo: a change of several fields is one op, reverted exactly; the undo is logged, and undone puts it back', () => {
+  sql(db.insert('claude', { kind: 'epic', title: 'E', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'old', parent: null, description: 'line one\nline two', due: '2026-12-01' }))
+  const before = fields(item('T1'))
+  sql(db.change('user', item('T1'), { title: 'new', status: 'blocked', parent: 'E1', description: null, assignee: 'claude', due: null, priority: 'p0', type: 'bug' }).script)
+  const changed = fields(item('T1'))
+  const op = lastOp()
+  assert.equal(op.length, 8)
+  revert(op)
+  assert.deepEqual(fields(item('T1')), before)
+  // Each undo is logged, naming what it took back; the entries it reverted read as undone.
+  const undos = entries().filter(one => one.type === 'undo')
+  assert.equal(undos.length, 8)
+  assert.ok(undos.some(one => one.body === 'undid “title → new”'))
+  assert.ok(entries().filter(one => op.includes(one.id)).every(one => one.undone))
+  // Undoing the undo makes the change again, and the original can be undone once more.
+  revert(lastOp())
+  assert.deepEqual(fields(item('T1')), changed)
+  assert.ok(entries().some(one => one.body === 'redid “title → new”'))
+  assert.ok(entries().filter(one => op.includes(one.id)).every(one => !one.undone))
+  revert(op)
+  assert.deepEqual(fields(item('T1')), before)
+})
+
+test('undo is refused when what the change set has changed since, and writes nothing', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.change('user', item('T1'), { title: 'b' }).script)
+  const first = lastOp()
+  sql(db.change('claude', item('T1'), { title: 'c' }).script)
+  const count = entries().length
+  assert.throws(() => revert(first), err => db.guardReason(String(err.stderr ?? err.message)) === "T1's title has changed since; change it directly")
+  assert.equal(item('T1').title, 'c')
+  assert.equal(entries().length, count)
+  // A revert also fails whole when anyone wrote after it was read.
+  assert.throws(() => sql(db.revert('user', [], '1')))
+})
+
+test('undo of ticks, checklists, labels, blockers, links, a duplicate and a claim restores exactly what was there', () => {
+  for (const title of ['a', 'b', 'c']) sql(db.insert('claude', { kind: 'task', title, parent: null }))
+  sql(db.setChecklist('claude', item('T1'), ['x', 'y', 'z']).script)
+  sql(db.check('claude', item('T1'), [2], true).script)
+  sql(db.setLabels('claude', item('T1'), ['ui']).script)
+  sql(db.setBlockers('claude', item('T1'), ['T2']).script)
+  sql(db.setRelations('claude', item('T1'), 'relates', ['T3']).script)
+  const before = fields(item('T1'))
+  const steps = [
+    () => db.check('user', item('T1'), [1, 3], true).script,
+    () => db.check('user', item('T1'), [2], false).script,
+    () => db.setChecklist('user', item('T1'), ['x', 'w']).script,
+    () => db.setLabels('user', item('T1'), ['api', 'auth']).script,
+    () => db.setBlockers('user', item('T1'), ['T3']).script,
+    () => db.setRelations('user', item('T1'), 'relates', []).script,
+    () => db.setRelations('user', item('T1'), 'duplicates', ['T2']).script,
+    () => db.claim('user', 'T1', true, item('T1').assignee, item('T1').status),
+  ]
+  for (const step of steps) {
+    sql(step())
+    assert.notDeepEqual(fields(item('T1')), before)
+    revert(lastOp())
+    assert.deepEqual(fields(item('T1')), before)
+  }
+})
+
+test('undo of a comment deletes it, and redo writes it back under its own id; undo of an add removes the item', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.comment('user', 'T1', "it's\nfine"))
+  const [said] = lastOp()
+  revert([said])
+  assert.ok(!entries().some(one => one.id === said))
+  revert(lastOp())
+  assert.equal(entries().find(one => one.id === said).body, "it's\nfine")
+  sql(db.insert('user', { kind: 'task', title: 'oops', parent: null }))
+  revert(lastOp())
+  assert.equal(item('T2'), undefined)
+  assert.equal(load().activity.filter(one => one.item_id === 'T2').map(one => one.type).join(), 'undo')
+  revert(lastOp())
+  assert.equal(item('T2').title, 'oops')
+})
+
+test('undo of a removal restores the whole subtree exactly: items, timelines, checklists, labels, links and read marks', () => {
+  sql(db.insert('claude', { kind: 'epic', title: 'E', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: 'E1' }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: 'E1' }))
+  sql(db.insert('claude', { kind: 'task', title: 'outside', parent: null }))
+  sql(db.setChecklist('claude', item('T1'), ['x']).script)
+  sql(db.setLabels('claude', item('T1'), ['ui']).script)
+  sql(db.setBlockers('claude', item('T2'), ['T1']).script)
+  sql(db.setBlockers('claude', item('T3'), ['T2']).script)
+  sql(db.setRelations('claude', item('T3'), 'relates', ['E1']).script)
+  sql(db.comment('claude', 'T1', 'note'))
+  sql(db.markSeen('user', 'T1'))
+  const before = load()
+  const ids = ['E1', 'T1', 'T2']
+  const rows = JSON.parse(sql(db.dump(ids)))
+  sql(db.remove(ids, { actor: 'user', body: 'removed epic “E”', rows }))
+  assert.deepEqual(load().items.map(one => one.id), ['T3'])
+  assert.deepEqual(item('T3').blocked_by, [])
+  revert(lastOp())
+  const after = load()
+  const strip = snap => ({ ...snap, activity: snap.activity.filter(one => one.type !== 'remove' && one.type !== 'undo').sort((a, b) => a.id - b.id) })
+  assert.deepEqual(strip(after).items.sort((a, b) => a.id.localeCompare(b.id)), strip(before).items.sort((a, b) => a.id.localeCompare(b.id)))
+  assert.deepEqual(strip(after).activity, { ...before, activity: before.activity.sort((a, b) => a.id - b.id) }.activity)
+  assert.deepEqual(after.seen, before.seen)
+  // And removed again by undoing the undo.
+  revert(lastOp())
+  assert.deepEqual(load().items.map(one => one.id), ['T3'])
+})

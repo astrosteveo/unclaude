@@ -84,10 +84,19 @@ export type Activity = {
   id: number
   item_id: string
   author: string
-  /** `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. */
-  type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff'
+  /**
+   * `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. `remove`: an
+   * item removed, logged under its id; `undo`: a change taken back (or, undone itself, made again).
+   */
+  type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff' | 'remove' | 'undo'
   body: string
   at: string
+  /** The write it was logged in: entries of one op were one change, and are undone together. */
+  op?: number | null
+  /** The undo entry that took it back, while it stays taken back. */
+  undone?: number | null
+  /** Whether it can be taken back. */
+  undoable?: boolean
 }
 
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */

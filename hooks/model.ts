@@ -373,6 +373,18 @@ export const unread = (snap: Snapshot, id: string, reader: string) =>
     one => one.item_id === id && one.author !== reader && isMessage(one) && one.id > (snap.seen[id] ?? 0),
   )
 
+/**
+ * What `who`'s Undo takes back: their latest change still standing, every entry of the write it was
+ * (its op). Undos are passed over, so pressing Undo again walks further back.
+ */
+export function lastChange(snap: Snapshot, who: string): Activity[] {
+  const mine = snap.activity.filter(one => one.author === who && !one.undone && one.type !== 'undo')
+  const newest = mine.reduce<Activity | undefined>((max, one) => (!max || one.id > max.id ? one : max), undefined)
+  // One logged before undo existed can't be taken back, and Undo never skips it for an older one.
+  if (!newest?.undoable) return []
+  return newest.op ? mine.filter(one => one.op === newest.op && one.undoable).sort((a, b) => a.id - b.id) : [newest]
+}
+
 /** Whether an entry is something someone wrote (a comment or a handoff note), not a change the tracker logged. */
 export const isMessage = (one: Activity) => one.type === 'comment' || one.type === 'handoff'
 

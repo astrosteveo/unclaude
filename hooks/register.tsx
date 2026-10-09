@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, lastChange, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -494,7 +494,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const waiting = waitingOn(snap.items, it)
       if (waiting.length && !a.force)
         fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
-      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee), t)) || null
+      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee, it.status), t)) || null
       const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
       if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
       // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
@@ -580,11 +580,47 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const ids = subtree(snap.items, it.id)
       if (ids.length > 1 && !a.cascade)
         fail(`${it.id} has ${ids.length - 1} item(s) under it; pass cascade: true to remove them too`)
-      await sql($, db.remove(ids), t)
+      // What it held, kept with the removal so an undo can put it all back; nobody may write in between.
+      const stamp = await sql($, db.STAMP, t)
+      const rows = JSON.parse(await sql($, db.dump(ids), t)) as db.Rows
+      const body = `removed ${it.kind} “${it.title}”${ids.length > 1 ? ` and the ${ids.length - 1} item(s) under it` : ''}`
+      await sql($, db.atomic([db.expectStamp(stamp), db.remove(ids, { actor, body, rows })]), t)
       return `Removed ${ids.join(', ')}`
     }
   }
   return fail(`Unknown action ${a.action}`)
+}
+
+/**
+ * Takes back the logged changes `ids` as `actor`, all or none, each logged as an undo that can itself be
+ * undone. A comment is deleted; an add removes the item (one with nothing under it); a removal puts back
+ * everything it took. Refused when what a change set has changed since, so nothing later is lost.
+ */
+async function undo($: EngineInterface, actor: string, ids: number[], t: Target = REAL): Promise<string> {
+  if (ids.length === 0) fail('Nothing to undo')
+  const stamp = await sql($, db.STAMP, t)
+  const found = JSON.parse(await sql($, db.entries(ids), t)) as db.Entry[]
+  if (found.length < ids.length) fail('That change is no longer in the timeline')
+  const snap = await refresh($, t)
+  const list: { entry: db.Entry; undo: string; redo: string }[] = []
+  for (const entry of found) {
+    if (entry.undone) fail(`“${entry.body}” was already undone`)
+    if (entry.type === 'comment' || entry.type === 'handoff') list.push({ entry, undo: db.unsay(entry), redo: db.resay(entry) })
+    else if (entry.type === 'create') {
+      const it = find(snap.items, entry.item_id) ?? fail(`${entry.item_id} is already gone`)
+      if (subtree(snap.items, it.id).length > 1) fail(`${it.id} has items under it; remove or move those first`)
+      const rows = JSON.parse(await sql($, db.dump([it.id]), t)) as db.Rows
+      list.push({ entry, undo: db.removeRows([it.id]), redo: db.restore(rows) })
+    } else if (entry.undo && entry.redo) list.push({ entry, undo: entry.undo, redo: entry.redo })
+    else fail(`“${entry.body}” on ${entry.item_id} can't be taken back (it was logged before undo existed); change it directly`)
+  }
+  try {
+    await sql($, db.revert(actor, list, stamp), t)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    fail(db.guardReason(message) ?? message)
+  }
+  return `Undid ${[...found].sort((a, b) => a.id - b.id).map(one => `${one.item_id}: ${one.body}`).join('; ')}`
 }
 
 /** The snapshot with `id`'s whole timeline in place of the recent part it carries. */
@@ -673,6 +709,18 @@ async function userAct($: EngineInterface, a: Input) {
     await act($, USER, a)
     // What the person just did there, they have seen.
     if (a.id && a.action !== 'remove') await sql($, db.markSeen(USER, a.id))
+  } catch (err) {
+    $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  await refresh($)
+}
+
+/** The person's Undo: their last change, or the entries `ids` (a line on a card), taken back. */
+async function userUndo($: EngineInterface, ids?: number[]) {
+  try {
+    const target = ids ?? lastChange(await read($, snapshot), USER).map(one => one.id)
+    if (target.length === 0) fail('nothing of yours to undo')
+    $.ui.toast(`roadmap: ${await undo($, USER, target)}`)
   } catch (err) {
     $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -1064,6 +1112,7 @@ export const register: Register = on => {
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
+      undo: ids => void userUndo($, ids),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),
     }
