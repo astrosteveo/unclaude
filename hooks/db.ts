@@ -63,6 +63,9 @@ ${RETARGET}`,
   `CREATE TABLE IF NOT EXISTS releases(version TEXT PRIMARY KEY, tag TEXT, at TEXT NOT NULL, pr INTEGER, notes TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS shipped(version TEXT NOT NULL, item_id TEXT NOT NULL, note TEXT NOT NULL, section TEXT,
   PRIMARY KEY (version, item_id));`,
+  // v9: the inbox: things filed to sort later, kept apart from planned work.
+  `CREATE TABLE IF NOT EXISTS inbox(id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, author TEXT NOT NULL,
+  at TEXT NOT NULL DEFAULT (${NOW}), state TEXT NOT NULL DEFAULT 'open', became TEXT, reason TEXT);`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -209,7 +212,9 @@ export const load = (reader: string) => `SELECT json_object(
       'seen', (SELECT json_group_object(item_id, seen) FROM reads WHERE reader=${q(reader)}),
       'releases', (SELECT json_group_array(json_object('version', version, 'tag', tag, 'at', at, 'pr', pr, 'notes', notes,
         'tasks', json((SELECT json_group_array(json_object('id', item_id, 'note', note, 'section', section)) FROM shipped
-          WHERE shipped.version=releases.version)))) FROM releases));`
+          WHERE shipped.version=releases.version)))) FROM releases),
+      'inbox', (SELECT json_group_array(json_object('id', id, 'title', title, 'body', body, 'author', author, 'at', at,
+        'state', state, 'became', became, 'reason', reason)) FROM (SELECT * FROM inbox ORDER BY CAST(SUBSTR(id, 2) AS INTEGER))));`
 
 /** An item's whole timeline, oldest first, as a JSON list. */
 export const history = (id: string) =>
@@ -230,7 +235,7 @@ export function parseLoad(out: string): Snapshot {
     checklist: (item.checklist ?? []).map(c => ({ ...c, done: Boolean(c.done) })).sort((a, b) => a.n - b.n),
   }))
   const activity = data.activity.map(one => ({ ...one, undoable: Boolean(one.undoable) }))
-  return { items, activity, seen: data.seen ?? {}, releases: data.releases ?? [] }
+  return { items, activity, seen: data.seen ?? {}, releases: data.releases ?? [], inbox: data.inbox ?? [] }
 }
 
 export type NewItem = {
@@ -365,6 +370,7 @@ export const TABLES = {
   reads: ['reader', 'item_id', 'seen'],
   releases: ['version', 'tag', 'at', 'pr', 'notes'],
   shipped: ['version', 'item_id', 'note', 'section'],
+  inbox: ['id', 'title', 'body', 'author', 'at', 'state', 'became', 'reason'],
   counters: ['prefix', 'n'],
 } as const
 
@@ -384,6 +390,7 @@ const OWNED: Record<Exclude<Table, 'counters'>, (list: string) => string> = {
   // A release belongs to no item; what it shipped of an item goes with that item.
   releases: () => 'FALSE',
   shipped: list => `item_id IN (${list})`,
+  inbox: () => 'FALSE',
 }
 
 /** Reads every row on the items `ids` (all of the roadmap, counters too, when absent) as JSON: Rows. */
@@ -488,6 +495,17 @@ export function revert(actor: string, list: { entry: Entry; undo: string; redo: 
 export function atomic(scripts: string[]): string {
   const bodies = scripts.filter(Boolean).map(one => one.split('\n').filter(line => line !== 'BEGIN IMMEDIATE;' && line !== OP && line !== 'COMMIT;').join('\n'))
   return bodies.length ? `${BEGIN}\n${bodies.join('\n')}\nCOMMIT;` : ''
+}
+
+/** Files `title` (and `body`) to the inbox under a fresh I-id; the script answers that id. */
+export function fileInbox(author: string, title: string, body?: string | null): string {
+  const id = `'I'||(SELECT n FROM counters WHERE prefix='I')`
+  return `BEGIN IMMEDIATE;
+INSERT INTO counters(prefix, n) VALUES ('I', COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM inbox), 0) + 1)
+  ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
+INSERT INTO inbox(id, title, body, author) VALUES (${id}, ${q(title)}, ${q(body || null)}, ${q(author)});
+SELECT ${id};
+COMMIT;`
 }
 
 /** Records a release and what it shipped, replacing any record of that version. */

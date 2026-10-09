@@ -26,6 +26,8 @@ const requesting = atom({ plugin: 'roadmap', key: 'requesting' } as const, false
 // The board's filter as typed, and whether its field is open.
 const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
 const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
+// Whether the field filing to the inbox is open.
+const filing = atom({ plugin: 'roadmap', key: 'filing' } as const, false)
 // The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
 const flipped = atom({ plugin: 'roadmap', key: 'flipped' } as const, [] as string[])
 // Whether the board's Done column shows all done work rather than the recent.
@@ -414,7 +416,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship' | 'file'
   id?: string
   ids?: string[] | string
   ref?: string
@@ -857,6 +859,11 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         return notes.length ? `${path} already has the notes of all merged work.` : 'No merged work has a release note yet.'
       await $.fs.write(file, out.text.replace(/\n*$/, '\n'))
       return `Wrote ${out.added.length} note(s) into ${path} under [Unreleased]:\n${out.added.map(one => `- ${one}`).join('\n')}`
+    }
+    case 'file': {
+      const title = a.title?.trim() || fail('file takes a title: what to sort later')
+      const id = await sql($, db.fileInbox(actor, title, a.description?.trim() || null), t)
+      return `Filed ${id} to the inbox: ${title}`
     }
     case 'ship':
       return ship($, snap.items, a.version, a.approved === true && !isSubagent)
@@ -1458,7 +1465,7 @@ async function handToClaude($: EngineInterface, item: Item) {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'roadmap', description: 'Open the project roadmap board' })
+    await $.command.register({ name: 'roadmap', description: 'Open the project roadmap board; /roadmap inbox <text> files something to sort later' })
     await $.tool.register({
       name: 'roadmap',
       isDeferred: false,
@@ -1479,7 +1486,7 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship', 'file'],
             description: [
               'show: the tree, or id: one item with its tasks, activity, commits and PRs. next: what to pick up.',
               'find: kind, status, assignee ("none"), priority, type, labels, under (an id), text.',
@@ -1489,6 +1496,7 @@ export const register: Register = on => {
               'comment: id, body. check: id, items. remove: id (cascade for what is under it).',
               'batch: ops, each { action, ...fields }; an add may carry a ref for later ops. export, import (into an empty roadmap): path.',
               'changelog: merged notes into CHANGELOG.md. ship: version, only when the user asks for a release; again with approved once merged, to tag.',
+              "file: title (and description): to the inbox, for the user to sort; for what you notice but weren't asked to do.",
             ].join(' '),
           },
           id: { type: 'string' },
@@ -1622,7 +1630,14 @@ export const register: Register = on => {
     return next(context.length ? { ...e, context: [...(e.context ?? []), ...context] } : e)
   }).catch(($, e, next) => next(e)) // A brief that fails never holds up a prompt: it goes in as typed.
 
-  on('command.run', { command: 'roadmap' }, async $ => {
+  on('command.run', { command: 'roadmap' }, async ($, e) => {
+    // `/roadmap inbox <text>` files it without opening anything.
+    const filed = /^inbox\s+([\s\S]+)/i.exec(String((e as { args?: string }).args ?? '').trim())?.[1]?.trim()
+    if (filed) {
+      const id = await sql($, db.fileInbox(USER, filed))
+      await refresh($).catch(() => undefined)
+      return { text: `Filed ${id} to the inbox.` }
+    }
     // The pane shows what went wrong, so a failed read still opens it.
     await refresh($).catch(() => undefined)
     const turns = await $.store.get('commentTurns').catch(() => undefined)
@@ -1662,6 +1677,7 @@ export const register: Register = on => {
       isRequesting: await read($, requesting),
       filter: await read($, filter),
       isFiltering: await read($, filtering),
+      isFiling: await read($, filing),
       isDoneOpen: await read($, doneOpen),
       flipped: await read($, flipped),
       draft: await read($, draft),
@@ -1699,6 +1715,8 @@ export const register: Register = on => {
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
+      setFiling: isOn => void update($, filing, () => isOn).then(() => focusOn($, isOn ? 'inbox-input' : 'file')),
+      file: title => void sql($, db.fileInbox(USER, title)).then(() => refresh($)).then(() => $.ui.toast('roadmap: filed to the inbox'), () => undefined),
       toggleFold: id => void update($, flipped, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id])),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),

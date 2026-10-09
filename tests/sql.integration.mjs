@@ -54,7 +54,7 @@ const item = id => load().items.find(one => one.id === id)
 const log = id => load().activity.filter(one => one.item_id === id).sort((a, b) => a.id - b.id).map(one => `${one.author}: ${one.body}`)
 
 test('a fresh database loads empty', () => {
-  assert.deepEqual(load(), { items: [], activity: [], seen: {}, releases: [] })
+  assert.deepEqual(load(), { items: [], activity: [], seen: {}, releases: [], inbox: [] })
 })
 
 test('insert numbers each kind on its own and logs the creation', () => {
@@ -79,7 +79,7 @@ test('remove takes the items and their timelines', () => {
   sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
   sql(db.comment('claude', 'T1', 'note'))
   sql(db.remove(['T1']))
-  assert.deepEqual(load(), { items: [], activity: [], seen: {}, releases: [] })
+  assert.deepEqual(load(), { items: [], activity: [], seen: {}, releases: [], inbox: [] })
 })
 
 test('change writes only what changed, one timeline entry per field', () => {

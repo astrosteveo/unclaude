@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { Activity, Item, Snapshot } from '../types'
+import type { Activity, InboxItem, Item, Snapshot } from '../types'
 import { VERSION } from './db'
 import { paintPane } from './paint'
 import { columnWidths, fitHints, progressBar } from './pane'
@@ -53,7 +53,11 @@ export function bigRoadmap(): Snapshot {
   const activity: Activity[] = items.slice(6, 20).map((one, i) => ({
     id: i + 1, item_id: one.id, author: i % 2 ? 'user' : 'claude', type: 'comment', body: `${titled(i)}, and a second sentence to wrap.`, at: '2026-10-09T10:00:00Z',
   }))
-  return { items, activity, seen: {} }
+  const inbox: InboxItem[] = [1, 2, 3].map(n => ({
+    id: `I${n}`, title: titled(n * 5), body: n === 2 ? `${titled(n)}. `.repeat(6) : null, author: n === 3 ? 'general-purpose-implement-the-login-and-session-flow' : 'user',
+    at: '2026-10-09T10:00:00Z', state: 'open', became: null, reason: null,
+  }))
+  return { items, activity, seen: {}, inbox }
 }
 
 const fake = (stdin: string | undefined, snap: Snapshot) => {
@@ -73,6 +77,7 @@ const VIEWS = [
   ['tree', 'tab-tree', 'row-T5'],
   ['backlog', 'tab-backlog', 'row-T8'],
   ['timeline', 'tab-timeline', 'time-E2'],
+  ['inbox', 'tab-inbox', null],
 ] as const
 
 test('every view fits the pane at narrow and wide widths, with and without a docked card', async ($, on) => {
@@ -94,6 +99,7 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
         const plain = paintPane(await ui.drawn(), width)
         if (SHOW === `${view} ${width}x${height}`) found.push(...plain.lines.map(line => `|${line}`))
         for (const problem of plain.problems) found.push(`${view} ${width}x${height}: ${problem}`)
+        if (row === null) continue
         if (!(await ui.find({ key: row }))) {
           found.push(`${view} ${width}x${height}: no ${row} to open`)
           continue
@@ -209,7 +215,7 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
 test('the header: views as tabs, a progress bar, actions apart; one row wide, two at 84; hints whole, least useful dropped', async ($, on) => {
   expect(progressBar(3, 4, 8)).toEqual({ done: '██████', left: '░░' })
   expect(progressBar(0, 0, 8)).toEqual({ done: '', left: '░░░░░░░░' })
-  const hints = ['Enter opens', 'Tab/↑↓ move', 'v tree', 't p b r d jump to a column', 'n new', 'f filter']
+  const hints = ['Enter opens', 'Tab/↑↓ move', 'v tree', 't p b r d jump to a column', 'n new', 'i file to the inbox', 'f filter']
   expect(fitHints(hints, 200, 1)).toEqual(hints)
   expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v tree'])
   expect(fitHints(hints, 40, 2)).toEqual(hints.slice(0, 5))
@@ -228,7 +234,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     const { lines } = paintPane(await ui.drawn(), width)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Board +v: +Tree +Backlog +Timeline +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Board +v: +Tree +Backlog +Timeline +Inbox 3 +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -333,5 +339,32 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   expect(write).toContain("resolution='wontdo'")
   expect(write).toContain("Won''t do: not needed after all")
   expect(await ui.find({ key: 'wontdo-reason' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('inbox: i files a line from any tab; the Inbox tab lists what waits, with who filed it, and counts it', async ($, on) => {
+  const snap = bigRoadmap()
+  const ran: string[] = []
+  on('process.run', ($, e) => (ran.push(e.init?.stdin ?? ''), { value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  expect((await ui.find({ key: 'tab-inbox' }))?.text).toContain('Inbox 3')
+  expect((await ui.find({ key: 'file' }))?.props.hotkey).toBe('i')
+  await ui.press({ key: 'file' })
+  ran.length = 0
+  await ui.input({ key: 'inbox-input', text: "we should export to CSV" })
+  expect(ran.some(one => one.includes('INSERT INTO inbox(id, title, body, author)') && one.includes("'we should export to CSV'") && one.includes("'user'"))).toBe(true)
+  expect(await ui.find({ key: 'inbox-input' })).toBeUndefined()
+  await ui.press({ key: 'tab-inbox' })
+  const { lines } = paintPane(await ui.drawn(), 120)
+  expect(lines.some(line => /^I1 .* — user, 10-09$/.test(line))).toBe(true)
+  expect(lines.some(line => /^I3 .* — general-purpose-implement-the-login-and-session-flow, 10-09$/.test(line))).toBe(true)
   await ui.unmount()
 })

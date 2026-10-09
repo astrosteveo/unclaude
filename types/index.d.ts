@@ -111,12 +111,18 @@ export type Activity = {
 }
 
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
-export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number>; releases?: Release[] }
+export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number>; releases?: Release[]; inbox?: InboxItem[] }
+
+/**
+ * Something filed to sort later (an idea, a bug, a "we should…"), kept apart from planned work: open
+ * until triaged into a task or epic, or folded into existing work (`became` names it), or dropped (`reason`).
+ */
+export type InboxItem = { id: string; title: string; body: string | null; author: string; at: string; state: 'open' | 'triaged' | 'dropped'; became: string | null; reason: string | null }
 
 /** A version that shipped: when, from which tag and release PR, its notes, and the tasks it carried. */
 export type Release = { version: string; tag: string | null; at: string; pr: number | null; notes: string; tasks: { id: string; note: string; section: Section | null }[] }
 
-export type View = 'board' | 'tree' | 'backlog' | 'timeline'
+export type View = 'board' | 'tree' | 'backlog' | 'timeline' | 'inbox'
 
 /** The new-item form's choices so far; the title is typed last and submits it. */
 export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: string }
@@ -136,6 +142,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null; filing: boolean }
   }
 }

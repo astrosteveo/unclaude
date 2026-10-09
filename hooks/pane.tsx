@@ -11,7 +11,7 @@ export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yello
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog'], ['timeline', 'Timeline']]
+const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog'], ['timeline', 'Timeline'], ['inbox', 'Inbox']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -149,6 +149,8 @@ export type PaneState = {
   filter: string
   /** Whether the filter's field is open. */
   isFiltering: boolean
+  /** Whether the field filing to the inbox is open. */
+  isFiling: boolean
   /** Whether the board's Done column shows all done work, not just the recent. */
   isDoneOpen: boolean
   /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
@@ -201,6 +203,9 @@ export type PaneActions = {
   setRequesting: (isOn: boolean) => void
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
+  setFiling: (isOn: boolean) => void
+  /** Files `title` to the inbox. */
+  file: (title: string) => void
   setDoneOpen: (isOn: boolean) => void
   /** Folds or unfolds a milestone or epic in the tree and the timeline. */
   toggleFold: (id: string) => void
@@ -268,7 +273,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -428,6 +433,10 @@ export function drawPane(
   // The header: the views as tabs with the progress and unread count beside them, then the actions. They
   // share a row where the pane is wide enough; else the actions take a second row of their own.
   const bar = progressBar(doneCount, taskCount, PROGRESS_BAR)
+  // What waits in the inbox to be sorted.
+  const waiting = (snap.inbox ?? []).filter(one => one.state === 'open')
+  // A tab names what waits in it: the inbox its open items.
+  const tabLabel = (view: View, label: string) => (view === 'inbox' && waiting.length ? `${label} ${waiting.length}` : label)
   const header = (
     <Box flexDirection="row" columnGap={3} flexWrap="wrap">
       <Box key="views" flexDirection="row" columnGap={2}>
@@ -438,10 +447,10 @@ export function drawPane(
               hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)}>
               {mode === one ? (
                 <Text inverse bold>
-                  {` ${label} `}
+                  {` ${tabLabel(one, label)} `}
                 </Text>
               ) : (
-                <Text dimColor>{` ${label} `}</Text>
+                <Text dimColor>{` ${tabLabel(one, label)} `}</Text>
               )}
             </Button>
           ))}
@@ -465,6 +474,7 @@ export function drawPane(
         {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
         {/* With a card open, n adds under it (on the card's bar) instead. */}
         {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
+        {!isFiling && <Button key="file" label="File…" hotkey="i" onPress={() => act.setFiling(true)} />}
       </Box>
     </Box>
   )
@@ -474,6 +484,41 @@ export function drawPane(
       <Input key="filter-input" label="Filter" value={filter} autoFocus submitLabel="apply"
         placeholder="@claude #ui p0 bug review under:E3 words…" onSubmit={(value: string) => act.setFilter(value.trim())} />
       <Button key="filter-cancel" label="Cancel" onPress={() => act.setFiltering(false)} />
+    </Box>
+  )
+
+  // Filing to the inbox: a line typed now, sorted later.
+  const fileRow = isFiling && Input && (
+    <Box key="file-row" flexDirection="row" columnGap={1}>
+      <Input key="inbox-input" label="File to the inbox" autoFocus submitLabel="file" placeholder="An idea, a bug, a 'we should…'; Enter files it"
+        onSubmit={(value: string) => {
+          if (value.trim()) act.file(value.trim())
+          act.setFiling(false)
+        }} />
+      <Button key="file-cancel" label="Cancel" onPress={() => act.setFiling(false)} />
+    </Box>
+  )
+  const inboxView = (
+    <Box flexDirection="column">
+      {waiting.length === 0 && <Text dimColor>The inbox is empty. Press i to file something to sort later.</Text>}
+      {waiting.map(one => {
+        const by = ` — ${one.author}, ${one.at.slice(5, 10)}`
+        const room = Math.max(8, width - one.id.length - 1 - by.length)
+        return (
+          <Box key={`inbox-${one.id}`} flexDirection="column">
+            <Text>
+              <Text dimColor>{one.id}</Text> {one.title.length > room ? `${one.title.slice(0, room - 1)}…` : one.title}
+              <Text dimColor>{by}</Text>
+            </Text>
+            {one.body ? (
+              <Text dimColor>
+                {'  '}
+                {one.body.length > width - 3 ? `${one.body.replace(/\s+/g, ' ').slice(0, width - 4)}…` : one.body.replace(/\s+/g, ' ')}
+              </Text>
+            ) : null}
+          </Box>
+        )
+      })}
     </Box>
   )
 
@@ -962,7 +1007,7 @@ export function drawPane(
   const buttonRows = (labels: string[]) => flowRows(labels.map(label => label.length + 4), inner)
   // The header as it wraps over the whole pane, when it shows above an open card.
   const headerRows = flowRows([
-    VIEWS.reduce((sum, [one, label]) => sum + label.length + 2 + (one === nextView ? 3 : 0), 0) + (VIEWS.length - 1) +
+    VIEWS.reduce((sum, [one, label]) => sum + tabLabel(one, label).length + 2 + (one === nextView ? 3 : 0), 0) + (VIEWS.length - 1) +
       2 + PROGRESS_BAR + ` ${doneCount}/${taskCount} done`.length +
       (unreadTotal > 0 ? 2 + `● ${unreadTotal} unread`.length : 0) + (stackRun ? 2 + `Merging a stack: ${stackRun}`.length : 0),
     [
@@ -971,6 +1016,7 @@ export function drawPane(
       ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
       ...(canUndo ? ['Undo'.length + 4] : []),
       ...(!draft && !pick ? ['New'.length + 4] : []),
+      ...(!isFiling ? ['File…'.length + 4] : []),
     ].reduce((sum, one, i) => sum + one + (i ? 1 : 0), 0),
   ].filter(one => one > 0), width, 3)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
@@ -1006,7 +1052,7 @@ export function drawPane(
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
     ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', 'n new', 'f filter', canUndo ? 'z undo' : '']
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
   ).filter(Boolean)
   const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
   const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
@@ -1252,6 +1298,7 @@ export function drawPane(
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
         {!(isCompact && (panel || form)) && header}
         {(!panel || isDocked) && !form && filterRow}
+        {!form && fileRow}
         {!panel && !form && query && !items.some(isShown) && <Text key="no-match" dimColor>Nothing matches the filter.</Text>}
         {offer}
         {trouble ? (
@@ -1266,12 +1313,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView}
+                {mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : backlogView}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView)
+            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : backlogView)
           )
         )}
         {items.length > 0 && !trouble && (

@@ -52,6 +52,7 @@ let dir
 let $
 let call
 let start
+let hooksAll
 
 /** A stand-in for the engine handle: real processes and files in the project, the rest recorded or quiet. */
 function engine(root) {
@@ -107,6 +108,7 @@ async function load(root) {
     return chain
   })
   const tool = hooks.find(one => one.name === 'tool.call' && one.filter?.tool === TOOL).hook
+  hooksAll = hooks
   // A session starting: the poll that loads the board, links commits and PRs, and fills in what's missing.
   start = () => hooks.find(one => one.name === 'session.start').hook($, { source: 'startup', cwd: root }, async e => e)
   // As the model calls it: the main loop, or a subagent by its id.
@@ -390,4 +392,16 @@ test('releases: the first session fills in the record of past releases from CHAN
   await load(dir)
   await start()
   assert.equal(query("SELECT count(*) FROM shipped;"), '1')
+})
+
+test('inbox: the tool files what Claude notices, and /roadmap inbox files what the user types; numbered I1, I2, kept apart from planned work', async () => {
+  assert.equal((await call({ action: 'file' })).ok, false)
+  assert.match(await ok({ action: 'file', title: 'Board flickers on resize', description: 'Seen at 84 columns.' }), /Filed I1 to the inbox: Board flickers on resize$/)
+  const command = hooksAll.find(one => one.name === 'command.run').hook
+  assert.deepEqual(await command($, { command: 'roadmap', args: 'inbox  we should export to CSV' }), { text: 'Filed I2 to the inbox.' })
+  assert.equal(query("SELECT group_concat(id || ' ' || author || ' ' || state || ' ' || COALESCE(body, '-'), '; ') FROM inbox;"),
+    'I1 claude open Seen at 84 columns.; I2 user open -')
+  // Not planned work: no items, nothing on the board or in next.
+  assert.equal(query('SELECT count(*) FROM items;'), '0')
+  assert.match(await ok({ action: 'next' }), /^Nothing/)
 })
