@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkLinks, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, isStale, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -546,4 +546,53 @@ test('review waits on the user: last in next, and listed apart in the brief', as
   expect(text).toContain("Assigned to you (claude):\n- T2")
   expect(text).not.toContain('Assigned to you (claude):\n- T1')
   expect(text).toContain("Waiting on the user's review")
+})
+
+test('leases: a quiet claim reads as stale, is offered by next, named in the brief and marked on the card', async ($, on) => {
+  const now = Date.parse('2026-10-09T12:00:00Z')
+  const some = [
+    item('T1', { status: 'in_progress', assignee: 'explore:a', lease_at: '2026-10-09T11:00:00Z' }),
+    item('T2', { status: 'in_progress', assignee: 'explore:b', lease_at: '2026-10-09T11:45:00Z' }),
+    item('T3', { status: 'in_progress', assignee: 'old', updated_at: '2026-10-09T09:00:00Z' }),
+    item('T4'),
+  ]
+  expect(some.map(one => isStale(one, now))).toEqual([true, false, true, false])
+  expect(isStale(item('T5', { status: 'review', assignee: 'x', lease_at: '2000-01-01T00:00:00Z' }), now)).toBe(false)
+  expect(nextUp(some, 'claude', now).map(one => one.id)).toEqual(['T4', 'T1', 'T3'])
+  expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T4'])
+  const text = brief({ items: some, activity: [], seen: {} }, 'claude', [], now)!
+  expect(text).toContain('Stale claims (holder silent over 30 min; claiming takes one over):\n- T1')
+  expect(text).toContain('In progress by others:\n- T2')
+
+  on('clock.now', () => ({ value: now }) as never)
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect((await ui.find({ key: 'card-T1' }))?.text).toContain('⌛stale')
+  expect((await ui.find({ key: 'card-T2' }))?.text).not.toContain('stale')
+  await ui.unmount()
+})
+
+test('heartbeat: every tracker call renews the caller\'s leases; other tools at most every five minutes', async ($, on) => {
+  let now = Date.parse('2026-10-09T12:00:00Z')
+  const scripts: string[] = []
+  on('clock.now', () => ({ value: now }) as never)
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('tool.call', { tool: 'Read' }, () => ({ result: 'ok' }) as never)
+  const renews = () => scripts.filter(one => one.includes('SET lease_at=') && one.includes("assignee='claude'") && !one.includes('BEGIN')).length
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
+  expect(renews()).toBe(2)
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  expect(renews()).toBe(2)
+  now += 6 * 60_000
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  expect(renews()).toBe(3)
 })

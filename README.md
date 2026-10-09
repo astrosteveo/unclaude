@@ -33,7 +33,7 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 What Claude does with it:
 
 - Gets a short brief at the start of each session (open milestones, its own tasks, anything blocked, and your recent changes), plus a reminder if it has been working without updating its tasks.
-- Claims a task before starting it. A claim is refused if someone else holds the task or the task is still waiting on unfinished work, so parallel agents don't collide. Subagents show up by name, such as `explore:find-auth-handlers`.
+- Claims a task before starting it. A claim is refused if someone else holds the task or the task is still waiting on unfinished work, so parallel agents don't collide. A claim is a lease: the holder's activity keeps it alive, and once an agent has been silent for 30 minutes its claim goes stale (`⌛stale` on the card). Another agent can then take it over, and the takeover is logged. Subagents show up by name, such as `explore:find-auth-handlers`.
 - Can't mark a task done until every item on its checklist is checked, and its done goes to Review for you to approve.
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Puts task ids in commit messages (`T12: ...`). Commits and PRs that name a task show up on it.

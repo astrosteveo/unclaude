@@ -5,7 +5,7 @@ import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } fr
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, checkLinks, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, checkLinks, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -96,6 +96,18 @@ async function actorFor($: EngineInterface, agentId: string | undefined, as: str
   const name = agentName(info.type, info.description, info.teammateId)
   agentNames.set(agentId, name)
   return name
+}
+
+// When each actor's leases were last renewed, so a busy agent renews at most every RENEW_EVERY.
+const renewedAt = new Map<string, number>()
+const RENEW_EVERY = 5 * 60_000
+
+/** Renews `actor`'s leases, unless done within RENEW_EVERY (or `isForced`), in a project with a roadmap. */
+async function heartbeat($: EngineInterface, actor: string, isForced = false) {
+  const now = await $.clock.now()
+  if (!isForced && now - (renewedAt.get(actor) ?? 0) < RENEW_EVERY) return
+  renewedAt.set(actor, now)
+  if (await hasDb($)) await sql($, db.renew(actor))
 }
 
 /** Runs one script through sqlite3 and answers what its last statement printed. */
@@ -299,7 +311,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {
-      const up = nextUp(snap.items, actor).slice(0, 5)
+      const up = nextUp(snap.items, actor, await $.clock.now().catch(() => undefined)).slice(0, 5)
       if (up.length === 0) return 'Nothing open: no tasks assigned to you and no unassigned todo tasks.'
       return up.map(task => detail(snap, task, 5)).join('\n\n')
     }
@@ -398,9 +410,10 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const waiting = waitingOn(snap.items, it)
       if (waiting.length && !a.force)
         fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
-      const holder = (await sql($, db.claim(actor, it.id, a.force === true))) || null
+      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee))) || null
+      const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
       return holder === actor
-        ? `${it.id} is yours (${actor}), in progress.`
+        ? `${it.id} is yours (${actor}), in progress.${tookOver}`
         : fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
     }
     case 'release': {
@@ -612,6 +625,8 @@ export const register: Register = on => {
     try {
       // The person's name is theirs: what they do happens on the board, not through an agent's call.
       if (actor === USER) fail(`"${USER}" is the person at the board; act as yourself`)
+      // Any call to the tracker is a sign of life for the caller's claims.
+      await heartbeat($, actor, true).catch(() => undefined)
       const reply = await act($, actor, a, agentId !== undefined)
       if (!agentId && a.action !== 'show' && a.action !== 'next') hasWorkedSinceUpdate = false
       await refresh($)
@@ -634,6 +649,11 @@ export const register: Register = on => {
   // Note work done in the main loop, for the nudge below.
   on('tool.call', async ($, e, next) => {
     if (!e.agentId && WORK.has(String(e.tool))) hasWorkedSinceUpdate = true
+    // An agent busy with other tools is alive too; renewed now and then rather than on every call.
+    if (String(e.tool) !== TOOL) {
+      const actor = await actorFor($, e.agentId === undefined ? undefined : String(e.agentId), undefined)
+      await heartbeat($, actor).catch(() => undefined)
+    }
     return next(e)
   }).catch(($, e, next) => next(e)) // Bookkeeping only: never stands in the way of a tool.
 
@@ -646,7 +666,7 @@ export const register: Register = on => {
       const newest = snap.activity.reduce((max, one) => Math.max(max, one.id), 0)
       const news = snap.activity.filter(one => one.id > seenActivity && one.author === USER)
       if (seenActivity < 0 || news.length > 0) {
-        const text = brief(snap, CLAUDE, seenActivity < 0 ? [] : news)
+        const text = brief(snap, CLAUDE, seenActivity < 0 ? [] : news, await $.clock.now().catch(() => undefined))
         if (text) context.push(text)
       } else if (hasWorkedSinceUpdate) {
         const open = snap.items.filter(item => item.kind === 'task' && item.assignee === CLAUDE && item.status === 'in_progress')
@@ -734,6 +754,8 @@ export const register: Register = on => {
     const isWide = width >= 100
     // Inline the pane gets about a third of the screen, so an open card there spends as few rows as it can.
     const isCompact = e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'inline'
+    // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
+    const now = await $.clock.now().catch(() => 0)
     const choose = (id: string | null) => () => void open($, id)
     const badge = (item: Item) => {
       const count = unread(snap, item.id, USER).length
@@ -742,6 +764,7 @@ export const register: Register = on => {
 
     const card = (item: Item, room: number) => {
       const who = item.assignee ? ` @${item.assignee}` : ''
+      const stale = isStale(item, now) ? ' ⌛stale' : ''
       const news = badge(item)
       const waits = waitingOn(items, item).map(one => one.id)
       const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
@@ -749,7 +772,7 @@ export const register: Register = on => {
       const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
       const tags = marks(item)
       const tag = tags.length ? ` ${tags.join(' ')}` : ''
-      const extra = item.id.length + who.length + news.length + wait.length + ticks.length + tag.length + 1
+      const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + 1
       const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
       return (
         <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
@@ -762,6 +785,9 @@ export const register: Register = on => {
             {wait}
           </Text>
           <Text color="cyan">{who}</Text>
+          <Text color="red" dimColor>
+            {stale}
+          </Text>
           <Text color="magenta" bold>
             {news}
           </Text>
@@ -1069,6 +1095,7 @@ export const register: Register = on => {
           <Text>
             <Text dimColor>assignee </Text>
             <Text color="cyan">{item.assignee ?? 'none'}</Text>
+            {isStale(item, now) && <Text color="red"> (claim gone stale)</Text>}
             {item.kind === 'task' && <Text dimColor>  priority </Text>}
             {item.kind === 'task' && <Text color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>}
             {item.kind === 'task' && <Text dimColor>  {item.type}</Text>}
