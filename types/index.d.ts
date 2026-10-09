@@ -103,7 +103,7 @@ export type Commit = { hash: string; author: string; date: string; subject: stri
 
 /** A pull request whose title or branch names roadmap ids. */
 /** A pull request whose title or branch names roadmap ids; `checks` sums up its CI. */
-export type Pr = { number: number; title: string; state: string; url: string; ids: string[]; checks: Checks; /** Its head branch. */ branch: string }
+export type Pr = { number: number; title: string; state: string; url: string; ids: string[]; checks: Checks; /** Its head branch. */ branch: string; /** The branch it merges into. */ base: string }
 
 /** A pull request's checks at a glance: none reported, still running, all passed, or one failed. */
 export type Checks = 'none' | 'pending' | 'pass' | 'fail'
