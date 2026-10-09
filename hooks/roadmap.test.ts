@@ -185,6 +185,68 @@ test('the tool description fits the 2048 characters the model reads; each action
     expect(actions).toContain(`${action}:`)
 })
 
+test('batch: ops run in order on a trial copy, then land on the database in one transaction, or not at all', async ($, on) => {
+  const some: Item[] = [item('T1'), item('T2')]
+  const real: string[] = []
+  const tried: string[] = []
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    const stdin = e.init?.stdin ?? ''
+    if (e.argv[0] !== 'sqlite3' || e.argv.some(arg => arg.startsWith('.backup'))) return { value: { ...fakeSqlite('', null), stdout: '' } }
+    const onCopy = String(e.argv.at(-1)).includes('-batch-')
+    if (stdin.startsWith('BEGIN')) (onCopy ? tried : real).push(stdin)
+    if (stdin.includes('INSERT INTO counters')) {
+      if (onCopy) some.push(item('T9', { title: 'New' }))
+      return { value: { ...fakeSqlite('', null), stdout: 'T9' } }
+    }
+    if (stdin.trim() === 'SELECT COALESCE(MAX(id), 0) FROM activity;') return { value: { ...fakeSqlite('', null), stdout: '41' } }
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: 5 }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  const reply = await call({ action: 'batch', ops: [
+    { action: 'update', id: 'T1', status: 'blocked' },
+    { action: 'comment', id: 'T2', body: 'looked at it' },
+    { action: 'add', kind: 'task', title: 'New', ref: 'new' },
+    { action: 'update', id: 'new', priority: 'p1', blocked_by: ['T2'] },
+  ] })
+  expect(reply.split('\n').map(line => line.slice(0, 3))).toEqual(['1. ', '2. ', '3. ', '4. '])
+  expect(reply).toContain('3. Added T9: New')
+  expect(reply).toContain('4. T9: priority → p1; blocked by T2')
+  // Each op ran on the copy; the database got one script holding all of them, guarded by the stamp.
+  expect(tried.length).toBeGreaterThanOrEqual(4)
+  expect(real.length).toBe(1)
+  for (const part of ["status='blocked'", "'looked at it'", 'INSERT INTO items', "priority='p1'", "VALUES ('T2', 'T9')", "!= 41 THEN json("])
+    expect(real[0]).toContain(part)
+  expect(real[0]!.match(/BEGIN/g)?.length).toBe(1)
+  expect(ran.some(argv => argv[0] === 'rm' && String(argv[2]).includes('-batch-'))).toBe(true)
+
+  // An op that fails writes nothing, and says which op it was.
+  real.length = 0
+  const failed = await call({ action: 'batch', ops: [{ action: 'update', id: 'T1', status: 'todo' }, { action: 'comment', id: 'T99', body: 'x' }] })
+  expect(failed).toBe('op 2 (comment T99): No item T99. Nothing in the batch was written.')
+  expect(real).toEqual([])
+  expect(await call({ action: 'batch', ops: [{ action: 'batch', ops: [] }] })).toContain('cannot hold another batch')
+
+  // ids: the same change to several items, as one batch.
+  const both = await call({ action: 'update', ids: ['T1', 'T2'], priority: 'p0' })
+  expect(both).toBe('1. T1: priority → p0\n2. T2: priority → p0')
+  expect(real.length).toBe(1)
+  expect(real[0]).toContain("WHERE id='T1'")
+  expect(real[0]).toContain("WHERE id='T2'")
+
+  // The rules hold op by op: a subagent can't approve inside a batch either.
+  real.length = 0
+  const sub = await call({ action: 'batch', agentId: 'a1', ops: [{ action: 'comment', id: 'T1', body: 'x' }, { action: 'update', id: 'T2', status: 'done', approved: true }] })
+  expect(sub).toContain('op 2 (update T2): Only the user approves')
+  expect(real).toEqual([])
+})
+
 test('subagents get stable, readable names', async () => {
   expect(agentName('Explore', 'Find auth handlers in src/')).toBe('explore:find-auth-handlers-in-src')
   expect(agentName('general-purpose', 'Refactor the very long module name that goes on and on')).toBe('general-purpose:refactor-the-very-long-module')

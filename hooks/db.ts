@@ -80,6 +80,19 @@ export function q(value: string | number | null | undefined): string {
 /** The sqlite3 command line a script runs under; the script goes on stdin. */
 export const ARGV = ['sqlite3', '-batch', '-bail', '-noheader', '-list', '-cmd', '.timeout 5000', DB]
 
+/** The command line for the database at `path` (a batch's trial copy, say) in place of DB. */
+export const argvFor = (path: string) => [...ARGV.slice(0, -1), path]
+
+/** What every write moves on: the newest timeline entry. Unchanged, nobody has written since it was read. */
+export const STAMP = 'SELECT COALESCE(MAX(id), 0) FROM activity;'
+
+/**
+ * A statement that fails, and so (under -bail) rolls back the transaction it is in, unless the database
+ * still reads `stamp`: a batch's writes replay only on the database they were tried against.
+ */
+export const expectStamp = (stamp: string) =>
+  `SELECT CASE WHEN (SELECT COALESCE(MAX(id), 0) FROM activity) != ${Number(stamp) || 0} THEN json('the roadmap changed during the batch') END;`
+
 /** A script's answer: what its last statement printed. */
 export const answer = (stdout: string) => stdout.trim().split('\n').at(-1) ?? ''
 
@@ -224,9 +237,12 @@ export function remove(ids: string[]): string {
   return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nDELETE FROM labels WHERE item_id IN (${list});\nDELETE FROM relations WHERE a IN (${list}) OR b IN (${list});\nCOMMIT;`
 }
 
-/** Scripts built here, run as one transaction: each one's own BEGIN and COMMIT dropped. Empty ones are skipped. */
+/**
+ * Scripts built here, run as one transaction: each one's own BEGIN and COMMIT lines dropped (text never
+ * makes such a line: `q` splices its newlines in as char(10)). Empty ones are skipped.
+ */
 export function atomic(scripts: string[]): string {
-  const bodies = scripts.filter(Boolean).map(one => one.replace(/^BEGIN IMMEDIATE;\n/, '').replace(/\nCOMMIT;$/, ''))
+  const bodies = scripts.filter(Boolean).map(one => one.split('\n').filter(line => line !== 'BEGIN IMMEDIATE;' && line !== 'COMMIT;').join('\n'))
   return bodies.length ? `BEGIN IMMEDIATE;\n${bodies.join('\n')}\nCOMMIT;` : ''
 }
 

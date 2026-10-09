@@ -168,6 +168,25 @@ test("the snapshot carries each item's recent timeline and latest handoff; histo
   assert.equal(said.T2, undefined)
 })
 
+test('a batch replays its writes in one transaction, only on the database it was tried against', () => {
+  sql(db.insert('claude', { kind: 'task', title: 't', parent: null }))
+  const stamp = sql(db.STAMP)
+  // What a batch tried: a claim (whose script ends in a read), a comment and a new task.
+  const writes = [db.claim('claude', 'T1', false), db.comment('claude', 'T1', 'on it'), db.insert('claude', { kind: 'task', title: 'u', parent: null })]
+  const script = db.atomic([db.expectStamp(stamp), ...writes])
+  assert.equal(script.match(/^BEGIN/gm).length, 1)
+  assert.equal(script.match(/^COMMIT;$/gm).length, 1)
+  sql(script)
+  assert.deepEqual([item('T1').assignee, item('T1').status, item('T2').title], ['claude', 'in_progress', 'u'])
+  assert.deepEqual(log('T1').slice(1), ['claude: claimed', 'claude: on it'])
+  // Someone wrote since: the replay rolls back whole.
+  const old = sql(db.STAMP)
+  sql(db.comment('user', 'T1', 'meanwhile'))
+  assert.throws(() => sql(db.atomic([db.expectStamp(old), db.comment('claude', 'T1', 'late'), db.insert('claude', { kind: 'task', title: 'v', parent: null })])))
+  assert.equal(item('T3'), undefined)
+  assert.ok(!log('T1').includes('claude: late'))
+})
+
 test('quotes, newlines and dot-command lines round-trip as plain text', () => {
   const nasty = `it's "quoted"\n.tables\n.shell echo pwned\n'); DROP TABLE items; --\nend`
   sql(db.insert('claude', { kind: 'task', title: nasty, parent: null, description: nasty }))
