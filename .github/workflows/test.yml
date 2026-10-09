@@ -1,0 +1,27 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # The SQL tests lean on Node's own TypeScript stripping and module.registerHooks.
+          node-version: 24
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+      - name: Install Claude Code
+        # Pinned to the build the mod's types were written against; plugin validate and test need no sign-in.
+        run: npm install -g @anthropic-ai/claude-code@2.1.295
+      - name: Validate the mod
+        run: claude plugin validate .
+      - name: Unit and UI tests
+        run: claude plugin test .
+      - name: Generated SQL against a real sqlite3
+        run: node --test tests/sql.integration.mjs
