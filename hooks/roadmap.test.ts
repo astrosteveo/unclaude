@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -30,6 +30,11 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   description: null,
   assignee: null,
   due: null,
+  priority: 'p2',
+  type: 'feature',
+  lease_at: null,
+  labels: [],
+  relations: [],
   blocked_by: [],
   checklist: [],
   created_at: '2026-10-09T00:00:00Z',
@@ -132,12 +137,12 @@ test('the board draws on terminal and desktop, and a card opens and closes from 
       })
       expect(await ui.find({ key: 'col-todo-head' })).toBeDefined()
       expect((await ui.find({ key: 'card-T2' }))?.text).toContain('● 1')
-      expect((await ui.find({ text: /t p b d jump to a column/ }))).toBeDefined()
+      expect((await ui.find({ text: /t p b r d jump to a column/ }))).toBeDefined()
       await ui.press({ key: 'card-T2' })
       expect(await ui.find({ key: 'hand' })).toBeDefined()
       // The detail view stands in for the board, so it is never pushed off screen by a long column.
       expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
-      expect((await ui.find({ text: /1–4 status/ }))).toBeDefined()
+      expect((await ui.find({ text: /1–5 status/ }))).toBeDefined()
       await ui.press({ key: 'close' })
       expect(await ui.find({ key: 'hand' })).toBeUndefined()
       expect(await ui.find({ key: 'card-T2' })).toBeDefined()
@@ -412,4 +417,133 @@ test('inline, an open card folds the info line into its title and borrows the ta
     expect(await ui.find({ key: 'tab-board' })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('priority and type: next takes higher priority first, and only what differs from the defaults is shown', async ($, on) => {
+  const some = [
+    item('T1', { due: '2026-10-10' }),
+    item('T2', { priority: 'p0', type: 'bug' }),
+    item('T3', { priority: 'p3', due: '2026-10-01' }),
+    item('T4', { priority: 'p1', type: 'chore' }),
+  ]
+  expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T2', 'T4', 'T1', 'T3'])
+  const lines = outline(some).split('\n')
+  expect(lines).toContain('T1 ○ todo T1 title  (due 2026-10-10)')
+  expect(lines).toContain('T2 ○ todo T2 title  (p0, bug)')
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const bad = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'update', id: 'T1', priority: 'high' } as never)
+  expect(bad.deny).toContain('priority must be one of p0, p1, p2, p3')
+  const wrong = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'add', kind: 'task', title: 'x', type: 'story' } as never)
+  expect(wrong.deny).toContain('type must be one of feature, bug, chore')
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'update', id: 'T1', priority: 'p1', type: 'bug' } as never)
+  expect(scripts.some(one => one.includes("priority='p1'") && one.includes("type='bug'") && one.includes('priority → p1'))).toBe(true)
+
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('p0 bug')
+  expect((await ui.find({ key: 'card-T1' }))?.text).not.toContain('p2')
+  await ui.unmount()
+})
+
+test('labels and links: shown from both ends, in the outline, the detail and on the card', async ($, on) => {
+  const some = [
+    item('T1', { labels: ['ui'], relations: [{ type: 'relates', id: 'T2' }] }),
+    item('T2'),
+    item('T3', { status: 'done', relations: [{ type: 'duplicates', id: 'T1' }] }),
+  ]
+  expect(linksOf(some, some[1]!)).toEqual({ relates: ['T1'], duplicateOf: [], duplicatedBy: [] })
+  expect(linksOf(some, some[0]!)).toEqual({ relates: ['T2'], duplicateOf: [], duplicatedBy: ['T3'] })
+  expect(() => checkLinks(some, 'T1', ['T1'])).toThrow('cannot link to itself')
+  expect(() => checkLinks(some, 'T1', ['T9'])).toThrow('No item T9')
+  expect(outline(some).split('\n')[0]).toBe('T1 ○ todo T1 title  (#ui)')
+  const text = detail({ items: some, activity: [], seen: {} }, some[0]!)
+  expect(text).toContain('Duplicated by:\n  T3')
+  expect(text).toContain('Related:\n  T2')
+
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ key: 'head-links' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /relates to ○ T2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /duplicated by ● T3/ })).toBeDefined()
+  expect(await ui.find({ text: /#ui/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('review: an agent\'s done goes to review; only the person, or their approval passed on, closes it', async ($, on) => {
+  const some = [
+    item('T1', { status: 'in_progress', assignee: 'claude' }),
+    item('T2', { status: 'review', assignee: 'claude', checklist: [{ n: 1, text: 'works', done: true }] }),
+  ]
+  const scripts: string[] = []
+  let submitted = ''
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('prompt.submit', ($, e) => ((submitted = e.text), { text: e.text, origin: e.origin }))
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const wrote = (needle: string) => scripts.some(one => one.includes(needle))
+
+  const toReview = await call({ action: 'update', id: 'T1', status: 'done' })
+  expect(String(toReview.result)).toContain("waiting on the user's approval")
+  expect(wrote("status='review'")).toBe(true)
+  expect(wrote("status='done'")).toBe(false)
+  expect((await call({ action: 'update', id: 'T1', status: 'done', approved: true, agentId: 'a1' })).deny).toContain('Only the user approves')
+  expect((await call({ action: 'update', id: 'T1', status: 'done', as: 'user' })).deny).toContain('act as yourself')
+  expect((await call({ action: 'update', id: 'T1', status: 'in_progress', approved: true })).deny).toContain('approved goes with status: done')
+  const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true })
+  expect(String(approved.result)).toContain('approved by the user')
+  expect(wrote("status='done'")).toBe(true)
+
+  scripts.length = 0
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect(await ui.find({ key: 'col-review-head' })).toBeDefined()
+  expect(await ui.find({ key: 'card-T2' })).toBeDefined()
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ text: /a approve · c request changes/ })).toBeDefined()
+  await ui.press({ key: 'approve' })
+  expect(wrote("status='done'")).toBe(true)
+  await ui.press({ key: 'request' })
+  expect(await ui.find({ key: 'approve' })).toBeUndefined()
+  await ui.input({ key: 'changes', text: 'handle the empty state' } as never)
+  expect(wrote('Changes requested: handle the empty state')).toBe(true)
+  expect(wrote("status='in_progress'")).toBe(true)
+  expect(submitted).toContain('sent roadmap task T2 (T2 title) back from review: handle the empty state')
+  expect(await ui.find({ key: 'approve' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('review waits on the user: last in next, and listed apart in the brief', async () => {
+  const some = [
+    item('T1', { status: 'review', assignee: 'claude' }),
+    item('T2', { status: 'in_progress', assignee: 'claude' }),
+    item('E1', { kind: 'epic' }),
+    item('T3', { parent: 'E1', status: 'review' }),
+    item('T4', { parent: 'E1', status: 'done' }),
+  ]
+  expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T2', 'T1'])
+  expect(statusOf(some, some[2]!)).toBe('in_progress')
+  const text = brief({ items: some, activity: [], seen: {} }, 'claude', [])!
+  expect(text).toContain("Assigned to you (claude):\n- T2")
+  expect(text).not.toContain('Assigned to you (claude):\n- T1')
+  expect(text).toContain("Waiting on the user's review")
 })

@@ -22,17 +22,20 @@ Answer `y` to add the marketplace, then pick a scope (user scope makes it availa
 
 Ask Claude to plan something, for example *"plan the v2 release as milestones, epics and tasks, with a checklist on each task"*, and then:
 
-- **`/roadmap`** opens the board. Columns are Todo, In progress, Blocked and Done, and a Tree tab shows the full hierarchy.
-- **Keys:** `t` `p` `b` `d` jump to a column, Enter opens a card, `1`–`4` set its status, `h` hands it to Claude, `m`/`u` assign it to you or unassign it, `x` closes it, and `v` switches between board and tree.
+- **`/roadmap`** opens the board. Columns are Todo, In progress, Blocked, Review and Done, and a Tree tab shows the full hierarchy.
+- **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `h` hands it to Claude, `m`/`u` assign it to you or unassign it, `x` closes it, and `v` switches between board and tree.
 - **Comments** you post on a card reach Claude with your next prompt. A `● N` badge marks cards with comments you haven't read yet.
+- **Review:** when Claude or a subagent finishes a task, it goes to Review, not Done. Open the card and press `a` to approve it, or `c` to send it back with what needs changing (Claude picks it up again). You can also tell Claude in chat that it's approved.
+- **Priority and type:** each task has a priority (`p0` urgent to `p3` can wait, `p2` by default) and a type (feature, bug or chore). Cards show them when they differ from the defaults, with `p0` in red and `p1` in yellow.
+- **Labels and links:** tasks can carry labels (`#ui`, `#auth`), relate to other items (shown on both), or be marked a duplicate of another, which closes them. They show in the card's Links section.
 - **The band** above the prompt shows what an agent is working on. Press it to open that task.
 
 What Claude does with it:
 
 - Gets a short brief at the start of each session (open milestones, its own tasks, anything blocked, and your recent changes), plus a reminder if it has been working without updating its tasks.
 - Claims a task before starting it. A claim is refused if someone else holds the task or the task is still waiting on unfinished work, so parallel agents don't collide. Subagents show up by name, such as `explore:find-auth-handlers`.
-- Can't mark a task done until every item on its checklist is checked.
-- Uses `next` to pick up the next task that's ready to start.
+- Can't mark a task done until every item on its checklist is checked, and its done goes to Review for you to approve.
+- Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Puts task ids in commit messages (`T12: ...`). Commits and PRs that name a task show up on it.
 
 ## How it's stored

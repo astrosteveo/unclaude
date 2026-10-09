@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Item, Kind, Refs, Snapshot, Status, View } from '../types'
+import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, checkLinks, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -22,6 +22,8 @@ const selected = atom({ plugin: 'roadmap', key: 'selected' } as const, null as s
 // Whether to offer adding the database to .gitignore (see `checkIgnore`).
 const ignoreOffer = atom({ plugin: 'roadmap', key: 'ignoreOffer' } as const, false)
 let isIgnoreChecked = false
+// Whether the open card is asking what needs changing before sending it back from review.
+const requesting = atom({ plugin: 'roadmap', key: 'requesting' } as const, false)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -71,7 +73,9 @@ export const MISSING_SQLITE =
   'sqlite3 is not installed or not on PATH, and the roadmap is stored with it. Install it ' +
   '(Arch: pacman -S sqlite; Debian/Ubuntu: apt install sqlite3; Fedora: dnf install sqlite; macOS: brew install sqlite), then run /roadmap again.'
 
-const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', done: 'green' }
+const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
+// Urgent priorities stand out on a card; the rest of the marks read dim.
+const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 
 // The main loop's view of the roadmap: the newest activity it has been told about, and whether it
 // has done work since it last touched the roadmap. Module state: a reload starts both over.
@@ -227,12 +231,18 @@ type Input = {
   parent?: string
   assignee?: string
   due?: string
+  priority?: Priority
+  type?: IssueType
+  labels?: string[] | string
+  relates_to?: string[] | string
+  duplicates?: string
   body?: string
   blocked_by?: string[] | string
   checklist?: string[] | string
   items?: number[] | string
   done?: boolean
   as?: string
+  approved?: boolean
   force?: boolean
   cascade?: boolean
 }
@@ -268,11 +278,17 @@ const idList = (value: unknown) => listOf(value, /,/)
 /** `check` entry numbers. */
 const numbers = (value: unknown) => listOf(value, /,/).map(Number)
 
-async function act($: EngineInterface, actor: string, a: Input): Promise<string> {
+/**
+ * Carries out one roadmap action for `actor`. Agents don't close their own work: their `done` goes to
+ * review, and only the person (on the board) or the main loop passing on their approval sets done.
+ */
+async function act($: EngineInterface, actor: string, a: Input, isSubagent = false): Promise<string> {
   const snap = await refresh($)
   const item = find(snap.items, a.id)
   const need = () => item ?? fail(a.id ? `No item ${a.id}` : 'id is required')
   if (a.status && !STATUSES.includes(a.status)) fail(`status must be one of ${STATUSES.join(', ')}`)
+  if (a.priority && !PRIORITIES.includes(a.priority)) fail(`priority must be one of ${PRIORITIES.join(', ')}`)
+  if (a.type && !TYPES.includes(a.type)) fail(`type must be one of ${TYPES.join(', ')}`)
 
   switch (a.action) {
     case 'show':
@@ -301,13 +317,21 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
         due: a.due,
         status: a.status,
         assignee: a.assignee,
+        priority: a.priority || undefined,
+        type: a.type || undefined,
       }))
       const checklist = a.checklist === undefined ? [] : texts(a.checklist)
       if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
-      if (blockers.length || checklist.length) {
+      const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
+      const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
+      const tags = a.labels === undefined ? [] : idList(a.labels)
+      if (blockers.length || checklist.length || related.length || original.length || tags.length) {
         const created = find((await refresh($)).items, id) as Item
         if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
         if (checklist.length) await sql($, db.setChecklist(actor, created, checklist).script)
+        if (tags.length) await sql($, db.setLabels(actor, created, tags).script)
+        if (related.length) await sql($, db.setRelations(actor, created, 'relates', related).script)
+        if (original.length) await sql($, db.setRelations(actor, created, 'duplicates', original).script)
       }
       return `Added ${id}: ${a.title!.trim()}${blockers.length ? `, blocked by ${blockers.join(', ')}` : ''}`
     }
@@ -321,12 +345,19 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
           `${it.id} has ${open.length} unchecked item(s): ${open.map(c => `${c.n}. ${c.text}`).join('; ')}. ` +
             'Check them (action check), or pass force: true to close it anyway.',
         )
+      if (a.approved && actor === USER) a.approved = undefined
+      if (a.approved && isSubagent) fail('Only the user approves work; a subagent sets done and it goes to review.')
+      if (a.approved && a.status !== 'done') fail('approved goes with status: done')
+      // An agent's done waits on the user's approval in review; the person's own is final.
+      const isToReview = a.status === 'done' && actor !== USER && !a.approved && it.kind === 'task'
       const { script, notes } = db.change(actor, it, {
         title: a.title?.trim() || undefined,
-        status: a.status,
+        status: isToReview ? 'review' : a.status,
         description: a.description === undefined ? undefined : a.description || null,
         due: a.due === undefined ? undefined : a.due || null,
         assignee: a.assignee === undefined ? undefined : a.assignee || null,
+        priority: a.priority || undefined,
+        type: a.type || undefined,
         parent: a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id),
       })
       if (script) await sql($, script)
@@ -341,6 +372,24 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
         if (links.script) await sql($, links.script)
         notes.push(...links.notes)
       }
+      if (a.labels !== undefined) {
+        const set = db.setLabels(actor, it, idList(a.labels))
+        if (set.script) await sql($, set.script)
+        notes.push(...set.notes)
+      }
+      if (a.relates_to !== undefined) {
+        const set = db.setRelations(actor, it, 'relates', checkLinks(snap.items, it.id, idList(a.relates_to)))
+        if (set.script) await sql($, set.script)
+        notes.push(...set.notes)
+      }
+      if (a.duplicates !== undefined) {
+        const set = db.setRelations(actor, it, 'duplicates', checkLinks(snap.items, it.id, idList(a.duplicates)))
+        if (set.script) await sql($, set.script)
+        notes.push(...set.notes)
+      }
+      if (isToReview)
+        notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
+      else if (a.approved) notes.push('approved by the user')
       return notes.length ? `${it.id}: ${notes.join('; ')}` : `${it.id}: nothing changed`
     }
     case 'claim': {
@@ -423,7 +472,7 @@ export function wrap(text: string, width: number): string[] {
   return out
 }
 
-const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', done: 'd' }
+const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', review: 'r', done: 'd' }
 
 // The inline height an open card asks for: more than most cards need; the layout caps it.
 const CARD_ROWS = 40
@@ -442,6 +491,7 @@ async function closeDetail($: EngineInterface, id: string) {
 async function open($: EngineInterface, id: string | null) {
   await update($, selected, () => id)
   await update($, scrolled, () => 0)
+  await update($, requesting, () => false)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -461,6 +511,20 @@ async function open($: EngineInterface, id: string | null) {
 /** Opens the board on one item, as pressing its card would. */
 async function showItem($: EngineInterface, id: string) {
   await open($, id)
+}
+
+/** Sends a task back from review with what needs changing, and puts its agent back on it. */
+async function requestChanges($: EngineInterface, item: Item, what: string) {
+  const body = what.trim()
+  if (!body) return
+  await update($, requesting, () => false)
+  await userAct($, { action: 'comment', id: item.id, body: `Changes requested: ${body}` })
+  await userAct($, { action: 'update', id: item.id, status: 'in_progress' })
+  await focusOn($, 'hand')
+  if (item.assignee && item.assignee !== USER)
+    await $.prompt.submit({
+      text: `The user sent roadmap task ${item.id} (${item.title}) back from review: ${body}. Read it with the roadmap tool (show ${item.id}), make the changes, comment, and set it done again when finished.`,
+    })
 }
 
 async function handToClaude($: EngineInterface, item: Item) {
@@ -483,10 +547,12 @@ export const register: Register = on => {
         "The project's shared tracker, a lightweight Jira kept in .claude/roadmap.db that you, the user and other agents all work from.",
         'Hierarchy: milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
         'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by due date),',
-        'add (kind, title; optional parent, description, due, status, assignee), update (id plus any field; empty string clears),',
+        'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
         'claim (id: take a task and start it; refused when someone else holds it or it waits on unfinished tasks), release (id), comment (id, body), remove (id; cascade for children).',
-        'Dependencies: blocked_by lists the tasks a task waits on. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
+        'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
+        'Review: setting a task done moves it to review, where the user approves it on the board. Pass approved: true with status done only when',
+        "the user has told you in this conversation that the work is approved; subagents can't.",
         'Name the task id in commit messages and PR titles or branches (e.g. "T12: ..."); show lists the commits and PRs that name it.',
         'Milestone and epic status roll up from their tasks. Working rules: claim a task before you start it; comment on decisions,',
         'findings and handoff notes; mark it done when finished, or blocked with a comment saying why. Subagents are named from their type and task automatically.',
@@ -513,8 +579,17 @@ export const register: Register = on => {
           },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Tags such as "ui" or "auth" (add/update); replaces the list, [] clears.' },
+          relates_to: {
+            type: 'array', items: { type: 'string' },
+            description: 'Items this one is related to, shown on both (add/update); replaces the list, [] clears.',
+          },
+          duplicates: { type: 'string', description: 'The item this one duplicates (add/update); closes this task as done. Empty string clears.' },
+          priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3 can wait; p2 is the default. next picks higher priority first.' },
+          type: { type: 'string', enum: TYPES, description: 'What sort of work: feature (default), bug or chore' },
           body: { type: 'string', description: 'Comment text (comment)' },
           as: { type: 'string', description: `Who is acting, to override the default: "${CLAUDE}", or a subagent's name from its type and task.` },
+          approved: { type: 'boolean', description: 'update with status done: the user has explicitly approved this work in chat, so it skips review. Never on your own judgment.' },
           force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
           cascade: { type: 'boolean', description: 'remove: also remove everything under the item' },
         },
@@ -535,7 +610,9 @@ export const register: Register = on => {
     const a = input as unknown as Input
     const actor = await actorFor($, agentId === undefined ? undefined : String(agentId), a.as)
     try {
-      const reply = await act($, actor, a)
+      // The person's name is theirs: what they do happens on the board, not through an agent's call.
+      if (actor === USER) fail(`"${USER}" is the person at the board; act as yourself`)
+      const reply = await act($, actor, a, agentId !== undefined)
       if (!agentId && a.action !== 'show' && a.action !== 'next') hasWorkedSinceUpdate = false
       await refresh($)
       return { result: reply }
@@ -650,9 +727,11 @@ export const register: Register = on => {
     const trouble = await read($, problem)
     const known = await read($, refs)
     const isIgnoreOffered = await read($, ignoreOffer)
+    const isRequesting = await read($, requesting)
     const items = snap.items
     const width = (e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 100
-    const isWide = width >= 90
+    // Five columns side by side need room for a readable title in each; narrower, they stack.
+    const isWide = width >= 100
     // Inline the pane gets about a third of the screen, so an open card there spends as few rows as it can.
     const isCompact = e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'inline'
     const choose = (id: string | null) => () => void open($, id)
@@ -668,11 +747,16 @@ export const register: Register = on => {
       const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
       const list = item.checklist ?? []
       const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
-      const extra = item.id.length + who.length + news.length + wait.length + ticks.length + 1
+      const tags = marks(item)
+      const tag = tags.length ? ` ${tags.join(' ')}` : ''
+      const extra = item.id.length + who.length + news.length + wait.length + ticks.length + tag.length + 1
       const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
       return (
         <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
           <Text dimColor>{item.id}</Text> {title}
+          <Text color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
+            {tag}
+          </Text>
           <Text dimColor>{ticks}</Text>
           <Text color="yellow" dimColor>
             {wait}
@@ -705,7 +789,7 @@ export const register: Register = on => {
     )
 
     const tasks = items.filter(item => item.kind === 'task').sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-    const colWidth = Math.floor((width - 3) / 4)
+    const colWidth = Math.floor((width - (STATUSES.length - 1)) / STATUSES.length)
     const board = (
       <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? 1 : 0}>
         {STATUSES.map(status => {
@@ -805,7 +889,21 @@ export const register: Register = on => {
           ) })),
       ])
       const linked = refsFor(items, known, item)
+      const links = linksOf(items, item)
+      const linkRow = (key: string, verb: string, id: string) => {
+        const other = find(items, id)
+        const st = other ? statusOf(items, other) : 'todo'
+        return { key: `${key}-${id}`, rows: tall(`${verb} ${id} ${other?.title ?? ''}`), node: (
+          <Text key={`${key}-${id}`}>
+            <Text dimColor>{verb} </Text>
+            <Text color={COLOR[st]}>{GLYPH[st]}</Text> {id} {other?.title ?? '(removed)'}
+          </Text>
+        ) }
+      }
       section('links', 'Links', [
+        ...links.duplicateOf.map(id => linkRow('dup', 'duplicate of', id)),
+        ...links.duplicatedBy.map(id => linkRow('dupby', 'duplicated by', id)),
+        ...links.relates.map(id => linkRow('rel', 'relates to', id)),
         ...linked.prs.slice(0, 3).map(pr => ({ key: `pr-${pr.number}`, rows: tall(`PR #${pr.number} [${pr.state}] ${pr.title}`), node: (
           <Text key={`pr-${pr.number}`}>
             <Text dimColor>PR </Text>#{pr.number}{' '}
@@ -857,10 +955,36 @@ export const register: Register = on => {
     // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
     // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
-    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
+    const tagLine = item?.labels?.length ? item.labels.map(one => `#${one}`).join(' ') : ''
+    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', tagLine, item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
     const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 : 0)
     // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
-    const fixed = (isCompact ? 0 : 1) + 2 + titleRows + 2 + (inner < 56 ? 1 : 0) + (isCompact ? 0 : 1) + 1 + 1
+    // The bar's two rows of buttons, as they wrap at this width ("[ label ]", one column apart).
+    const buttonRows = (labels: string[]) => {
+      let lines = 1
+      let used = 0
+      for (const label of labels) {
+        const w = label.length + 4
+        if (used > 0 && used + 1 + w > inner) (lines++, (used = w))
+        else used += (used > 0 ? 1 : 0) + w
+      }
+      return lines
+    }
+    const isReview = item?.kind === 'task' && item.status === 'review'
+    const barRows = !item
+      ? 0
+      : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
+        (isRequesting ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), 'Hand to Claude', 'Assign me', 'Unassign', 'Close']))
+    const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
+    const footer = (item
+      ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', 'm/u assign', 'x close']
+      : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', mode === 'board' ? 't p b r d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
+    )
+      .filter(Boolean)
+      .join(' · ')
+    // The footer is as wide as the pane, not the panel inside it.
+    const footerRows = Math.max(1, Math.ceil(footer.length / Math.max(1, width)))
+    const fixed = (isCompact ? 0 : 1) + 2 + titleRows + barRows + (isCompact ? 0 : tall(info)) + footerRows + 1
     const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
     const total = sections.reduce((sum, row) => sum + row.rows, 0)
     const isScrolling = space < total
@@ -899,7 +1023,7 @@ export const register: Register = on => {
         {/* The bar sits right under the title on every card, so its buttons never move with the content. */}
         <Box key="bar" flexDirection="column">
           {item.kind === 'task' ? (
-            <Box key="status-row" flexDirection="row" gap={1} flexWrap="wrap">
+            <Box key="status-row" flexDirection="row" columnGap={1} flexWrap="wrap">
               {STATUSES.map((one, i) => (
                 <Button key={`set-${one}`} label={item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]}
                   hotkey={String(i + 1)} variant={item.status === one ? 'primary' : 'secondary'}
@@ -918,17 +1042,37 @@ export const register: Register = on => {
               </Text>
             </Box>
           )}
-          <Box key="action-row" flexDirection="row" gap={1} flexWrap="wrap">
+          {isRequesting && Input ? (
+            <Box key="changes-row" flexDirection="row" gap={1}>
+              <Input key="changes" label="Changes" placeholder="What needs changing? Enter sends it back" autoFocus
+                submitLabel="send back" onSubmit={(value: string) => void requestChanges($, item, value)} />
+              <Button key="changes-cancel" label="Cancel" onPress={() => void update($, requesting, () => false)} />
+            </Box>
+          ) : (
+          <Box key="action-row" flexDirection="row" columnGap={1} flexWrap="wrap">
+            {item.kind === 'task' && item.status === 'review' && (
+              <Button key="approve" label="Approve" hotkey="a" variant="primary"
+                onPress={() => void userAct($, { action: 'update', id: item.id, status: 'done' })} />
+            )}
+            {item.kind === 'task' && item.status === 'review' && Input && (
+              <Button key="request" label="Request changes" hotkey="c"
+                onPress={() => void update($, requesting, () => true).then(() => focusOn($, 'changes'))} />
+            )}
             <Button key="hand" label="Hand to Claude" hotkey="h" onPress={() => void handToClaude($, item)} />
             <Button key="mine" label="Assign me" hotkey="m" onPress={() => void userAct($, { action: 'update', id: item.id, assignee: USER })} />
             <Button key="unassign" label="Unassign" hotkey="u" onPress={() => void userAct($, { action: 'update', id: item.id, assignee: '' })} />
             <Button key="close" label="Close" hotkey="x" onPress={() => void closeDetail($, item.id)} />
           </Box>
+          )}
         </Box>
         {!isCompact && (
           <Text>
             <Text dimColor>assignee </Text>
             <Text color="cyan">{item.assignee ?? 'none'}</Text>
+            {item.kind === 'task' && <Text dimColor>  priority </Text>}
+            {item.kind === 'task' && <Text color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>}
+            {item.kind === 'task' && <Text dimColor>  {item.type}</Text>}
+            {tagLine && <Text color="blue">  {tagLine}</Text>}
             {item.due && <Text dimColor>  due {item.due}</Text>}
             {where && <Text dimColor>  in {where}</Text>}
           </Text>
@@ -962,12 +1106,7 @@ export const register: Register = on => {
         )}
         {items.length > 0 && !trouble && (
           <Text dimColor>
-            {(item
-              ? ['Tab/↑↓ move', item.kind === 'task' ? '1–4 status' : '', 'h hand to Claude', 'm/u assign', 'x close']
-              : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', mode === 'board' ? 't p b d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
-            )
-              .filter(Boolean)
-              .join(' · ')}
+            {footer}
           </Text>
         )}
       </Box>

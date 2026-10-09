@@ -1,4 +1,4 @@
-import type { Check, Item, Kind, Snapshot, Status } from '../types'
+import type { Check, IssueType, Item, Kind, Priority, Relation, Snapshot, Status } from '../types'
 import { PREFIX } from './model'
 
 export const DB = '.claude/roadmap.db'
@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS checks(item_id TEXT NOT NULL, n INTEGER NOT NULL, tex
   done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (item_id, n));
 CREATE TABLE IF NOT EXISTS reads(reader TEXT NOT NULL, item_id TEXT NOT NULL, seen INTEGER NOT NULL,
   PRIMARY KEY (reader, item_id));`,
+  // v2: Jira-style fields, claim leases, labels, and links other than blocked-by. ALTER TABLE is not
+  // idempotent, so a session that loses the race to migrate fails here and finds the version current.
+  `ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'p2';
+ALTER TABLE items ADD COLUMN type TEXT NOT NULL DEFAULT 'feature';
+ALTER TABLE items ADD COLUMN lease_at TEXT;
+CREATE TABLE IF NOT EXISTS labels(item_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY (item_id, label));
+CREATE TABLE IF NOT EXISTS relations(a TEXT NOT NULL, b TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY (a, b, type));`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -75,7 +82,9 @@ const activity = (id: string, author: string, type: string, body: string) =>
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
         'parent', parent, 'description', description, 'assignee', assignee, 'due', due,
-        'created_at', created_at, 'updated_at', updated_at,
+        'priority', priority, 'type', type, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
+        'labels', json((SELECT json_group_array(label) FROM (SELECT label FROM labels WHERE item_id=items.id ORDER BY label))),
+        'relations', json((SELECT json_group_array(json_object('type', type, 'id', b)) FROM relations WHERE a=items.id)),
         'blocked_by', json((SELECT json_group_array(blocker) FROM links WHERE blocked=items.id)),
         'checklist', json((SELECT json_group_array(json_object('n', n, 'text', text, 'done', done))
           FROM checks WHERE item_id=items.id)))) FROM items),
@@ -88,6 +97,8 @@ export function parseLoad(out: string): Snapshot {
   // sqlite3 hands back `done` as 0/1, and json_group_array keeps no order of its own.
   const items = data.items.map(item => ({
     ...item,
+    labels: item.labels ?? [],
+    relations: item.relations ?? [],
     checklist: (item.checklist ?? []).map(c => ({ ...c, done: Boolean(c.done) })).sort((a, b) => a.n - b.n),
   }))
   return { items, activity: data.activity, seen: data.seen ?? {} }
@@ -101,6 +112,8 @@ export type NewItem = {
   due?: string
   status?: Status
   assignee?: string
+  priority?: Priority
+  type?: IssueType
 }
 
 /**
@@ -115,15 +128,15 @@ export function insert(actor: string, item: NewItem): string {
 INSERT INTO counters(prefix, n) VALUES (${q(prefix)},
   COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM items WHERE SUBSTR(id, 1, 1)=${q(prefix)}), 0) + 1)
   ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
-INSERT INTO items(id, kind, title, status, parent, description, assignee, due) VALUES (${id}, ${q(item.kind)},
+INSERT INTO items(id, kind, title, status, parent, description, assignee, due, priority, type) VALUES (${id}, ${q(item.kind)},
   ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.description || null)},
-  ${q(item.assignee || null)}, ${q(item.due || null)});
+  ${q(item.assignee || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
 INSERT INTO activity(item_id, author, type, body) VALUES (${id}, ${q(actor)}, 'create', ${q(created)});
 SELECT ${id};
 COMMIT;`
 }
 
-export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due'>>
+export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due' | 'priority' | 'type'>>
 
 /** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
@@ -171,7 +184,7 @@ export const comment = (actor: string, id: string, body: string) =>
 
 export function remove(ids: string[]): string {
   const list = ids.map(q).join(', ')
-  return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nCOMMIT;`
+  return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nDELETE FROM labels WHERE item_id IN (${list});\nDELETE FROM relations WHERE a IN (${list}) OR b IN (${list});\nCOMMIT;`
 }
 
 /** Marks everything on an item as seen by `reader`, up to its newest activity. */
@@ -192,6 +205,51 @@ ${dropped.map(id => `DELETE FROM links WHERE blocker=${q(id)} AND blocked=${q(it
 ${added.map(id => `INSERT OR IGNORE INTO links(blocker, blocked) VALUES (${q(id)}, ${q(item.id)});`).join('\n')}
 ${notes.map(note => activity(item.id, actor, 'edit', note)).join('\n')}
 UPDATE items SET updated_at=${NOW} WHERE id=${q(item.id)};
+COMMIT;`,
+    notes,
+  }
+}
+
+/** A label as stored: lowercase, words joined by hyphens, no leading `#`. */
+export const label = (text: string) => text.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-')
+
+/** The script setting an item's labels to exactly `next`, logging the new set; none when unchanged. */
+export function setLabels(actor: string, item: Item, next: string[]): { script: string; notes: string[] } {
+  const wanted = [...new Set(next.map(label).filter(Boolean))].sort()
+  if (wanted.join('\n') === [...item.labels].sort().join('\n')) return { script: '', notes: [] }
+  const notes = [wanted.length ? `labels: ${wanted.join(', ')}` : 'labels cleared']
+  return {
+    script: `BEGIN IMMEDIATE;
+DELETE FROM labels WHERE item_id=${q(item.id)};
+${wanted.map(one => `INSERT INTO labels(item_id, label) VALUES (${q(item.id)}, ${q(one)});`).join('\n')}
+${activity(item.id, actor, 'edit', notes[0]!)}
+UPDATE items SET updated_at=${NOW} WHERE id=${q(item.id)};
+COMMIT;`,
+    notes,
+  }
+}
+
+const RELATION_NOTE = { relates: ['relates to', 'no longer relates to'], duplicates: ['duplicate of', 'no longer a duplicate of'] }
+
+/**
+ * The script setting the links of one `type` that `item` makes to exactly `next`, logging each made or
+ * dropped; none when unchanged. Marking a task a duplicate also closes it: the work lives on elsewhere.
+ */
+export function setRelations(actor: string, item: Item, type: Relation['type'], next: string[]): { script: string; notes: string[] } {
+  const now = item.relations.filter(one => one.type === type).map(one => one.id)
+  const added = next.filter(id => !now.includes(id))
+  const dropped = now.filter(id => !next.includes(id))
+  const [made, gone] = RELATION_NOTE[type]
+  const notes = [...added.map(id => `${made} ${id}`), ...dropped.map(id => `${gone} ${id}`)]
+  if (notes.length === 0) return { script: '', notes }
+  const closes = type === 'duplicates' && added.length > 0 && item.kind === 'task' && item.status !== 'done'
+  if (closes) notes.push(`status ${item.status} → done (closed as a duplicate)`)
+  return {
+    script: `BEGIN IMMEDIATE;
+${dropped.map(id => `DELETE FROM relations WHERE a=${q(item.id)} AND b=${q(id)} AND type=${q(type)};`).join('\n')}
+${added.map(id => `INSERT OR IGNORE INTO relations(a, b, type) VALUES (${q(item.id)}, ${q(id)}, ${q(type)});`).join('\n')}
+${notes.map(note => activity(item.id, actor, note.startsWith('status') ? 'status' : 'edit', note)).join('\n')}
+UPDATE items SET ${closes ? "status='done', " : ''}updated_at=${NOW} WHERE id=${q(item.id)};
 COMMIT;`,
     notes,
   }

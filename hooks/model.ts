@@ -1,9 +1,15 @@
-import type { Activity, Commit, Item, Kind, Pr, Refs, Snapshot, Status } from '../types'
+import type { Activity, Commit, IssueType, Item, Kind, Pr, Priority, Refs, Snapshot, Status } from '../types'
 
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
-export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'done']
-export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', done: '●' }
-export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' }
+export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
+export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', review: '◉', done: '●' }
+export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', review: 'Review', done: 'Done' }
+export const PRIORITIES: Priority[] = ['p0', 'p1', 'p2', 'p3']
+export const TYPES: IssueType[] = ['feature', 'bug', 'chore']
+/** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
+export const marks = (item: Item) =>
+  [item.priority && item.priority !== 'p2' ? item.priority : '', item.type && item.type !== 'feature' ? item.type : ''].filter(Boolean)
+const byPriority = (a: Item, b: Item) => PRIORITIES.indexOf(a.priority ?? 'p2') - PRIORITIES.indexOf(b.priority ?? 'p2')
 export const PREFIX: Record<Kind, string> = { milestone: 'M', epic: 'E', task: 'T' }
 // Which kinds each kind may sit under.
 const PARENTS: Record<Kind, Kind[]> = { milestone: [], epic: ['milestone'], task: ['epic', 'milestone'] }
@@ -55,6 +61,33 @@ export function checkBlockers(items: Item[], id: string, blockers: string[]): st
     if (!out.includes(found.id)) out.push(found.id)
   }
   return out
+}
+
+/** The item ids to link to, normalized, or throws: each must exist and not be `id` itself. */
+export function checkLinks(items: Item[], id: string, ids: string[]): string[] {
+  const out: string[] = []
+  for (const raw of ids) {
+    const found = find(items, raw.trim())
+    if (!found) throw new Error(`No item ${raw}`)
+    if (found.id.toUpperCase() === id.toUpperCase()) throw new Error(`${found.id} cannot link to itself`)
+    if (!out.includes(found.id)) out.push(found.id)
+  }
+  return out
+}
+
+/**
+ * An item's links other than blocked-by, read from both ends: `relates` goes both ways, so an item
+ * relates to those it names and to those that name it; a duplicate names its original.
+ */
+export function linksOf(items: Item[], item: Item) {
+  const out = (type: string) => (item.relations ?? []).filter(one => one.type === type).map(one => one.id)
+  const into = (type: string) =>
+    items.filter(one => (one.relations ?? []).some(r => r.type === type && r.id === item.id)).map(one => one.id)
+  return {
+    relates: [...new Set([...out('relates'), ...into('relates')])],
+    duplicateOf: out('duplicates'),
+    duplicatedBy: into('duplicates'),
+  }
 }
 
 /** Ids in an item's subtree, the item first. */
@@ -116,6 +149,8 @@ export function line(items: Item[], item: Item): string {
   const p = progress(items, item)
   const status = statusOf(items, item)
   const bits = [
+    ...marks(item),
+    ...(item.labels ?? []).map(one => `#${one}`),
     item.kind !== 'task' && p.total > 0 ? `${p.done}/${p.total} tasks` : '',
     item.assignee ? `@${item.assignee}` : '',
     item.due ? `due ${item.due}` : '',
@@ -156,6 +191,11 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
   if (before.length) parts.push('Blocked by:\n' + before.map(one => `  ${line(snap.items, one)}`).join('\n'))
   const after = blocks(snap.items, item)
   if (after.length) parts.push('Blocks:\n' + after.map(one => `  ${line(snap.items, one)}`).join('\n'))
+  const links = linksOf(snap.items, item)
+  const named = (ids: string[]) => ids.map(id => find(snap.items, id)).filter((one): one is Item => one !== undefined)
+  if (links.duplicateOf.length) parts.push('Duplicate of:\n' + named(links.duplicateOf).map(one => `  ${line(snap.items, one)}`).join('\n'))
+  if (links.duplicatedBy.length) parts.push('Duplicated by:\n' + named(links.duplicatedBy).map(one => `  ${line(snap.items, one)}`).join('\n'))
+  if (links.relates.length) parts.push('Related:\n' + named(links.relates).map(one => `  ${line(snap.items, one)}`).join('\n'))
   const under = outline(snap.items, item.id)
   if (under) parts.push(under)
   const log = timeline(snap.activity, item.id).slice(-limit)
@@ -165,7 +205,7 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
 
 /**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
- * unassigned todo tasks that wait on nothing unfinished, by due date.
+ * unassigned todo tasks that wait on nothing unfinished, by priority, then due date.
  */
 export function nextUp(items: Item[], actor: string): Item[] {
   const tasks = items.filter(item => item.kind === 'task')
@@ -178,9 +218,13 @@ export function nextUp(items: Item[], actor: string): Item[] {
   const isWaiting = (task: Item) => waitingOn(items, task).length > 0
   const free = tasks
     .filter(task => !task.assignee && task.status === 'todo' && !isWaiting(task))
-    .sort((a, b) => due(a).localeCompare(due(b)) || byId(a, b))
-  const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, done: 3 }
-  return [...mine.sort((a, b) => Number(isWaiting(a)) - Number(isWaiting(b)) || rank[a.status] - rank[b.status]), ...free]
+    .sort((a, b) => byPriority(a, b) || due(a).localeCompare(due(b)) || byId(a, b))
+  // Work in review waits on the user, so it comes after everything an agent can move on itself.
+  const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, review: 3, done: 4 }
+  return [
+    ...mine.sort((a, b) => Number(isWaiting(a)) - Number(isWaiting(b)) || rank[a.status] - rank[b.status] || byPriority(a, b)),
+    ...free,
+  ]
 }
 
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */
@@ -192,16 +236,18 @@ export function brief(snap: Snapshot, actor: string, news: Activity[]): string |
     some.slice(0, cap).map(item => `- ${line(items, item)}${item.parent ? ` [${item.parent}]` : ''}`).join('\n') +
     (some.length > cap ? `\n- …${some.length - cap} more` : '')
   const milestones = items.filter(item => item.kind === 'milestone' && statusOf(items, item) !== 'done').sort(byId)
-  const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done')
+  const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done' && task.status !== 'review')
   const blocked = tasks.filter(task => task.status === 'blocked')
+  const review = tasks.filter(task => task.status === 'review')
   const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor)
   const parts = [
-    'Project roadmap (roadmap tool; .claude/roadmap.db). Keep it current: claim a task before working on it, comment on progress and decisions, set done when finished.',
+    'Project roadmap (roadmap tool; .claude/roadmap.db). Keep it current: claim a task before working on it, comment on progress and decisions, set done when finished (it goes to review for the user to approve).',
   ]
   if (milestones.length) parts.push('Open milestones:\n' + list(milestones, 4))
   if (mine.length) parts.push(`Assigned to you (${actor}):\n` + list(mine))
   if (active.length) parts.push('In progress by others:\n' + list(active))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
+  if (review.length) parts.push("Waiting on the user's review (they approve on the board, or tell you to):\n" + list(review))
   if (news.length)
     parts.push(
       'Changes by the user since you last looked:\n' +

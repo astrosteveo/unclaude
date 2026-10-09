@@ -1,5 +1,11 @@
 export type Kind = 'milestone' | 'epic' | 'task'
-export type Status = 'todo' | 'in_progress' | 'blocked' | 'done'
+export type Status = 'todo' | 'in_progress' | 'blocked' | 'review' | 'done'
+/** How urgent: p0 drops everything, p2 is the default, p3 can wait. */
+export type Priority = 'p0' | 'p1' | 'p2' | 'p3'
+/** What sort of work an item is, as Jira's issue type. */
+export type IssueType = 'feature' | 'bug' | 'chore'
+/** A link other than blocked-by: this item relates to, or duplicates, item `id`. */
+export type Relation = { type: 'relates' | 'duplicates'; id: string }
 
 export type Item = {
   id: string
@@ -10,6 +16,14 @@ export type Item = {
   description: string | null
   assignee: string | null
   due: string | null
+  priority: Priority
+  type: IssueType
+  /** When the holder last showed signs of life; a claim gone quiet too long can be taken over. */
+  lease_at: string | null
+  /** Free-form tags, sorted. */
+  labels: string[]
+  /** Links this item makes to others (stored on this side). */
+  relations: Relation[]
   /** Ids of the tasks this one waits on (`links`); empty for none. */
   blocked_by: string[]
   /** Acceptance criteria, in order; a task with any unchecked is not done. */
@@ -47,6 +61,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean }
   }
 }

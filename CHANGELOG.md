@@ -6,6 +6,10 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Added
 
+- Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.
+- A Review status between In progress and Done. When an agent sets a task done, it goes to Review. The person approves it on the board (`a`) or sends it back with a note (`c`), which puts Claude back on it. Claude closes a task itself only when told in chat that it's approved (`approved: true`); subagents can't. The session brief lists tasks waiting on review.
+- Labels (`labels`), related items (`relates_to`, shown on both items) and duplicates (`duplicates`, which closes the duplicate). The card lists them under Links, and `show` lists them in the detail.
+
 - In a git repository that doesn't ignore `.claude/roadmap.db`, the board offers to add it to `.gitignore` (press `g`). A toast mentions it once per project, and "Don't ask again" turns it off for that project. Nothing is written without the person's say-so.
 
 ### Fixed
@@ -13,6 +17,9 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - A project that never uses the roadmap is left alone: no `.claude/roadmap.db` is created until the first write, and git and gh aren't run there. Before, a user-scope install made an empty database in every folder Claude Code opened.
 
 ### Changed
+
+- The board has five columns, and needs 100 columns of width to lay them side by side (90 before); narrower, they stack.
+- Agents can no longer act under the name `user`.
 
 - The card detail's status and action buttons sit in one bar right under the title, in the same place on every card. The current status is marked in the accent color, and epics and milestones show their rolled-up status in the same spot.
 - A card reads as labelled sections: Description, Acceptance criteria (with a checked count), Dependencies, Links and Activity. Empty sections are left out, and comments read as messages, set apart from the tracker's own events.

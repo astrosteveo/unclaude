@@ -201,7 +201,7 @@ test('a fresh database starts at version 0 and migrates to this build\'s version
 test('a database from before versioning adopts the schema with its data kept', () => {
   // As the mod left databases until now: the tables, data in them, no version recorded.
   raw(db.MIGRATIONS[0])
-  raw(db.insert('claude', { kind: 'task', title: 'kept', parent: null }))
+  raw("INSERT INTO items(id, kind, title) VALUES ('T1', 'task', 'kept');")
   assert.equal(raw(db.READ_VERSION), '0')
   raw(db.migrate(0))
   assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
@@ -217,6 +217,67 @@ test('a database from a newer build is refused, and an unusable version is named
 })
 
 test('two sessions migrating at once both come out at the current version', async () => {
-  await Promise.all([rawAsync(db.migrate(0)), rawAsync(db.migrate(0)), rawAsync(db.migrate(0))])
+  // As ensureSchema: a session that loses the race may fail on a non-idempotent step, and then finds the
+  // version current. One must win, and none may leave the database half-migrated.
+  const ran = await Promise.allSettled([rawAsync(db.migrate(0)), rawAsync(db.migrate(0)), rawAsync(db.migrate(0))])
+  assert.ok(ran.some(one => one.status === 'fulfilled'))
   assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
+})
+
+test('a v1 database migrates to v2 with its data kept and the new fields defaulted', () => {
+  raw(`BEGIN IMMEDIATE;\n${db.MIGRATIONS[0]}\nPRAGMA user_version=1;\nCOMMIT;`)
+  assert.equal(raw(db.READ_VERSION), '1')
+  // Rows as a v1 build wrote them: today's insert names columns v1 doesn't have.
+  raw("INSERT INTO items(id, kind, title, assignee) VALUES ('T1', 'task', 'kept', 'claude');")
+  raw(db.migrate(1))
+  assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
+  isMigrated = true
+  const t = item('T1')
+  assert.equal(t.title, 'kept')
+  assert.equal(t.assignee, 'claude')
+  assert.equal(t.priority, 'p2')
+  assert.equal(t.type, 'feature')
+  assert.equal(t.lease_at, null)
+  assert.deepEqual(t.labels, [])
+  assert.deepEqual(t.relations, [])
+})
+
+test('labels and relations load with their item and go with it on removal', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: null }))
+  sql("INSERT INTO labels VALUES ('T1','ui'),('T1','api'); INSERT INTO relations VALUES ('T1','T2','relates'),('T2','T1','duplicates');")
+  assert.deepEqual(item('T1').labels, ['api', 'ui'])
+  assert.deepEqual(item('T1').relations, [{ type: 'relates', id: 'T2' }])
+  sql(db.remove(['T1']))
+  assert.equal(sql('SELECT count(*) FROM labels;'), '0')
+  assert.equal(sql('SELECT count(*) FROM relations;'), '0')
+})
+
+test('priority and type are written on insert and changed like any field', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null, priority: 'p0', type: 'bug' }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: null }))
+  assert.equal(item('T1').priority, 'p0')
+  assert.equal(item('T1').type, 'bug')
+  assert.equal(item('T2').priority, 'p2')
+  sql(db.change('user', item('T2'), { priority: 'p1', type: 'chore' }).script)
+  assert.equal(item('T2').priority, 'p1')
+  assert.deepEqual(log('T2').slice(1), ['user: priority → p1', 'user: type → chore'])
+})
+
+test('labels are normalized, replaced as a set and logged; relations link, unlink, and a duplicate closes', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'c', parent: null }))
+  sql(db.setLabels('claude', item('T1'), ['#UI', 'auth flow', 'ui']).script)
+  assert.deepEqual(item('T1').labels, ['auth-flow', 'ui'])
+  assert.deepEqual(db.setLabels('claude', item('T1'), ['ui', 'auth-flow']), { script: '', notes: [] })
+  sql(db.setLabels('claude', item('T1'), []).script)
+  assert.deepEqual(item('T1').labels, [])
+  sql(db.setRelations('claude', item('T1'), 'relates', ['T2', 'T3']).script)
+  sql(db.setRelations('claude', item('T1'), 'relates', ['T3']).script)
+  assert.deepEqual(item('T1').relations, [{ type: 'relates', id: 'T3' }])
+  sql(db.setRelations('user', item('T2'), 'duplicates', ['T3']).script)
+  assert.equal(item('T2').status, 'done')
+  assert.deepEqual(log('T1').slice(1), ['claude: labels: auth-flow, ui', 'claude: labels cleared', 'claude: relates to T2', 'claude: relates to T3', 'claude: no longer relates to T2'])
+  assert.deepEqual(log('T2').slice(1), ['user: duplicate of T3', 'user: status todo → done (closed as a duplicate)'])
 })
