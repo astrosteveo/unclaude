@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, brief, handedScope, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -643,8 +643,11 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
       (err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }),
     )
     if (ran.exitCode !== 0) {
-      $.ui.toast(`roadmap: PR #${pr.number} was not merged, so ${item.id} stays in review: ${ran.stderr.trim() || `exit ${ran.exitCode}`}`)
+      const why = ran.stderr.trim() || `exit ${ran.exitCode}`
+      $.ui.toast(`roadmap: PR #${pr.number} was not merged, so ${item.id} stays in review: ${why}. Claude is looking into it.`)
       await focusOn($, 'close')
+      // Whoever opened the pull request deals with what stopped it.
+      await $.prompt.submit({ text: approvalNote(item, pr, why) }).catch(() => undefined)
       return
     }
     await userAct($, { action: 'comment', id: item.id, body: `Approved; merged PR #${pr.number}.` })
@@ -652,6 +655,9 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
   }
   await userAct($, { action: 'update', id: item.id, status: 'done' })
   await focusOn($, 'close')
+  // An agent's work: it hears at once, to bring the checkout up to date. Each approval is its own turn,
+  // taken in order once the session is idle. The person's own work needs no word.
+  if (isAgent(item.assignee)) await $.prompt.submit({ text: approvalNote(item, pr) }).catch(() => undefined)
 }
 
 /** Sends a task back from review with what needs changing, and puts its agent back on it. */
