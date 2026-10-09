@@ -4,6 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
+import { columnCaps } from './pane'
 import { agentName, approvalNote, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -1360,6 +1361,44 @@ test('pull requests on the board: a tag on the row, a line under the bar, and a 
   const note = approvalNote(some[0]!, { number: 12, title: '', state: 'open', url: '', ids: ['T1'], checks: 'pass', branch: 't1-top', base: 't2-bottom' })
   expect(note).toContain('into t2-bottom, not into main')
   expect(note).not.toContain('switch to main')
+})
+
+test('a card docks under the board: the board stays, another card swaps it, the open one or its ✕ closes it; a short pane shows the card alone', async ($, on) => {
+  expect(columnCaps({ todo: 10, in_progress: 2, blocked: 0, review: 1, done: 40 }, 14, false)).toEqual({ todo: 2, in_progress: 2, blocked: 0, review: 1, done: 0 })
+  expect(columnCaps({ todo: 10, in_progress: 2, blocked: 0, review: 1, done: 40 }, 8, true)).toEqual({ todo: 6, in_progress: 2, blocked: 0, review: 1, done: 6 })
+  const some = [item('T1', { title: 'First' }), item('T2', { title: 'Second', status: 'in_progress' })]
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const mount = (bodyRows: number) => $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows } } as never,
+  })
+  const ui = await mount(45)
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
+  expect(await ui.find({ key: 'card-T2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'First' })).toBeDefined()
+  // Another card swaps what is docked.
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ type: 'Text', text: 'Second' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'First' })).toBeUndefined()
+  // The open card, pressed again, closes it.
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ key: 'detail' })).toBeUndefined()
+  // So does the ✕ on the card's title row.
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'close-x' })
+  expect(await ui.find({ key: 'detail' })).toBeUndefined()
+  await ui.unmount()
+  // Too short for both: the card stands in for the board.
+  const short = await mount(20)
+  await short.press({ key: 'card-T1' })
+  expect(await short.find({ key: 'detail' })).toBeDefined()
+  expect(await short.find({ key: 'card-T2' })).toBeUndefined()
+  await short.unmount()
 })
 
 test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work or work in review', async ($, on) => {
