@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -537,6 +537,20 @@ test('targets: a task takes its own milestone, else its epic\'s; the tree puts i
   ]
   expect(['E1', 'T1', 'T2', 'T3', 'T4', 'M1'].map(id => targetOf(some, find(some, id)!))).toEqual(['M1', 'M1', 'M2', 'M2', null, 'M1'])
   expect(['E1', 'T1', 'T2', 'T3', 'T4'].map(id => upOf(find(some, id)!))).toEqual(['M1', 'E1', 'E1', 'M2', null])
+})
+
+test('releases: a CHANGELOG reads as versions with their dates and notes; a version carries the tasks whose notes it holds', () => {
+  const text = '# Changelog\n\n## [Unreleased]\n\n- Soon.\n\n## [0.6.1] - 2026-10-09\n\n### Fixed\n\n- ship writes the notes.\n\n## 0.4.0 - 2026-10-01\n\n- Old style.\n\n[Unreleased]: https://x/compare\n'
+  expect(changelogVersions(text)).toEqual([
+    { version: '0.6.1', date: '2026-10-09', body: '### Fixed\n\n- ship writes the notes.' },
+    { version: '0.4.0', date: '2026-10-01', body: '- Old style.' },
+  ])
+  const some = [
+    item('T1', { status: 'done', note: 'ship writes the notes.' }), item('T2', { status: 'done', note: 'Old style.' }),
+    item('T3', { status: 'done', note: 'ship writes the notes.', resolution: 'wontdo' }), item('T4', { status: 'done', note: '-' }),
+  ]
+  expect(shippedIn(some, '- ship writes the notes.')).toEqual([{ id: 'T1', note: 'ship writes the notes.', section: 'Added' }])
+  expect(shippedIn(some, '- ship writes the notes.', new Set(['T1']))).toEqual([])
 })
 
 test('a roadmap is started only at a repository top; a refusal points at the roadmaps below', () => {
@@ -2147,6 +2161,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
     '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n',
   }
   const ran: string[] = []
+  const scripts: string[] = []
   let dirty = ''
   let mergedPr = '[]'
   let branch = 'main'
@@ -2168,6 +2183,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
         (stableFails && line.endsWith(':refs/heads/stable')) ? 1 : 0
       return { value: { ...fakeSqlite('', null), stdout, exitCode } }
     }
+    scripts.push(e.init?.stdin ?? '')
     return { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }
   })
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -2231,6 +2247,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(await ship({ version: '0.5.0', approved: true })).toContain('stable was not moved')
   stableFails = false
   expect(ran).toContain('git tag -a v0.5.0 -m v0.5.0 abc123')
+  expect(scripts.some(one => one.includes("INSERT OR REPLACE INTO releases(version, tag, at, pr, notes) VALUES ('0.5.0', 'v0.5.0', '2026-10-10', 30,"))).toBe(true)
   expect(ran).toContain('git push origin v0.5.0')
   expect(ran).toContain('gh release create v0.5.0 --title v0.5.0 --verify-tag --notes ### Added\n\n- Undo.')
   // A subagent's approval doesn't count.

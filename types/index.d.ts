@@ -111,7 +111,10 @@ export type Activity = {
 }
 
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
-export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number> }
+export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number>; releases?: Release[] }
+
+/** A version that shipped: when, from which tag and release PR, its notes, and the tasks it carried. */
+export type Release = { version: string; tag: string | null; at: string; pr: number | null; notes: string; tasks: { id: string; note: string; section: Section | null }[] }
 
 export type View = 'board' | 'tree' | 'backlog' | 'timeline'
 

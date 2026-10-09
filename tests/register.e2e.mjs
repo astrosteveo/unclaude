@@ -51,6 +51,7 @@ let loads = 0
 let dir
 let $
 let call
+let start
 
 /** A stand-in for the engine handle: real processes and files in the project, the rest recorded or quiet. */
 function engine(root) {
@@ -106,6 +107,8 @@ async function load(root) {
     return chain
   })
   const tool = hooks.find(one => one.name === 'tool.call' && one.filter?.tool === TOOL).hook
+  // A session starting: the poll that loads the board, links commits and PRs, and fills in what's missing.
+  start = () => hooks.find(one => one.name === 'session.start').hook($, { source: 'startup', cwd: root }, async e => e)
   // As the model calls it: the main loop, or a subagent by its id.
   call = async (input, agentId) => {
     const reply = await tool($, { tool: TOOL, tool_use_id: 't', ...(agentId ? { agentId } : {}), ...input })
@@ -365,4 +368,26 @@ test('milestones are targets: under a milestone an epic or task targets it; unde
   await ok({ action: 'import', path: 'old.json' })
   assert.equal(at('E1'), '- M1')
   assert.equal(at('T1'), '- M1')
+})
+
+test('releases: the first session fills in the record of past releases from CHANGELOG.md, with their tags and the tasks they carried', async () => {
+  await ok({ action: 'add', kind: 'task', title: 'Fix', note: 'ship writes the notes itself.', type: 'bug' })
+  await ok({ action: 'update', id: 'T1', status: 'done', approved: true })
+  await ok({ action: 'add', kind: 'task', title: 'Old', note: 'Undo on the board.' })
+  await ok({ action: 'update', id: 'T2', status: 'done', approved: true })
+  writeFileSync(join(dir, 'CHANGELOG.md'), [
+    '# Changelog', '', '## [Unreleased]', '', '## [0.6.1] - 2026-10-09', '', '### Fixed', '', '- ship writes the notes itself.', '',
+    '## 0.4.0 - 2026-10-01', '', '- Undo on the board.', '- Something from before the roadmap.', '',
+  ].join('\n'))
+  execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'release'])
+  execFileSync('git', ['-C', dir, 'tag', 'v0.6.1'])
+  await start()
+  const rows = query("SELECT group_concat(version || ' ' || COALESCE(tag, '-') || ' ' || at, '; ') FROM (SELECT * FROM releases ORDER BY version);")
+  assert.equal(rows, '0.4.0 - 2026-10-01; 0.6.1 v0.6.1 2026-10-09')
+  assert.equal(query("SELECT group_concat(version || ':' || item_id, ' ') FROM (SELECT * FROM shipped ORDER BY version);"), '0.4.0:T2 0.6.1:T1')
+  // Once: a second session with a record already there leaves it as it is.
+  execFileSync('sqlite3', [join(dir, '.claude/roadmap.db'), "DELETE FROM shipped WHERE item_id='T2';"])
+  await load(dir)
+  await start()
+  assert.equal(query("SELECT count(*) FROM shipped;"), '1')
 })

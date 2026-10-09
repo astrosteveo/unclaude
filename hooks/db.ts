@@ -1,4 +1,4 @@
-import type { Check, IssueType, Item, Kind, Priority, Relation, Snapshot, Status } from '../types'
+import type { Check, IssueType, Item, Kind, Priority, Relation, Release, Snapshot, Status } from '../types'
 import { PREFIX } from './model'
 
 export const DB = '.claude/roadmap.db'
@@ -59,6 +59,10 @@ ALTER TABLE items ADD COLUMN section TEXT;`,
   // v7: milestones are targets, not containers: what sat under a milestone targets it instead.
   `ALTER TABLE items ADD COLUMN milestone TEXT;
 ${RETARGET}`,
+  // v8: releases: each version shipped, and the tasks it carried with their notes as they went out.
+  `CREATE TABLE IF NOT EXISTS releases(version TEXT PRIMARY KEY, tag TEXT, at TEXT NOT NULL, pr INTEGER, notes TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS shipped(version TEXT NOT NULL, item_id TEXT NOT NULL, note TEXT NOT NULL, section TEXT,
+  PRIMARY KEY (version, item_id));`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -202,7 +206,10 @@ export const load = (reader: string) => `SELECT json_object(
           SELECT *, ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY id DESC) AS nth FROM activity)
         WHERE nth <= ${RECENT} OR id IN (SELECT MAX(id) FROM activity WHERE type='handoff' GROUP BY item_id)
         ORDER BY id DESC)),
-      'seen', (SELECT json_group_object(item_id, seen) FROM reads WHERE reader=${q(reader)}));`
+      'seen', (SELECT json_group_object(item_id, seen) FROM reads WHERE reader=${q(reader)}),
+      'releases', (SELECT json_group_array(json_object('version', version, 'tag', tag, 'at', at, 'pr', pr, 'notes', notes,
+        'tasks', json((SELECT json_group_array(json_object('id', item_id, 'note', note, 'section', section)) FROM shipped
+          WHERE shipped.version=releases.version)))) FROM releases));`
 
 /** An item's whole timeline, oldest first, as a JSON list. */
 export const history = (id: string) =>
@@ -223,7 +230,7 @@ export function parseLoad(out: string): Snapshot {
     checklist: (item.checklist ?? []).map(c => ({ ...c, done: Boolean(c.done) })).sort((a, b) => a.n - b.n),
   }))
   const activity = data.activity.map(one => ({ ...one, undoable: Boolean(one.undoable) }))
-  return { items, activity, seen: data.seen ?? {} }
+  return { items, activity, seen: data.seen ?? {}, releases: data.releases ?? [] }
 }
 
 export type NewItem = {
@@ -356,6 +363,8 @@ export const TABLES = {
   labels: ['item_id', 'label'],
   relations: ['a', 'b', 'type'],
   reads: ['reader', 'item_id', 'seen'],
+  releases: ['version', 'tag', 'at', 'pr', 'notes'],
+  shipped: ['version', 'item_id', 'note', 'section'],
   counters: ['prefix', 'n'],
 } as const
 
@@ -372,6 +381,9 @@ const OWNED: Record<Exclude<Table, 'counters'>, (list: string) => string> = {
   labels: list => `item_id IN (${list})`,
   relations: list => `a IN (${list}) OR b IN (${list})`,
   reads: list => `item_id IN (${list})`,
+  // A release belongs to no item; what it shipped of an item goes with that item.
+  releases: () => 'FALSE',
+  shipped: list => `item_id IN (${list})`,
 }
 
 /** Reads every row on the items `ids` (all of the roadmap, counters too, when absent) as JSON: Rows. */
@@ -476,6 +488,16 @@ export function revert(actor: string, list: { entry: Entry; undo: string; redo: 
 export function atomic(scripts: string[]): string {
   const bodies = scripts.filter(Boolean).map(one => one.split('\n').filter(line => line !== 'BEGIN IMMEDIATE;' && line !== OP && line !== 'COMMIT;').join('\n'))
   return bodies.length ? `${BEGIN}\n${bodies.join('\n')}\nCOMMIT;` : ''
+}
+
+/** Records a release and what it shipped, replacing any record of that version. */
+export function recordRelease(r: Release): string {
+  const rows = r.tasks.map(one => `INSERT INTO shipped(version, item_id, note, section) VALUES (${q(r.version)}, ${q(one.id)}, ${q(one.note)}, ${q(one.section)});`)
+  return `BEGIN IMMEDIATE;
+INSERT OR REPLACE INTO releases(version, tag, at, pr, notes) VALUES (${q(r.version)}, ${q(r.tag)}, ${q(r.at)}, ${r.pr === null ? 'NULL' : Math.trunc(r.pr)}, ${q(r.notes)});
+DELETE FROM shipped WHERE version=${q(r.version)};
+${rows.join('\n')}
+COMMIT;`
 }
 
 /** Marks everything on an item as seen by `reader`, up to its newest activity. */

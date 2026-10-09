@@ -54,7 +54,7 @@ const item = id => load().items.find(one => one.id === id)
 const log = id => load().activity.filter(one => one.item_id === id).sort((a, b) => a.id - b.id).map(one => `${one.author}: ${one.body}`)
 
 test('a fresh database loads empty', () => {
-  assert.deepEqual(load(), { items: [], activity: [], seen: {} })
+  assert.deepEqual(load(), { items: [], activity: [], seen: {}, releases: [] })
 })
 
 test('insert numbers each kind on its own and logs the creation', () => {
@@ -79,7 +79,7 @@ test('remove takes the items and their timelines', () => {
   sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
   sql(db.comment('claude', 'T1', 'note'))
   sql(db.remove(['T1']))
-  assert.deepEqual(load(), { items: [], activity: [], seen: {} })
+  assert.deepEqual(load(), { items: [], activity: [], seen: {}, releases: [] })
 })
 
 test('change writes only what changed, one timeline entry per field', () => {
@@ -613,6 +613,15 @@ test('v7: a target is written, logged and undone like any field; a move out of a
   assert.deepEqual(log('T1').slice(1), ['claude: out of its epic', 'claude: targets M1'])
   revert(lastOp())
   assert.deepEqual([item('T1').parent, item('T1').milestone], ['E1', null])
+})
+
+test('v8: a release is recorded with the tasks it shipped, loads back, and recording it again replaces it', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  const release = { version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: "### Changed\n\n- It's out.", tasks: [{ id: 'T1', note: "It's out.", section: 'Changed' }] }
+  sql(db.recordRelease(release))
+  assert.deepEqual(load().releases, [release])
+  sql(db.recordRelease({ ...release, pr: null, tasks: [] }))
+  assert.deepEqual(load().releases, [{ ...release, pr: null, tasks: [] }])
 })
 
 test('mark all seen: every item read up to its newest entry, and a comment after counts again', () => {

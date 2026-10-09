@@ -7,7 +7,7 @@ import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
   agentName, approvalNote, askAbout, readyIn, timeline, isMessage, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
-  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere, placeOf, upOf, targetOf, checkTarget,
+  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere, placeOf, upOf, targetOf, checkTarget, changelogVersions, shippedIn,
 } from './model'
 
 const PANE = 'roadmap'
@@ -362,6 +362,34 @@ async function backup($: EngineInterface) {
   if (old.length) await $.process.run(['rm', '-f', ...old.map(name => `${dir}/${name}`)]).catch(() => undefined)
 }
 
+// Whether this load has looked for releases to fill in from the CHANGELOG.
+let isHistoryChecked = false
+
+/**
+ * Fills in the record of past releases, once, when the roadmap has none: each version in CHANGELOG.md, its
+ * tag and release PR where they exist, and the tasks whose notes it carried.
+ */
+async function fillReleases($: EngineInterface, known: Refs) {
+  isHistoryChecked = true
+  const snap = await read($, snapshot)
+  if ((snap.releases ?? []).length > 0) return
+  const text = await $.fs.read(await inProject($, 'CHANGELOG.md')).then(String, () => '')
+  const versions = changelogVersions(text)
+  if (versions.length === 0) return
+  const taken = new Set<string>()
+  const scripts: string[] = []
+  for (const one of versions) {
+    const tag = `v${one.version}`
+    const isTagged = (await runAt($, ['git', 'rev-parse', '-q', '--verify', `refs/tags/${tag}`]).catch(() => undefined))?.exitCode === 0
+    const pr = known.prs.find(p => p.branch === `release-${tag}` && p.state === 'merged')?.number ?? null
+    const tasks = shippedIn(snap.items, one.body, taken)
+    for (const task of tasks) taken.add(task.id)
+    scripts.push(db.recordRelease({ version: one.version, tag: isTagged ? tag : null, at: one.date, pr, notes: one.body, tasks }))
+  }
+  await sql($, db.atomic(scripts))
+  await refresh($)
+}
+
 /** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
@@ -380,7 +408,9 @@ async function poll($: EngineInterface) {
   // A backup that fails (no home, a full disk) never stops the board.
   await backup($).catch(() => undefined)
   if (!isIgnoreChecked) await checkIgnore($)
-  await refreshRefs($)
+  const known = await refreshRefs($)
+  // Never stands in the way of the board: a history that can't be read is left for another load.
+  if (!isHistoryChecked) await fillReleases($, known).catch(() => undefined)
 }
 
 type Input = {
@@ -930,6 +960,11 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
     // stable that went elsewhere is left alone and said so).
     const stable = await git($, ['push', 'origin', `${merged!.mergeCommit!.oid!}:refs/heads/${STABLE}`]).catch(() => undefined)
     const served = stable?.exitCode === 0 ? ` ${STABLE} now serves ${version}.` : ` ${STABLE} was not moved (${stable ? whyNot(stable) : 'git failed'}): installs still get the release before.`
+    // The record of what shipped: the tasks whose notes this version carries, none already in another.
+    const now = await refresh($)
+    const taken = new Set((now.releases ?? []).filter(one => one.version !== version).flatMap(one => one.tasks.map(task => task.id)))
+    const tasks = shippedIn(now.items, body, taken)
+    await sql($, db.recordRelease({ version, tag, at: new Date(await $.clock.now()).toISOString().slice(0, 10), pr: merged!.number, notes: body, tasks }))
     // The release branch has done its work: gone here and on origin. A branch that won't go never fails the release.
     const local = await git($, ['branch', '-D', branch]).catch(() => undefined)
     // GitHub may have deleted it on the merge already.

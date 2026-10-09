@@ -559,6 +559,26 @@ export const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) -
  * The timeline: milestones (and epics under none) by due date, soonest first and undated last, each
  * milestone followed by its epics in the same order.
  */
+/** A CHANGELOG's released versions, newest first as written: each with its date and the text under it. */
+export function changelogVersions(text: string): { version: string; date: string; body: string }[] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const out: { version: string; date: string; body: string }[] = []
+  lines.forEach((line, i) => {
+    const head = /^## \[?(\d+\.\d+\.\d+)\]?(?: - (\d{4}-\d{2}-\d{2}))?/.exec(line)
+    if (!head) return
+    const next = lines.findIndex((other, j) => j > i && (other.startsWith('## ') || /^\[[^\]]+\]: \S/.test(other)))
+    out.push({ version: head[1]!, date: head[2] ?? '', body: lines.slice(i + 1, next < 0 ? undefined : next).join('\n').trim() })
+  })
+  return out
+}
+
+/** The tasks a release's notes carry: those whose note is in `body`, but not ones `taken` by another release. */
+export function shippedIn(items: Item[], body: string, taken: Set<string> = new Set()): { id: string; note: string; section: Section | null }[] {
+  return items
+    .filter(task => task.kind === 'task' && hasNote(task) && !taken.has(task.id) && body.includes(task.note!))
+    .map(task => ({ id: task.id, note: task.note!, section: sectionFor(task) }))
+}
+
 /** Open work first, then what is done, each in the order `list` gives. */
 export const openFirst = (items: Item[], list: Item[]): Item[] => [
   ...list.filter(one => statusOf(items, one) !== 'done'),
@@ -815,7 +835,8 @@ export function parsePrs(out: string): Pr[] {
       number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
       ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup), branch: pr.headRefName, base: pr.baseRefName ?? '',
     }))
-    .filter(pr => pr.ids.length > 0)
+    // Those naming items, and release PRs, which the record of releases names.
+    .filter(pr => pr.ids.length > 0 || pr.branch.startsWith('release-v'))
 }
 
 /** The open pull request a unit of work ships in: the one naming the unit itself. */
