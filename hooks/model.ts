@@ -275,3 +275,26 @@ export function refsText(found: Refs, limit = 8): string {
     )
   return parts.join('\n')
 }
+
+/** What git says of the database's path: ignored, tracked-or-not-ignored, or no repository here. */
+export type IgnoreState = 'ignored' | 'not-ignored' | 'no-repo'
+
+/** `git check-ignore -q` exits 0 for an ignored path, 1 for one that is not, 128 outside a repository. */
+export const ignoreState = (exitCode: number): IgnoreState =>
+  exitCode === 0 ? 'ignored' : exitCode === 1 ? 'not-ignored' : 'no-repo'
+
+/** Where the offer stands, per project: absent until first made, `told` until the person answers it. */
+export type IgnoreAnswer = 'told' | 'added' | 'dismissed'
+
+/** The offer stands only in a repository that doesn't ignore the database, to someone who hasn't turned it down. */
+export const shouldOfferIgnore = (state: IgnoreState, answer: IgnoreAnswer | undefined) =>
+  state === 'not-ignored' && answer !== 'dismissed'
+
+export const IGNORE_LINE = '.claude/roadmap.db*'
+
+/** A .gitignore's text with the database's line appended, on a line of its own. */
+export function withIgnore(text: string | undefined): string {
+  const base = text ?? ''
+  const gap = base === '' || base.endsWith('\n') ? '' : '\n'
+  return `${base}${gap}# The roadmap tracker's database (binary, per checkout).\n${IGNORE_LINE}\n`
+}

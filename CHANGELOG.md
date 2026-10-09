@@ -4,6 +4,10 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+### Added
+
+- In a git repository that doesn't ignore `.claude/roadmap.db`, the board offers to add it to `.gitignore` (press `g`). A toast mentions it once per project, and "Don't ask again" turns it off for that project. Nothing is written without the person's say-so.
+
 ### Changed
 
 - The card detail's status and action buttons sit in one bar right under the title, in the same place on every card. The current status is marked in the accent color, and epics and milestones show their rolled-up status in the same spot.

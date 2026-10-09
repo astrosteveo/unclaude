@@ -2,9 +2,10 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Item, Kind, Refs, Snapshot, Status, View } from '../types'
+import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -18,6 +19,9 @@ const WORK = new Set(['Edit', 'Write', 'NotebookEdit', 'Bash'])
 const snapshot = atom({ plugin: 'roadmap', key: 'snapshot' } as const, emptySnapshot())
 const view = atom({ plugin: 'roadmap', key: 'view' } as const, 'board' as View)
 const selected = atom({ plugin: 'roadmap', key: 'selected' } as const, null as string | null)
+// Whether to offer adding the database to .gitignore (see `checkIgnore`).
+const ignoreOffer = atom({ plugin: 'roadmap', key: 'ignoreOffer' } as const, false)
+let isIgnoreChecked = false
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -146,6 +150,47 @@ async function refresh($: EngineInterface): Promise<Snapshot> {
 }
 
 /** Reloads when another process (an agent in another session, a git checkout) changed the database. */
+/** The person's answers to the .gitignore offer, by project root, kept across sessions. */
+async function ignoreAnswers($: EngineInterface): Promise<Record<string, IgnoreAnswer>> {
+  return ((await $.store.get('gitignore')) ?? {}) as Record<string, IgnoreAnswer>
+}
+
+async function answerIgnore($: EngineInterface, answer: IgnoreAnswer) {
+  const root = await $.session.root()
+  await $.store.set('gitignore', { ...(await ignoreAnswers($)), [root]: answer })
+}
+
+/**
+ * Once the database exists, asks git whether it is ignored. A binary database in a commit is a merge
+ * conflict waiting to happen, so where it isn't, the board offers to add it; nothing is written unasked.
+ */
+async function checkIgnore($: EngineInterface) {
+  isIgnoreChecked = true
+  const ran = await $.process.run(['git', 'check-ignore', '-q', db.DB]).catch(() => undefined)
+  if (!ran) return
+  const answer = (await ignoreAnswers($))[await $.session.root()]
+  const isOffered = shouldOfferIgnore(ignoreState(ran.exitCode), answer)
+  await update($, ignoreOffer, () => isOffered)
+  // Said once per project: after that the offer waits on the board until answered.
+  if (isOffered && answer === undefined) {
+    $.ui.toast(`roadmap: ${db.DB} isn't in .gitignore. Open /roadmap to add it.`, { timeoutMs: 8000 })
+    await answerIgnore($, 'told')
+  }
+}
+
+async function addIgnore($: EngineInterface) {
+  const text = await $.fs.read('.gitignore').then(t => String(t), () => undefined)
+  await $.fs.write('.gitignore', withIgnore(text))
+  await answerIgnore($, 'added')
+  await update($, ignoreOffer, () => false)
+  $.ui.toast(`roadmap: added ${db.DB}* to .gitignore`)
+}
+
+async function dismissIgnore($: EngineInterface) {
+  await answerIgnore($, 'dismissed')
+  await update($, ignoreOffer, () => false)
+}
+
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
     [db.DB, `${db.DB}-wal`].map(file => $.fs.stat(file).then(s => `${s.size}:${s.mtimeMs}`, () => '-')),
@@ -156,6 +201,7 @@ async function poll($: EngineInterface) {
     isSchemaReady = false
     await refresh($)
   }
+  if (!isIgnoreChecked && stamps[0] !== '-') await checkIgnore($)
   await refreshRefs($)
 }
 
@@ -586,6 +632,7 @@ export const register: Register = on => {
     const pick = await read($, selected)
     const trouble = await read($, problem)
     const known = await read($, refs)
+    const isIgnoreOffered = await read($, ignoreOffer)
     const items = snap.items
     const width = (e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 100
     const isWide = width >= 90
@@ -864,9 +911,20 @@ export const register: Register = on => {
       </Box>
     )
 
+    const offer = isIgnoreOffered && (
+      <Box key="ignore-offer" flexDirection="column">
+        <Text color="yellow">{db.DB} isn't in .gitignore, so it can be committed by mistake.</Text>
+        <Box flexDirection="row" gap={1}>
+          <Button key="ignore-add" label="Add to .gitignore" hotkey="g" onPress={() => void addIgnore($)} />
+          <Button key="ignore-dismiss" label="Don't ask again" onPress={() => void dismissIgnore($)} />
+        </Box>
+      </Box>
+    )
+
     return (
       <Box flexDirection="column">
         {header}
+        {offer}
         {trouble ? (
           <Text color="red">{trouble}</Text>
         ) : items.length === 0 ? (
@@ -879,7 +937,7 @@ export const register: Register = on => {
           <Text dimColor>
             {(item
               ? ['Tab/↑↓ move', item.kind === 'task' ? '1–4 status' : '', 'h hand to Claude', 'm/u assign', 'x close']
-              : ['Tab/↑↓ move', 'Enter opens', mode === 'board' ? 't p b d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
+              : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', mode === 'board' ? 't p b d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
             )
               .filter(Boolean)
               .join(' · ')}

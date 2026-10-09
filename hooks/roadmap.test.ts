@@ -1,8 +1,8 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 const fakeSqlite = (stdin: string | undefined, snap: unknown) => ({
@@ -296,3 +296,53 @@ test('a card reads as labelled sections, and a tall one scrolls under its fixed 
   expect(await ui.find({ type: 'Text', text: /more lines? above/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('the .gitignore offer stands only in a repo that does not ignore the database, until turned down', async () => {
+  expect(ignoreState(0)).toBe('ignored')
+  expect(ignoreState(1)).toBe('not-ignored')
+  expect(ignoreState(128)).toBe('no-repo')
+  expect(shouldOfferIgnore('ignored', undefined)).toBe(false)
+  expect(shouldOfferIgnore('no-repo', undefined)).toBe(false)
+  expect(shouldOfferIgnore('not-ignored', undefined)).toBe(true)
+  expect(shouldOfferIgnore('not-ignored', 'told')).toBe(true)
+  expect(shouldOfferIgnore('not-ignored', 'dismissed')).toBe(false)
+  expect(withIgnore(undefined)).toEndWith(`${IGNORE_LINE}\n`)
+  expect(withIgnore('node_modules')).toStartWith('node_modules\n#')
+  expect(withIgnore('node_modules\n')).toStartWith('node_modules\n#')
+})
+
+for (const [label, exitCode, isOffered] of [['not ignored', 1, true], ['ignored', 0, false], ['outside a repo', 128, false]] as const) {
+  test(`the board offers to gitignore the database: ${label}`, async ($, on) => {
+    const snap = { items, activity: [], seen: {} }
+    const written: string[] = []
+    mock.store(on)
+    on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+    on('fs.read', () => ({ value: 'node_modules\n' }) as never)
+    on('fs.write', ($, e) => (written.push(`${e.path.split('/').at(-1)}:${e.text}`), { value: undefined }) as never)
+    on('process.run', ($, e) =>
+      e.argv[0] === 'git'
+        ? { value: { exitCode: e.argv[1] === 'check-ignore' ? exitCode : 128, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+        : { value: fakeSqlite(e.init?.stdin, snap) })
+    on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+    on('ui.focus', () => ({}))
+    on('ui.toast', () => ({ value: undefined }) as never)
+    on('command.register', () => ({ value: {} }) as never)
+    on('tool.register', () => ({ value: {} }) as never)
+    on('clock.every', () => ({ value: {} }) as never)
+    on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+    on('session.root', () => ({ value: '/work/project' }) as never)
+    await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+    await $.command.run({ command: 'roadmap', args: '' } as never)
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock' } as never,
+    })
+    expect(await ui.find({ key: 'ignore-add' }) !== undefined).toBe(isOffered)
+    if (isOffered) {
+      await ui.press({ key: 'ignore-add' })
+      expect(written).toEqual([`.gitignore:node_modules\n# The roadmap tracker's database (binary, per checkout).\n${IGNORE_LINE}\n`])
+      expect(await ui.find({ key: 'ignore-add' })).toBeUndefined()
+    } else expect(written).toEqual([])
+    await ui.unmount()
+  })
+}
