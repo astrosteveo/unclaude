@@ -4,6 +4,29 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-09
+
+### Added
+
+- Setting a task done can tick its checklist in the same call, and inside an epic or milestone you hold it goes straight on to the next ready task
+- claim on an epic or milestone takes it whole: you hold it, its first ready task is claimed, and the answer shows every task in it
+- The tree and the timeline lead with open work and fold finished milestones and epics to one line (▸ opens them); the timeline lines its dates, bars and counts up in columns.
+- The pane's header reads as tabs with a progress bar, keeps its actions together, and fits in one row on a wide pane (two on a narrow one); key hints wrap between hints, most useful first.
+- The board's Done column shows the last week's work, with the rest a press away (· show all beside its heading).
+- In a narrow pane the board folds empty columns into one line, and every card row lines its details up in the same columns.
+- In a wide pane the board's columns size to their content: empty ones shrink to their heading, and each card reads on one line, or a title line and a details line, instead of wrapping raggedly.
+
+### Changed
+
+- The roadmap tool's definition is about 40% smaller, and its answers no longer repeat checklist text or the edit log
+- show on an epic or milestone lists each open task with its description and checklist, so one call holds the whole unit
+
+### Fixed
+
+- A card docked under the board is no longer overlapped by a long column whose cards wrap onto two lines.
+- A roadmap is started only at the top of a git repository: a session opened in a subfolder uses the repository's roadmap, and one opened outside any repository is refused instead of quietly starting an empty roadmap, naming the roadmaps it found below. The first write says where a new roadmap was started.
+- A roadmap database from elsewhere (a cloned repo, an import) can no longer run shell commands through undo; ship cuts releases only from an up-to-date main line; a stack merge that hits an unexpected error stops cleanly instead of blocking later merges
+
 ## [0.5.0] - 2026-10-09
 
 ### Added
@@ -97,5 +120,6 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.0
 [0.5.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.5.0

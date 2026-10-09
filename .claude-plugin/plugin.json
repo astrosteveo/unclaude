@@ -1,6 +1,6 @@
 {
   "name": "roadmap",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A lightweight Jira for Claude Code: milestones, epics and tasks that you and your agents plan and work from together",
   "author": {
     "name": "astrosteveo"
