@@ -145,6 +145,13 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
       if (node.type && !TYPES.includes(node.type)) throw new Error(`${where}: type must be one of ${TYPES.join(', ')}`)
       if (node.kind !== 'task' && (node.checklist?.length || node.blocked_by?.length))
         throw new Error(`${where}: only tasks carry a checklist or blocked_by`)
+      if (node.milestone !== undefined) {
+        if (node.kind === 'milestone') throw new Error(`${where}: a milestone targets nothing`)
+        const named = String(node.milestone).trim()
+        const local = nodes.flatMap(function all(one: PlanNode): PlanNode[] { return [one, ...(one.children ?? []).flatMap(all)] }).find(one => one.ref === named)
+        if (local ? local.kind !== 'milestone' : (find(items, named)?.kind ?? 'none') !== 'milestone')
+          throw new Error(`${where}: milestone ${named} is not a milestone here or in the plan`)
+      }
       if (parentKind === null) checkParent(items, node.kind, parentId ?? undefined)
       else if (!PARENTS[node.kind].includes(parentKind)) throw new Error(`${where}: a ${node.kind} cannot sit under a ${parentKind}`)
       const planned: PlannedItem = { ref, node, parentId: parentRef ? null : parentId, parentRef, blockerRefs: [], blockerIds: [] }
@@ -201,6 +208,7 @@ export function parseQuery(text: string): Query | undefined {
     if (low.startsWith('@') && low.length > 1) add('assignee', low.slice(1))
     else if (low.startsWith('#') && low.length > 1) add('labels', low.slice(1))
     else if (low.startsWith('under:') && low.length > 6) q.under = low.slice(6).toUpperCase()
+    else if (low.startsWith('m:') && low.length > 2) q.milestone = low.slice(2).toUpperCase()
     else if ((PRIORITIES as string[]).includes(low)) add('priority', low as Priority)
     else if ((TYPES as string[]).includes(low)) add('type', low as IssueType)
     else if (STATUS_WORDS[low]) add('status', STATUS_WORDS[low]!)
@@ -227,6 +235,7 @@ export function matches(snap: Snapshot, item: Item, query: Query, said?: Record<
     const root = find(snap.items, query.under)
     if (!root || root.id === item.id || !subtree(snap.items, root.id).includes(item.id)) return false
   }
+  if (query.milestone && item.id !== query.milestone.toUpperCase() && targetOf(snap.items, item) !== query.milestone.toUpperCase()) return false
   if (query.text?.trim()) {
     const words = query.text.toLowerCase().split(/\s+/).filter(Boolean)
     const written = said ? [said[item.id] ?? ''] : snap.activity.filter(one => one.item_id === item.id && isMessage(one)).map(one => one.body)

@@ -563,6 +563,14 @@ test('roll-ups follow targets: a milestone is the tasks that target it; hand-off
   expect(readyIn(handed, find(handed, 'M2')!, 'claude')?.id).toBe('T2')
 })
 
+test('the filter takes m:M2: what targets M2, and M2 itself', () => {
+  const some = [item('M1'), item('M2'), item('E1', { milestone: 'M1' }), item('T1', { parent: 'E1' }), item('T2', { parent: 'E1', milestone: 'M2' })]
+  const query = parseQuery('m:m2')!
+  expect(query).toEqual({ milestone: 'M2' })
+  const snap = { items: some, activity: [], seen: {} }
+  expect(some.filter(one => matches(snap, one, query)).map(one => one.id)).toEqual(['M2', 'T2'])
+})
+
 test('releases: a CHANGELOG reads as versions with their dates and notes; a version carries the tasks whose notes it holds', () => {
   const text = '# Changelog\n\n## [Unreleased]\n\n- Soon.\n\n## [0.6.1] - 2026-10-09\n\n### Fixed\n\n- ship writes the notes.\n\n## 0.4.0 - 2026-10-01\n\n- Old style.\n\n[Unreleased]: https://x/compare\n'
   expect(changelogVersions(text)).toEqual([

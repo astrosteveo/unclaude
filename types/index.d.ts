@@ -56,6 +56,8 @@ export type Query = {
   type?: IssueType[]
   labels?: string[]
   under?: string
+  /** A milestone id: the epics and tasks that target it (a task its own, else its epic's), and it. */
+  milestone?: string
   text?: string
 }
 
@@ -70,6 +72,8 @@ export type PlanNode = {
   assignee?: string
   priority?: Priority
   type?: IssueType
+  /** The milestone an epic or task targets (an id, or a ref of a new milestone in the same plan). */
+  milestone?: string
   labels?: string[]
   checklist?: string[]
   /** Refs of other new tasks, or ids of existing ones. */

@@ -417,3 +417,25 @@ test('a handed milestone holds every task that targets it, in an epic or not', a
   await ok({ action: 'update', id: 'T1', status: 'done', note: '-' })
   assert.match(await ok({ action: 'show', id: 'M1' }), /1\/2 tasks/)
 })
+
+test('targets in the tool: add, update and plan take milestone; a task can target another milestone than its epic; find and the filter take it', async () => {
+  await ok({ action: 'plan', tree: [
+    { ref: 'auth', kind: 'epic', title: 'Auth', milestone: 'v1', children: [{ ref: 'login', kind: 'task', title: 'Login' }] },
+    { ref: 'v1', kind: 'milestone', title: 'v1' },
+  ] })
+  const at = id => query(`SELECT COALESCE(parent, '-') || ' ' || COALESCE(milestone, '-') FROM items WHERE id='${id}';`)
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), 'E1 -')
+  await ok({ action: 'add', kind: 'milestone', title: 'v2' })
+  await ok({ action: 'add', kind: 'task', title: 'Later', parent: 'E1', milestone: 'M2' })
+  assert.equal(at('T2'), 'E1 M2')
+  assert.match((await call({ action: 'add', kind: 'task', title: 'x', parent: 'M1', milestone: 'M2' })).text, /already targets it/)
+  assert.match((await call({ action: 'update', id: 'T1', milestone: 'E1' })).text, /a target is a milestone/)
+  await ok({ action: 'update', id: 'T1', milestone: 'M2' })
+  await ok({ action: 'update', id: 'T1', milestone: '' })
+  assert.equal(at('T1'), 'E1 -')
+  const found = await ok({ action: 'find', milestone: 'M2' })
+  assert.match(found, /T2 /)
+  assert.doesNotMatch(found, /T1 /)
+  assert.match(await ok({ action: 'find', milestone: 'M1' }), /E1 [\s\S]*T1 /)
+})

@@ -448,6 +448,7 @@ type Input = {
   path?: string
   note?: string
   wontdo?: string
+  milestone?: string
   section?: string
   version?: string
 }
@@ -577,6 +578,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         type: a.type ? [a.type] : undefined,
         labels: a.labels === undefined ? undefined : idList(a.labels).map(db.label),
         under: a.under || undefined,
+        milestone: a.milestone || undefined,
         text: a.text || undefined,
       }
       if (query.under && !find(snap.items, query.under)) fail(`No item ${query.under}`)
@@ -618,6 +620,12 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
       const tags = a.labels === undefined ? [] : idList(a.labels)
       const place = placeOf(snap.items, a.kind!, a.parent)
+      // A target of its own: on an epic, or on a task in an epic (where it overrides the epic's).
+      if (a.milestone) {
+        const target = checkTarget(snap.items, a.kind!, a.milestone)
+        if (place.milestone && target !== place.milestone) fail(`under ${place.milestone}, ${a.kind} already targets it; leave milestone out or put it under ${target}`)
+        place.milestone = target
+      }
       const { note, section } = noteOf(a)
       if ((note || section) && a.kind !== 'task') fail('Only tasks carry a release note')
       const id = await sql($, db.insert(actor, {
@@ -690,6 +698,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       // Every argument checked before the first write, so a call that fails changes nothing.
       if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks wait on other tasks')
       const place = a.parent === undefined ? undefined : placeOf(snap.items, it.kind, a.parent, it.id)
+      const target = a.milestone === undefined ? undefined : checkTarget(snap.items, it.kind, a.milestone)
       const blockers = a.blocked_by === undefined ? undefined : checkBlockers(snap.items, it.id, idList(a.blocked_by))
       const related = a.relates_to === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.relates_to))
       const original = a.duplicates === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.duplicates))
@@ -706,6 +715,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         note,
         section,
         ...(place ?? {}),
+        ...(target === undefined ? {} : { milestone: target }),
         // Back to work (todo, in progress, blocked), a dropped task is no longer won't do.
         resolution: wontdo !== undefined ? 'wontdo' : it.resolution && a.status && !['done', 'review'].includes(a.status) ? null : undefined,
       })
@@ -797,7 +807,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       // All or nothing up front: nothing is written until the whole tree has passed.
       const planned = checkPlan(snap.items, nodes, a.parent || undefined)
       const ids = new Map<string, string>()
-      for (const one of planned) {
+      // Milestones first (they sit under nothing), so anything in the plan can target one by its ref.
+      for (const one of [...planned.filter(one => one.node.kind === 'milestone'), ...planned.filter(one => one.node.kind !== 'milestone')]) {
         const n = one.node
         // Under a milestone (new or not), an item targets it rather than sitting in it.
         const under = one.parentRef ? ids.get(one.parentRef)! : one.parentId
@@ -806,7 +817,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
           kind: n.kind,
           title: n.title.trim(),
           parent: isTarget ? null : under,
-          milestone: isTarget ? under : null,
+          milestone: n.milestone ? ids.get(String(n.milestone).trim()) ?? find(snap.items, String(n.milestone).trim())!.id : isTarget ? under : null,
           description: n.description,
           due: n.due,
           assignee: n.assignee,
@@ -1489,7 +1500,7 @@ export const register: Register = on => {
             enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship', 'file'],
             description: [
               'show: the tree, or id: one item with its tasks, activity, commits and PRs. next: what to pick up.',
-              'find: kind, status, assignee ("none"), priority, type, labels, under (an id), text.',
+              'find: kind, status, assignee ("none"), priority, type, labels, under (an id), milestone, text.',
               'pr: branch, title and body for the PR of the unit an item ships in. add: kind, title, any field below.',
               "plan: tree, a whole breakdown in one call (nodes take add's fields, ref and children; blocked_by may name refs).",
               'update: id and fields; empty string clears. claim: id, a task or a handed epic/milestone. release: id, body.',
@@ -1535,6 +1546,7 @@ export const register: Register = on => {
           path: { type: 'string' },
           note: { type: 'string', description: "A task's CHANGELOG line, saying what changed for its users; \"-\" for none" },
           wontdo: { type: 'string', description: "update: close a task as won't do (dropped, not finished), with the reason" },
+          milestone: { type: 'string', description: "The milestone an epic or task targets (a task takes its epic's unless given); find: what targets it" },
           version: { type: 'string', description: '1.2.3' },
           section: { type: 'string', enum: SECTIONS, description: 'Of the note; by default Fixed for a bug, Changed for a chore, else Added' },
         },
