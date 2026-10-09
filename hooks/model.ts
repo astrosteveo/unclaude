@@ -19,10 +19,34 @@ const PARENTS: Record<Kind, Kind[]> = { milestone: [], epic: ['milestone'], task
 
 export const emptySnapshot = (): Snapshot => ({ items: [], activity: [], seen: {} })
 
-export const find = (items: Item[], id: string | undefined) =>
-  id === undefined ? undefined : items.find(item => item.id.toUpperCase() === id.toUpperCase())
+/**
+ * Lookups over one list of items, built the first time it is asked about. A snapshot's list is replaced
+ * on every load, never changed in place, so an index stays true for as long as its list is around.
+ */
+type Index = { byId: Map<string, Item>; children: Map<string | null, Item[]>; status: Map<Item, Status> }
+const indexes = new WeakMap<Item[], Index>()
 
-export const childrenOf = (items: Item[], id: string | null) => items.filter(item => item.parent === id)
+function indexOf(items: Item[]): Index {
+  let index = indexes.get(items)
+  if (!index) {
+    index = { byId: new Map(), children: new Map(), status: new Map() }
+    for (const item of items) {
+      const key = item.id.toUpperCase()
+      if (!index.byId.has(key)) index.byId.set(key, item)
+      const siblings = index.children.get(item.parent)
+      if (siblings) siblings.push(item)
+      else index.children.set(item.parent, [item])
+    }
+    indexes.set(items, index)
+  }
+  return index
+}
+
+export const find = (items: Item[], id: string | undefined) =>
+  id === undefined ? undefined : indexOf(items).byId.get(id.toUpperCase())
+
+/** An item's children, as a list of the caller's own (free to sort). */
+export const childrenOf = (items: Item[], id: string | null): Item[] => [...(indexOf(items).children.get(id) ?? [])]
 
 /** The parent id to store, or throws when the nesting is not allowed. */
 export function checkParent(items: Item[], kind: Kind, parent: string | undefined, self?: string): string | null {
@@ -270,6 +294,14 @@ export function handedScope(items: Item[], item: Item): Item | undefined {
  */
 export function statusOf(items: Item[], item: Item): Status {
   if (item.kind === 'task') return item.status
+  // Rolled up once per list: the board asks for every row's status, and each roll-up asks for its parts'.
+  const memo = indexOf(items).status
+  let status = memo.get(item)
+  if (status === undefined) memo.set(item, (status = rollUp(items, item)))
+  return status
+}
+
+function rollUp(items: Item[], item: Item): Status {
   const tasks = tasksUnder(items, item).map(task => task.status)
   if (tasks.length === 0) return item.status
   if (tasks.every(status => status === 'done')) {

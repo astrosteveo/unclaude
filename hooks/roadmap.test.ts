@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -69,6 +69,29 @@ const items = [
 test('status rolls up from tasks, blocked first', async () => {
   expect(statusOf(items, items[0]!)).toBe('blocked')
   expect(outline(items).split('\n')[0]).toBe('M1 ✗ blocked M1 title  (1/4 tasks, due 2026-11-15)')
+})
+
+test('rollups scale: a two-thousand-item roadmap draws its outline and brief quickly, and a new list rolls up afresh', async () => {
+  const big: Item[] = []
+  for (let m = 1; m <= 20; m++) {
+    big.push(item(`M${m}`, { assignee: 'claude' }))
+    for (let e = 1; e <= 10; e++) {
+      const epic = `E${(m - 1) * 10 + e}`
+      big.push(item(epic, { parent: `M${m}`, assignee: 'claude' }))
+      for (let t = 1; t <= 10; t++) big.push(item(`T${((m - 1) * 10 + e - 1) * 10 + t}`, { parent: epic, status: t % 3 ? 'done' : 'todo' }))
+    }
+  }
+  const started = performance.now()
+  big.forEach(one => statusOf(big, one))
+  outline(big)
+  brief({ items: big, activity: [], seen: {} }, 'claude', [])
+  // About 10ms with the index; about 250ms when each roll-up walked the whole list again.
+  expect(performance.now() - started).toBeLessThan(100)
+  expect(statusOf(big, find(big, 'E1')!)).toBe('in_progress')
+  // The next snapshot is a new list: its roll-ups are its own. (E1 sits in M1, handed over whole, so it closes.)
+  const next = big.map(one => (one.parent === 'E1' ? { ...one, status: 'done' as const } : one))
+  expect(statusOf(next, find(next, 'E1')!)).toBe('done')
+  expect(statusOf(big, find(big, 'E1')!)).toBe('in_progress')
 })
 
 test('nesting rules and subtrees', async () => {
