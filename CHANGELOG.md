@@ -26,6 +26,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Fixed
 
+- The roadmap is found from the project root, however far a shell `cd` moved the session. Before, the database, git and gh were looked for from the session's current directory, so after a `cd` into a subfolder the tool failed ("unable to open database") and the board read as empty. Coming back, the next brief replayed old changes as new; it no longer does.
 - Old activity no longer drops out of view. The board's snapshot was the newest 500 entries across the whole roadmap, so past that, older items lost their timeline and handoff notes, and `find` stopped matching their comments. The snapshot now carries each item's newest 20 entries and its latest handoff note; `show` and `claim` read the item's whole timeline, and `find` searches every comment ever written.
 - An `add` or `update` that fails writes nothing. Before, a bad related or duplicate id, or a checklist on an epic, failed after the item was added, so a retry added it twice; and an `update` with a bad blocker or link had already written its other fields.
 - A task let go while under way (`release`, or Unassign on the board) goes back to todo, so `next` and the backlog offer it to the next agent. Before, it stayed in progress with nobody on it and no agent was offered it again. Blocked and review tasks keep their status.

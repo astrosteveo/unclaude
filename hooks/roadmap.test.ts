@@ -140,6 +140,35 @@ test('a prompt goes in as typed when the roadmap cannot be read', async ($, on) 
   expect(seen).toBeUndefined()
 })
 
+test('the roadmap is found from the project root, wherever a shell cd took the session', async ($, on) => {
+  const snap = { items: [item('T1')], activity: [{ id: 7, item_id: 'T1', author: 'user', type: 'comment', body: 'old news', at: '2026-10-09T10:00:00Z' }], seen: {} }
+  const cwds: (string | undefined)[] = []
+  const stats: string[] = []
+  let isThere = true
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('session.cwd', () => ({ value: '/work/project/sub/dir' }) as never)
+  on('fs.stat', ($, e) => (stats.push(e.path), isThere ? { value: { size: 1, mtimeMs: 1 } } : { deny: 'ENOENT' }) as never)
+  on('process.run', ($, e) => (cwds.push(e.init?.cwd), { value: e.argv[0] === 'sqlite3' ? fakeSqlite(e.init?.stdin, snap) : { ...fakeSqlite('', null), stdout: '[]' } }))
+  on('clock.now', () => ({ value: 1 }) as never)
+  let context: readonly string[] | undefined
+  on('prompt.submit', ($, e) => ((context = e.context), { text: e.text, origin: e.origin }))
+  const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'add', kind: 'task', title: 'x' } as never)
+  expect(reply.deny).toBeUndefined()
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'T1' } as never)
+  // sqlite3, mkdir, git and gh all run in the root; the database is looked for there too.
+  expect(cwds.length).toBeGreaterThan(2)
+  expect(cwds.every(cwd => cwd === '/work/project')).toBe(true)
+  expect(stats.every(path => path.startsWith('/work/project/.claude/roadmap.db'))).toBe(true)
+
+  // A read that finds no database must not make the next brief replay what was already seen.
+  await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'composer' } })
+  isThere = false
+  await $.prompt.submit({ text: 'lost', wait: false, origin: { kind: 'composer' } })
+  isThere = true
+  await $.prompt.submit({ text: 'back', wait: false, origin: { kind: 'composer' } })
+  expect((context ?? []).join('\n')).not.toContain('old news')
+})
+
 test('subagents get stable, readable names', async () => {
   expect(agentName('Explore', 'Find auth handlers in src/')).toBe('explore:find-auth-handlers-in-src')
   expect(agentName('general-purpose', 'Refactor the very long module name that goes on and on')).toBe('general-purpose:refactor-the-very-long-module')

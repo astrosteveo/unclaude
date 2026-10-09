@@ -43,6 +43,20 @@ const refs = atom({ plugin: 'roadmap', key: 'refs' } as const, { commits: [], pr
 // Why the database cannot be read, shown in the pane in place of the board.
 const problem = atom({ plugin: 'roadmap', key: 'problem' } as const, null as string | null)
 
+/**
+ * The project root, where the roadmap lives. A shell `cd` in the session moves its working directory,
+ * never this, so the database, git and gh are always found from here. A host that can't say falls back
+ * to the working directory.
+ */
+const root = ($: EngineInterface) => $.session.root().catch(() => '.')
+
+/** Runs a command in the project root. */
+const runAt = async ($: EngineInterface, argv: string[], init: { stdin?: string; timeoutMs?: number } = {}) =>
+  $.process.run(argv, { ...init, cwd: await root($) })
+
+/** A path in the project, made absolute. */
+const inProject = async ($: EngineInterface, path: string) => `${await root($)}/${path}`
+
 // When git and gh were last asked; gh goes over the network, so it is asked far less often.
 let gitAskedAt = 0
 let ghAskedAt = 0
@@ -59,15 +73,12 @@ async function refreshRefs($: EngineInterface, isForced = false) {
   let { commits, prs } = current
   if (isForced || now - gitAskedAt > GIT_EVERY) {
     gitAskedAt = now
-    const ran = await $.process
-      .run(['git', 'log', '-n', '1000', '--format=%h%x1f%an%x1f%as%x1f%B%x1e'])
-      .catch(() => undefined)
+    const ran = await runAt($, ['git', 'log', '-n', '1000', '--format=%h%x1f%an%x1f%as%x1f%B%x1e']).catch(() => undefined)
     commits = ran && ran.exitCode === 0 ? parseGitLog(ran.stdout) : []
   }
   if (isForced || now - ghAskedAt > GH_EVERY) {
     ghAskedAt = now
-    const ran = await $.process
-      .run(['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
+    const ran = await runAt($, ['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
       .catch(() => undefined)
     try {
       prs = ran && ran.exitCode === 0 ? parsePrs(ran.stdout) : []
@@ -118,7 +129,7 @@ async function heartbeat($: EngineInterface, actor: string, isForced = false) {
 
 /** Runs one script through sqlite3 and answers what its last statement printed. */
 async function run($: EngineInterface, script: string): Promise<string> {
-  const ran = await $.process.run(db.ARGV, { stdin: script }).catch(async (err: unknown) => {
+  const ran = await runAt($, db.ARGV, { stdin: script }).catch(async (err: unknown) => {
     // A command that cannot start rejects; tell a missing sqlite3 apart from, say, a timeout.
     const isThere = await $.process.run(['sqlite3', '-version']).then(() => true, () => false)
     throw isThere ? err : new Error(MISSING_SQLITE)
@@ -151,7 +162,7 @@ async function ensureSchema($: EngineInterface) {
 async function sql($: EngineInterface, script: string): Promise<string> {
   if (!hasDir) {
     // A folder that cannot be made shows up as sqlite3's own "unable to open database".
-    await $.process.run(['mkdir', '-p', '.claude']).catch(() => undefined)
+    await runAt($, ['mkdir', '-p', '.claude']).catch(() => undefined)
     hasDir = true
   }
   if (!isSchemaReady) await ensureSchema($)
@@ -159,7 +170,7 @@ async function sql($: EngineInterface, script: string): Promise<string> {
 }
 
 /** Whether the project has a roadmap yet. Reads never make one: the database is created by the first write. */
-const hasDb = ($: EngineInterface) => $.fs.stat(db.DB).then(() => true, () => false)
+const hasDb = async ($: EngineInterface) => $.fs.stat(await inProject($, db.DB)).then(() => true, () => false)
 
 async function refresh($: EngineInterface): Promise<Snapshot> {
   try {
@@ -197,7 +208,7 @@ async function answerIgnore($: EngineInterface, answer: IgnoreAnswer) {
  */
 async function checkIgnore($: EngineInterface) {
   isIgnoreChecked = true
-  const ran = await $.process.run(['git', 'check-ignore', '-q', db.DB]).catch(() => undefined)
+  const ran = await runAt($, ['git', 'check-ignore', '-q', db.DB]).catch(() => undefined)
   if (!ran) return
   const answer = (await ignoreAnswers($))[await $.session.root()]
   const isOffered = shouldOfferIgnore(ignoreState(ran.exitCode), answer)
@@ -210,8 +221,9 @@ async function checkIgnore($: EngineInterface) {
 }
 
 async function addIgnore($: EngineInterface) {
-  const text = await $.fs.read('.gitignore').then(t => String(t), () => undefined)
-  await $.fs.write('.gitignore', withIgnore(text))
+  const file = await inProject($, '.gitignore')
+  const text = await $.fs.read(file).then(t => String(t), () => undefined)
+  await $.fs.write(file, withIgnore(text))
   await answerIgnore($, 'added')
   await update($, ignoreOffer, () => false)
   $.ui.toast(`roadmap: added ${db.DB}* to .gitignore`)
@@ -225,7 +237,7 @@ async function dismissIgnore($: EngineInterface) {
 /** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
-    [db.DB, `${db.DB}-wal`].map(file => $.fs.stat(file).then(s => `${s.size}:${s.mtimeMs}`, () => '-')),
+    [db.DB, `${db.DB}-wal`].map(async file => $.fs.stat(await inProject($, file)).then(s => `${s.size}:${s.mtimeMs}`, () => '-')),
   )
   const stamp = stamps.join('|')
   if (stamp !== dbStamp) {
@@ -627,7 +639,7 @@ async function showItem($: EngineInterface, id: string) {
 async function approve($: EngineInterface, item: Item, pr?: Pr) {
   await update($, merging, () => null)
   if (pr) {
-    const ran = await $.process.run(['gh', 'pr', 'merge', String(pr.number), '--merge'], { timeoutMs: 60_000 }).catch(
+    const ran = await runAt($, ['gh', 'pr', 'merge', String(pr.number), '--merge'], { timeoutMs: 60_000 }).catch(
       (err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }),
     )
     if (ran.exitCode !== 0) {
@@ -651,7 +663,7 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
   // The same note on its pull request, where the code is.
   const pr = openPrOf(await read($, refs), item)
   if (pr) {
-    const ran = await $.process.run(['gh', 'pr', 'comment', String(pr.number), '--body', `Changes requested: ${body}`], { timeoutMs: 30_000 }).catch(() => undefined)
+    const ran = await runAt($, ['gh', 'pr', 'comment', String(pr.number), '--body', `Changes requested: ${body}`], { timeoutMs: 30_000 }).catch(() => undefined)
     if (!ran || ran.exitCode !== 0) $.ui.toast(`roadmap: couldn't post the note on PR #${pr.number}; it is on ${item.id}`)
   }
   await userAct($, { action: 'update', id: item.id, status: 'in_progress' })
@@ -828,7 +840,8 @@ export const register: Register = on => {
               'If your recent work moved any of them, comment or update its status with the roadmap tool.</roadmap-reminder>',
           )
       }
-      seenActivity = newest
+      // Never backwards: a read that found no database (or an older copy of it) must not replay old news.
+      seenActivity = Math.max(seenActivity, newest)
       hasWorkedSinceUpdate = false
     } catch {
       // The brief is a courtesy: a roadmap that cannot be read never holds up a prompt.
