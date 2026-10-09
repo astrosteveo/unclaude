@@ -15,7 +15,7 @@ const SHOW = ''
 
 const item = (id: string, over: Partial<Item> = {}): Item => ({
   id, kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task', title: `${id} title`, status: 'todo', parent: null,
-  description: null, assignee: null, due: null, priority: 'p2', type: 'feature', note: null, section: null, lease_at: null,
+  description: null, assignee: null, due: null, priority: 'p2', type: 'feature', note: null, section: null, resolution: null, lease_at: null,
   labels: [], relations: [], blocked_by: [], checklist: [], created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
   ...over,
 })
@@ -292,5 +292,46 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   const rows = lines.filter(line => /[▓░]/.test(line) && !line.includes('done'))
   expect(new Set(rows.map(line => line.search(/[▓░]/))).size).toBe(1)
   expect(rows.find(line => line.includes('M3 Undated'))).toMatch(/M3 Undated +— +░/)
+  await ui.unmount()
+})
+
+test("won't do on the board: marked on its card and row, left out of the counts; the card drops a task with a reason", async ($, on) => {
+  const items = [
+    item('E1', { title: 'Polish' }),
+    item('T1', { parent: 'E1', status: 'done', title: 'Kept' }),
+    item('T2', { parent: 'E1', status: 'done', title: 'Dropped', resolution: 'wontdo' }),
+    item('T3', { parent: 'E1', title: 'Open' }),
+  ]
+  const ran: string[] = []
+  on('process.run', ($, e) => (ran.push(e.init?.stdin ?? ''), { value: fake(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  // Two tasks count (T1 done, T3 open); the dropped one neither way.
+  expect(paintPane(await ui.drawn(), 84).lines[0]).toContain('1/2 done')
+  const card = await ui.find({ key: 'card-T2' })
+  expect(card?.text).toContain("✕ won't do")
+  expect(JSON.stringify(card)).toContain('"strikethrough":true')
+  await ui.press({ key: 'tab-tree' })
+  expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2 Dropped/)
+  // Its card shows Won't do where Done would be.
+  await ui.press({ key: 'row-T2' })
+  expect((await ui.find({ key: 'set-wontdo' }))?.props.variant).toBe('primary')
+  expect((await ui.find({ key: 'set-done' }))?.props.variant).toBe('secondary')
+  await ui.press({ key: 'close' })
+  // Dropping an open task asks why, then closes it so.
+  await ui.press({ key: 'row-T3' })
+  await ui.press({ key: 'set-wontdo' })
+  ran.length = 0
+  await ui.input({ key: 'wontdo-reason', text: 'not needed after all' })
+  const write = ran.find(one => one.includes('resolution='))
+  expect(write).toContain("resolution='wontdo'")
+  expect(write).toContain("Won''t do: not needed after all")
+  expect(await ui.find({ key: 'wontdo-reason' })).toBeUndefined()
   await ui.unmount()
 })

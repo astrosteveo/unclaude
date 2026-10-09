@@ -24,6 +24,8 @@ export type Item = {
   note: string | null
   /** The CHANGELOG section the note goes under. */
   section: Section | null
+  /** How a closed task was closed, when not by doing it: `wontdo`, dropped (with its reason on the timeline). */
+  resolution: 'wontdo' | null
   /** When the holder last showed signs of life; a claim gone quiet too long can be taken over. */
   lease_at: string | null
   /** Free-form tags, sorted. */
@@ -128,6 +130,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[] }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null }
   }
 }

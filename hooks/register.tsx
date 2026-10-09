@@ -40,6 +40,8 @@ const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as str
 const merging = atom({ plugin: 'roadmap', key: 'merging' } as const, null as string | null)
 // The task just set done on the board, whose card asks for its release note.
 const noting = atom({ plugin: 'roadmap', key: 'noting' } as const, null as string | null)
+// The task whose card asks why it is dropped (won't do).
+const dropping = atom({ plugin: 'roadmap', key: 'dropping' } as const, null as string | null)
 // The item whose card waits on a yes before merging its stack of PRs, and the run's progress while one goes.
 const stacking = atom({ plugin: 'roadmap', key: 'stacking' } as const, null as string | null)
 const stackRun = atom({ plugin: 'roadmap', key: 'stackRun' } as const, '')
@@ -413,6 +415,7 @@ type Input = {
   cascade?: boolean
   path?: string
   note?: string
+  wontdo?: string
   section?: string
   version?: string
 }
@@ -609,6 +612,15 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     }
     case 'update': {
       const it = need()
+      // Won't do: the task is closed, with the reason why, as dropped rather than finished.
+      const wontdo = a.wontdo === undefined ? undefined : a.wontdo.trim() || fail("wontdo takes the reason the task is dropped")
+      if (wontdo !== undefined) {
+        if (it.kind !== 'task') fail("Only tasks close as won't do; a milestone or epic closes when its tasks have")
+        if (a.status !== undefined && a.status !== 'done') fail("wontdo closes the task: leave status out")
+        a.status = 'done'
+      }
+      // Closing what was dropped (its review approved) needs no ticks or note: it isn't finished work.
+      const isDropped = wontdo !== undefined || (it.resolution === 'wontdo' && a.status === 'done')
       if (a.checklist !== undefined && it.kind !== 'task') fail('Only tasks carry a checklist')
       // Done can tick the entries it finishes in the same call: one write closes the task.
       const ticks = a.items === undefined ? [] : numbers(a.items)
@@ -620,7 +632,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         ticks.includes(c.n) ? { ...c, done: true } : c,
       )
       const open = list.filter(c => !c.done)
-      if (a.status === 'done' && open.length && !a.force)
+      if (a.status === 'done' && open.length && !a.force && !isDropped)
         fail(
           `${it.id} has ${open.length} unchecked item(s): ${open.map(c => `${c.n}. ${c.text}`).join('; ')}. ` +
             'Check them (action check), or pass force: true to close it anyway.',
@@ -631,7 +643,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const { note, section } = noteOf(a)
       if ((note !== undefined || section !== undefined) && it.kind !== 'task') fail('Only tasks carry a release note')
       // An agent's done asks for the task's line in the CHANGELOG, unless it has one.
-      if (a.status === 'done' && it.kind === 'task' && actor !== USER && !(note ?? it.note))
+      if (a.status === 'done' && it.kind === 'task' && actor !== USER && !(note ?? it.note) && !isDropped)
         fail(
           `${it.id} has no release note. Send status done again with note: one line for the CHANGELOG, saying what changed for ` +
             `whoever uses the project (and section: ${SECTIONS.join(', ')}; ${sectionFor(it)} by default); or note: "-" when the work needs no line (tests, refactors).`,
@@ -662,9 +674,12 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         note,
         section,
         parent,
+        // Back to work (todo, in progress, blocked), a dropped task is no longer won't do.
+        resolution: wontdo !== undefined ? 'wontdo' : it.resolution && a.status && !['done', 'review'].includes(a.status) ? null : undefined,
       })
       // One script, one transaction: the update lands whole or not at all.
       const parts = [
+        wontdo === undefined ? undefined : { script: db.comment(actor, it.id, `Won't do: ${wontdo}`), notes: [] as string[] },
         ticks.length ? db.check(actor, it, ticks, true) : undefined,
         a.checklist === undefined ? undefined : db.setChecklist(actor, it, texts(a.checklist)),
         blockers === undefined ? undefined : db.setBlockers(actor, it, blockers),
@@ -675,7 +690,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const all = db.atomic([script, ...parts.map(part => part.script)])
       if (all) await sql($, all, t)
       notes.push(...parts.flatMap(part => part.notes))
-      if (isToReview) {
+      if (isToReview && isDropped) notes.push("waiting on the user's approval to drop it. They approve on the board; pass approved: true only when they tell you in chat")
+      else if (isToReview) {
         notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
         // The review point is where its pull request opens: one per unit of work handed over.
         const pr = pullRequest(snap.items, it)
@@ -1471,6 +1487,7 @@ export const register: Register = on => {
           cascade: { type: 'boolean' },
           path: { type: 'string' },
           note: { type: 'string', description: "A task's CHANGELOG line, saying what changed for its users; \"-\" for none" },
+          wontdo: { type: 'string', description: "update: close a task as won't do (dropped, not finished), with the reason" },
           version: { type: 'string', description: '1.2.3' },
           section: { type: 'string', enum: SECTIONS, description: 'Of the note; by default Fixed for a bug, Changed for a chore, else Added' },
         },
@@ -1618,6 +1635,7 @@ export const register: Register = on => {
       stackRun: await read($, stackRun),
       commentTurns: await read($, commentTurns),
       noting: await read($, noting),
+      dropping: await read($, dropping),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
@@ -1655,6 +1673,7 @@ export const register: Register = on => {
       askClaude: item => void askClaude($, item),
       setCommentTurns: isOn => void update($, commentTurns, () => isOn).then(() => $.store.set('commentTurns', isOn)).then(() => focusOn($, 'comment-turns')),
       setNoting: id => void update($, noting, () => id).then(() => focusOn($, id ? 'note' : 'close')),
+      setDropping: id => void update($, dropping, () => id).then(() => focusOn($, id ? 'wontdo-reason' : 'close')),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),
     }

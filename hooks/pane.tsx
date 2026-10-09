@@ -4,7 +4,7 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -170,6 +170,8 @@ export type PaneState = {
   commentTurns: boolean
   /** The task whose card asks for its release note, having just been set done. */
   noting: string | null
+  /** The task whose card asks why it is dropped (won't do), while it does. */
+  dropping: string | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -225,6 +227,7 @@ export type PaneActions = {
   setCommentTurns: (isOn: boolean) => void
   /** Asks for a task's release note on its card (null drops the question). */
   setNoting: (id: string | null) => void
+  setDropping: (id: string | null) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -262,7 +265,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -308,7 +311,7 @@ export function drawPane(
     const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
     return {
       pr,
-      tag: tags.length ? ` ${tags.join(' ')}` : '',
+      tag: tags.length || isDropped(item) ? ` ${[...(isDropped(item) ? [`${WONTDO_GLYPH} won't do`] : []), ...tags].join(' ')}` : '',
       ticks: part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
       prTag: pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : '',
       wait: waits.length ? ` ⧗${waits.join(',')}` : '',
@@ -387,7 +390,9 @@ export function drawPane(
         <Text dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
           {id}
         </Text>{' '}
-        <Text bold={isOpen}>{title}</Text>
+        <Text bold={isOpen} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+          {title}
+        </Text>
         {rows === 2 ? '\n' : ' '.repeat(pad)}
         <Text color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
           {detail(tag)}
@@ -414,8 +419,9 @@ export function drawPane(
   const canUndo = undoable.length > 0
   const unreadTotal = items.reduce((sum, item) => sum + unread(snap, item.id, USER).length, 0)
   const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
-  const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done').length
-  const taskCount = items.filter(i => i.kind === 'task').length
+  // Dropped work counts neither way: it is closed, but nothing was done.
+  const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done' && !isDropped(i)).length
+  const taskCount = items.filter(i => i.kind === 'task' && !isDropped(i)).length
   // The header: the views as tabs with the progress and unread count beside them, then the actions. They
   // share a row where the pane is wide enough; else the actions take a second row of their own.
   const bar = progressBar(doneCount, taskCount, PROGRESS_BAR)
@@ -588,8 +594,10 @@ export function drawPane(
           <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
             {foldToggle(item)}
             <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
-              <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
-              <Text bold={item.kind === 'milestone'}>{title}</Text>
+              {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>} <Text dimColor>{item.id}</Text>{' '}
+              <Text bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+                {title}
+              </Text>
               <Text dimColor>{facts}</Text>
               <Text color="cyan">{who}</Text>
               <Text color="magenta" bold>
@@ -985,8 +993,8 @@ export function drawPane(
   const prRows = cardPr ? tall(prText) : 0
   const barRows = !item
     ? 0
-    : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 :
+    : (item.kind === 'task' ? buttonRows([...STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one])), `${WONTDO_GLYPH} Won't do`]) : 1) +
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id || dropping === item.id || stacking === item.id ? 1 :
         parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   // Key hints, most useful first: as many as fit in the rows the pane gives them (one wide, two narrow),
@@ -1045,15 +1053,22 @@ export function drawPane(
       <Box key="bar" flexDirection="column">
         {item.kind === 'task' ? (
           <Box key="status-row" flexDirection="row" columnGap={1} flexWrap="wrap">
-            {STATUSES.map((one, i) => (
-              <Button key={`set-${one}`} label={item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]}
-                hotkey={String(i + 1)} variant={item.status === one ? 'primary' : 'secondary'}
-                onPress={() => {
-                  act.userAct({ action: 'update', id: item.id, status: one })
-                  // Done, and nothing for the CHANGELOG yet: the card asks for its line.
-                  if (one === 'done' && !item.note && Input) act.setNoting(item.id)
-                }} />
-            ))}
+            {STATUSES.map((one, i) => {
+              // Dropped, the task shows as Won't do rather than Done; any status takes it back to work.
+              const isOn = item.status === one && !(one === 'done' && isDropped(item))
+              return (
+                <Button key={`set-${one}`} label={isOn ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]}
+                  hotkey={String(i + 1)} variant={isOn ? 'primary' : 'secondary'}
+                  onPress={() => {
+                    act.userAct({ action: 'update', id: item.id, status: one })
+                    // Done, and nothing for the CHANGELOG yet: the card asks for its line.
+                    if (one === 'done' && !item.note && Input) act.setNoting(item.id)
+                  }} />
+              )
+            })}
+            {/* No hotkey: dropping work takes a reason, asked for on the next row. */}
+            <Button key="set-wontdo" label={isDropped(item) ? `${WONTDO_GLYPH} Won't do` : "Won't do"} variant={isDropped(item) ? 'primary' : 'secondary'}
+              onPress={() => (isDropped(item) || !Input ? undefined : act.setDropping(item.id))} />
           </Box>
         ) : (
           <Box key="status-row">
@@ -1076,6 +1091,15 @@ export function drawPane(
             </Text>
             <Button key="stack-yes" label="Merge the stack" onPress={() => act.mergeStack(stack)} />
             <Button key="stack-cancel" label="Cancel" onPress={() => act.askStack(null)} />
+          </Box>
+        ) : dropping === item.id && Input ? (
+          <Box key="wontdo-row" flexDirection="row" columnGap={1}>
+            <Input key="wontdo-reason" label="Won't do, because" placeholder="Why it's dropped; Enter closes it" autoFocus submitLabel="close"
+              onSubmit={(value: string) => {
+                if (value.trim()) act.userAct({ action: 'update', id: item.id, wontdo: value.trim() })
+                act.setDropping(null)
+              }} />
+            <Button key="wontdo-cancel" label="Cancel" onPress={() => act.setDropping(null)} />
           </Box>
         ) : noting === item.id && Input ? (
           <Box key="note-row" flexDirection="row" columnGap={1}>
