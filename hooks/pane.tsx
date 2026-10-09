@@ -1,9 +1,9 @@
 import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-code'
 
-import type { Item, Priority, Refs, Snapshot, Status, View } from '../types'
+import type { Draft, Item, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, isAgent, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -27,6 +27,8 @@ export type PaneState = {
   filter: string
   /** Whether the filter's field is open. */
   isFiltering: boolean
+  /** The new-item form, while it is open. */
+  draft: Draft | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -47,6 +49,9 @@ export type PaneActions = {
   setRequesting: (isOn: boolean) => void
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
+  /** Opens the new-item form (under `parent` when given), changes its choices, or closes it (null). */
+  setDraft: (draft: Draft | null) => void
+  create: (draft: Draft, title: string) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -84,7 +89,7 @@ export function drawPane(
   const { Box, Text, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft } = state
   const query = parseQuery(filter)
   // What the filter lets through: everything without one; with one, what matches and, in the tree, what holds it.
   const isShown = (item: Item) => !query || matches(snap, item, query)
@@ -153,6 +158,8 @@ export function drawPane(
       {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
         onPress={() => act.setFiltering(true)} />}
       {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
+      {/* With a card open, n adds under it (on the card's bar) instead. */}
+      {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
     </Box>
   )
   const filterRow = isFiltering && Input && (
@@ -384,9 +391,11 @@ export function drawPane(
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
       (isRequesting ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), 'Hand to Claude', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
-  const footer = (item
+  const footer = (draft
+    ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
+    : item
     ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', 'm/u assign', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
   )
     .filter(Boolean)
     .join(' · ')
@@ -467,6 +476,7 @@ export function drawPane(
               onPress={() => act.setRequesting(true)} />
           )}
           <Button key="hand" label="Hand to Claude" hotkey="h" onPress={() => act.handToClaude(item)} />
+          {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
           <Button key="mine" label="Assign me" hotkey="m" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: USER })} />
           <Button key="unassign" label="Unassign" hotkey="u" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: '' })} />
           <Button key="close" label="Close" hotkey="x" onPress={() => act.closeDetail(item.id)} />
@@ -490,6 +500,49 @@ export function drawPane(
     </Box>
   )
 
+  // The new-item form: the choices first, the title last (Enter on it creates the item).
+  const homes = draft ? homesFor(items, draft.kind) : []
+  const form = draft && (
+    <Box key="new-form" flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>New {draft.kind}</Text>
+      {Select ? (
+        <Box key="new-choices" flexDirection="row" columnGap={2} flexWrap="wrap">
+          <Select key="new-kind" label="Kind" options={KINDS.map(one => ({ value: one }))} value={draft.kind}
+            onSelect={(value: string) => act.setDraft(fitDraft({ ...draft, kind: value as Draft['kind'] }))} />
+          {draft.kind === 'task' && (
+            <Select key="new-priority" label="Priority" options={PRIORITIES.map(one => ({ value: one }))} value={draft.priority}
+              onSelect={(value: string) => act.setDraft({ ...draft, priority: value as Draft['priority'] })} />
+          )}
+          {draft.kind === 'task' && (
+            <Select key="new-type" label="Type" options={TYPES.map(one => ({ value: one }))} value={draft.type}
+              onSelect={(value: string) => act.setDraft({ ...draft, type: value as Draft['type'] })} />
+          )}
+          {draft.kind !== 'milestone' && (
+            <Select key="new-parent" label="Under" value={draft.parent}
+              options={[{ value: '', label: '(top level)' }, ...homes.map(one => ({ value: one.id, label: `${one.id} ${one.title}`.slice(0, 40) }))]}
+              onSelect={(value: string) => act.setDraft({ ...draft, parent: value })} />
+          )}
+        </Box>
+      ) : (
+        <Text dimColor>{draft.kind}{draft.parent ? ` under ${draft.parent}` : ''}</Text>
+      )}
+      {Input && (
+        <Input key="new-title" label="Title" placeholder="What it is; Enter creates it" autoFocus submitLabel="create"
+          onSubmit={(value: string) => value.trim() && act.create(draft, value.trim())} />
+      )}
+      <Button key="new-cancel" label="Cancel" onPress={() => act.setDraft(null)} />
+    </Box>
+  )
+  // Where a new item goes by default: under the open card, when it can hold one.
+  function newDraft(under: Item | null): Draft {
+    const kind = under?.kind === 'milestone' ? 'epic' : 'task'
+    return fitDraft({ kind, priority: 'p2', type: 'feature', parent: under && under.kind !== 'task' ? under.id : under?.parent ?? '' })
+  }
+  // A parent the chosen kind can't sit under is dropped.
+  function fitDraft(next: Draft): Draft {
+    return homesFor(items, next.kind).some(one => one.id === next.parent) ? next : { ...next, parent: '' }
+  }
+
   const offer = isIgnoreOffered && (
     <Box key="ignore-offer" flexDirection="column">
       <Text color="yellow">{db.DB} isn't in .gitignore, so it can be committed by mistake.</Text>
@@ -505,14 +558,16 @@ export function drawPane(
     node: (
       <Box flexDirection="column">
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
-        {!(isCompact && panel) && header}
-        {!panel && filterRow}
-        {!panel && query && !items.some(isShown) && <Text key="no-match" dimColor>Nothing matches the filter.</Text>}
+        {!(isCompact && (panel || form)) && header}
+        {!panel && !form && filterRow}
+        {!panel && !form && query && !items.some(isShown) && <Text key="no-match" dimColor>Nothing matches the filter.</Text>}
         {offer}
         {trouble ? (
           <Text color="red">{trouble}</Text>
+        ) : form ? (
+          form
         ) : items.length === 0 ? (
-          <Text dimColor>No roadmap yet. Ask Claude to plan milestones, epics and tasks.</Text>
+          <Text dimColor>No roadmap yet. Ask Claude to plan milestones, epics and tasks, or press n to add one.</Text>
         ) : (
           // An open item stands in for the board, so a long board never pushes it off screen.
           panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : backlogView)

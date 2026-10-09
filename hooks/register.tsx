@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { IssueType, Item, Kind, PlanNode, Priority, Query, Refs, Snapshot, Status, View } from '../types'
+import type { Draft, IssueType, Item, Kind, PlanNode, Priority, Query, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
@@ -26,6 +26,8 @@ const requesting = atom({ plugin: 'roadmap', key: 'requesting' } as const, false
 // The board's filter as typed, and whether its field is open.
 const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
 const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
+// The new-item form's choices while it is open.
+const draft = atom({ plugin: 'roadmap', key: 'draft' } as const, null as Draft | null)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -599,6 +601,22 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
     })
 }
 
+/** Adds what the new-item form describes, as the person, and opens it. */
+async function create($: EngineInterface, choice: Draft, title: string) {
+  try {
+    const reply = await act($, USER, {
+      action: 'add', kind: choice.kind, title, parent: choice.parent || undefined,
+      ...(choice.kind === 'task' ? { priority: choice.priority, type: choice.type } : {}),
+    })
+    await update($, draft, () => null)
+    const id = /^Added (\w+)/.exec(reply)?.[1]
+    await refresh($)
+    if (id) await open($, id)
+  } catch (err) {
+    $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
 async function handToClaude($: EngineInterface, item: Item) {
   await userAct($, { action: 'update', id: item.id, assignee: CLAUDE })
   await $.prompt.submit({
@@ -819,6 +837,7 @@ export const register: Register = on => {
       isRequesting: await read($, requesting),
       filter: await read($, filter),
       isFiltering: await read($, filtering),
+      draft: await read($, draft),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
@@ -833,6 +852,8 @@ export const register: Register = on => {
       setRequesting: isOn => void update($, requesting, () => isOn).then(() => (isOn ? focusOn($, 'changes') : undefined)),
       focus: key => void focusOn($, key),
       setFilter: text => void update($, filter, () => text).then(() => update($, filtering, () => false)),
+      setDraft: next => void update($, draft, () => next).then(() => (next ? focusOn($, 'new-title') : undefined)),
+      create: (choice, title) => void create($, choice, title),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),

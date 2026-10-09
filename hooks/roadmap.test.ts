@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, brief, checkLinks, handedScope, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, brief, checkLinks, handedScope, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -866,5 +866,49 @@ test('a handed epic in review is approved, or sent back, from its card', async (
   await ui.press({ key: 'request' })
   await ui.input({ key: 'changes', text: 'add an empty state' } as never)
   expect(submitted).toContain('sent roadmap epic E1')
+  await ui.unmount()
+})
+
+test('new item from the board: n opens the form, choices narrow the parents, Enter creates and opens it', async ($, on) => {
+  const some = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' }), item('M2'), item('T2', { parent: 'M2', status: 'done' })]
+  expect(homesFor(some, 'task').map(one => one.id)).toEqual(['M1', 'E1'])
+  expect(homesFor(some, 'epic').map(one => one.id)).toEqual(['M1'])
+  expect(homesFor(some, 'milestone')).toEqual([])
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    return { value: stdin.includes('INSERT INTO counters') ? { ...fakeSqlite('', null), stdout: 'T9' } : fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'new' })
+  expect(await ui.find({ key: 'new-title' })).toBeDefined()
+  await ui.select({ key: 'new-parent', value: 'E1' } as never)
+  await ui.select({ key: 'new-priority', value: 'p1' } as never)
+  await ui.select({ key: 'new-type', value: 'bug' } as never)
+  await ui.input({ key: 'new-title', text: 'Crash on empty input' } as never)
+  const insert = scripts.find(one => one.includes('INSERT INTO items'))!
+  expect(insert).toContain("'Crash on empty input'")
+  expect(insert).toContain("'E1'")
+  expect(insert).toContain("'p1', 'bug'")
+  expect(await ui.find({ key: 'new-title' })).toBeUndefined()
+
+  // From an open epic, n adds under it; switching to a milestone drops the parent it can't take.
+  await ui.press({ key: 'close' }).catch(() => undefined)
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'row-E1' })
+  await ui.press({ key: 'new-under' })
+  expect((await ui.find({ key: 'new-parent' }))?.props.value).toBe('E1')
+  await ui.select({ key: 'new-kind', value: 'milestone' } as never)
+  expect(await ui.find({ key: 'new-parent' })).toBeUndefined()
+  await ui.press({ key: 'new-cancel' })
+  expect(await ui.find({ key: 'hand' })).toBeDefined()
   await ui.unmount()
 })

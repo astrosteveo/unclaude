@@ -95,6 +95,9 @@ export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<strin
 
 export type View = 'board' | 'tree' | 'backlog'
 
+/** The new-item form's choices so far; the title is typed last and submits it. */
+export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: string }
+
 /** A commit whose message names roadmap ids. */
 export type Commit = { hash: string; author: string; date: string; subject: string; ids: string[] }
 
@@ -106,6 +109,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null }
   }
 }
