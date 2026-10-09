@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkLinks, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, checkPlan, isStale, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -546,4 +546,154 @@ test('review waits on the user: last in next, and listed apart in the brief', as
   expect(text).toContain("Assigned to you (claude):\n- T2")
   expect(text).not.toContain('Assigned to you (claude):\n- T1')
   expect(text).toContain("Waiting on the user's review")
+})
+
+test('leases: a quiet claim reads as stale, is offered by next, named in the brief and marked on the card', async ($, on) => {
+  const now = Date.parse('2026-10-09T12:00:00Z')
+  const some = [
+    item('T1', { status: 'in_progress', assignee: 'explore:a', lease_at: '2026-10-09T11:00:00Z' }),
+    item('T2', { status: 'in_progress', assignee: 'explore:b', lease_at: '2026-10-09T11:45:00Z' }),
+    item('T3', { status: 'in_progress', assignee: 'old', updated_at: '2026-10-09T09:00:00Z' }),
+    item('T4'),
+  ]
+  expect(some.map(one => isStale(one, now))).toEqual([true, false, true, false])
+  expect(isStale(item('T5', { status: 'review', assignee: 'x', lease_at: '2000-01-01T00:00:00Z' }), now)).toBe(false)
+  expect(nextUp(some, 'claude', now).map(one => one.id)).toEqual(['T4', 'T1', 'T3'])
+  expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T4'])
+  const text = brief({ items: some, activity: [], seen: {} }, 'claude', [], now)!
+  expect(text).toContain('Stale claims (holder silent over 30 min; claiming takes one over):\n- T1')
+  expect(text).toContain('In progress by others:\n- T2')
+
+  on('clock.now', () => ({ value: now }) as never)
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect((await ui.find({ key: 'card-T1' }))?.text).toContain('⌛stale')
+  expect((await ui.find({ key: 'card-T2' }))?.text).not.toContain('stale')
+  await ui.unmount()
+})
+
+test('heartbeat: every tracker call renews the caller\'s leases; other tools at most every five minutes', async ($, on) => {
+  let now = Date.parse('2026-10-09T12:00:00Z')
+  const scripts: string[] = []
+  on('clock.now', () => ({ value: now }) as never)
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('tool.call', { tool: 'Read' }, () => ({ result: 'ok' }) as never)
+  const renews = () => scripts.filter(one => one.includes('SET lease_at=') && one.includes("assignee='claude'") && !one.includes('BEGIN')).length
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
+  expect(renews()).toBe(2)
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  expect(renews()).toBe(2)
+  now += 6 * 60_000
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
+  expect(renews()).toBe(3)
+})
+
+test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {
+  const activity: Activity[] = [
+    { id: 1, item_id: 'T1', author: 'claude', type: 'comment', body: 'started on the parser', at: '2026-10-09T10:00:00Z' },
+    { id: 2, item_id: 'T1', author: 'explore:a', type: 'handoff', body: 'parser done; tests for edge cases left', at: '2026-10-09T11:00:00Z' },
+  ]
+  const some = [item('T1', { description: 'Parse the config', checklist: [{ n: 1, text: 'edge cases', done: false }] })]
+  const snap = { items: some, activity, seen: {} }
+  const text = detail(snap, some[0]!)
+  expect(text.split('\n').slice(1, 3)).toEqual(['Handoff from explore:a (2026-10-09 11:00):', '  parser done; tests for edge cases left'])
+  expect(unread(snap, 'T1', 'user').map(one => one.id)).toEqual([1, 2])
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    scripts.push(e.init?.stdin ?? '')
+    // The claim answers its new holder; everything else, the snapshot.
+    const isClaim = e.init?.stdin?.includes("'assign'") && e.init?.stdin?.includes('lease_at=')
+    return { value: isClaim ? { ...fakeSqlite('', snap), stdout: 'claude' } : fakeSqlite(e.init?.stdin, snap) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const claimed = String((await call({ action: 'claim', id: 'T1' })).result)
+  expect(claimed).toContain('T1 is yours (claude), in progress.')
+  expect(claimed).toContain('Handoff from explore:a')
+  expect(claimed).toContain('[ ] 1. edge cases')
+  const released = String((await call({ action: 'release', id: 'T1', body: 'blocked on vendor docs' })).result)
+  expect(released).toBe('T1 released, with your handoff note.')
+  expect(scripts.some(one => one.includes("'handoff'") && one.includes('blocked on vendor docs'))).toBe(true)
+
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  expect((await ui.find({ key: 'act-2' }))?.type).toBe('Box')
+  expect(await ui.find({ type: 'Text', text: /explore:a handoff/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('plan: the whole tree is checked before anything is written', async () => {
+  const have = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' })]
+  const ok = checkPlan(have, [
+    { ref: 'auth', kind: 'epic', title: 'Auth', children: [
+      { ref: 'login', kind: 'task', title: 'Login', blocked_by: ['T1'] },
+      { kind: 'task', title: 'Logout', blocked_by: ['login'] },
+    ] },
+  ], 'M1')
+  expect(ok.map(one => [one.ref, one.parentId, one.parentRef, one.blockerRefs, one.blockerIds])).toEqual([
+    ['auth', 'M1', null, [], []],
+    ['login', null, 'auth', [], ['T1']],
+    ['#3', null, 'auth', ['login'], []],
+  ])
+  const bad = (nodes: unknown[], parent?: string) => () => checkPlan(have, nodes as never, parent)
+  expect(bad([{ kind: 'epic', title: 'x', children: [{ kind: 'milestone', title: 'y' }] }])).toThrow('a milestone cannot sit under a epic')
+  expect(bad([{ kind: 'epic', title: 'x' }], 'E1')).toThrow('cannot sit under a epic')
+  expect(bad([{ kind: 'task', title: 'x' }], 'M9')).toThrow('No item M9')
+  expect(bad([{ kind: 'task', title: '' }])).toThrow('title is required')
+  expect(bad([{ ref: 'a', kind: 'task', title: 'x' }, { ref: 'a', kind: 'task', title: 'y' }])).toThrow('ref a is used twice')
+  expect(bad([{ ref: 'a', kind: 'task', title: 'x', blocked_by: ['b'] }, { ref: 'b', kind: 'task', title: 'y', blocked_by: ['a'] }])).toThrow('cycle')
+  expect(bad([{ kind: 'task', title: 'x', blocked_by: ['nope'] }])).toThrow('No item nope')
+  expect(bad([{ kind: 'epic', title: 'x', checklist: ['a'] }])).toThrow('only tasks carry a checklist')
+  expect(bad([{ kind: 'task', title: 'x', priority: 'urgent' }])).toThrow('priority must be one of')
+})
+
+test('plan: creates parents first, wires refs to new ids, and answers the map', async ($, on) => {
+  // A small stand-in for sqlite3 that keeps the items it is asked to insert.
+  const made: Item[] = [item('M1')]
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    const m = stdin.match(/VALUES \('(\w)'\|\|\(SELECT n FROM counters WHERE prefix='\w'\), '(\w+)',\s*'([^']*)', '\w+', (NULL|'\w+')/)
+    if (m) {
+      const id = `${m[1]}${made.filter(one => one.id[0] === m[1]).length + 1}`
+      made.push(item(id, { kind: m[2] as Item['kind'], title: m[3]!, parent: m[4] === 'NULL' ? null : m[4]!.slice(1, -1) }))
+      return { value: { ...fakeSqlite('', null), stdout: id } }
+    }
+    return { value: fakeSqlite(stdin, { items: made, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const ran = await $.tool.call({
+    tool: 'mcp__roadmap__roadmap', action: 'plan', parent: 'M1',
+    tree: [{ ref: 'auth', kind: 'epic', title: 'Auth', children: [
+      { ref: 'login', kind: 'task', title: 'Login', checklist: ['works'], labels: ['UI'] },
+      { ref: 'logout', kind: 'task', title: 'Logout', blocked_by: ['login'] },
+    ] }],
+  } as never)
+  expect(String(ran.result)).toContain('Planned 3 item(s): auth → E1, login → T1, logout → T2')
+  expect(made.find(one => one.id === 'T2')?.parent).toBe('E1')
+  expect(scripts.some(one => one.includes("INSERT OR IGNORE INTO links(blocker, blocked) VALUES ('T1', 'T2')"))).toBe(true)
+  expect(scripts.some(one => one.includes("INSERT INTO checks(item_id, n, text, done) VALUES ('T1', 1, 'works', 0)"))).toBe(true)
+  expect(scripts.some(one => one.includes("INSERT INTO labels(item_id, label) VALUES ('T1', 'ui')"))).toBe(true)
+  // A bad tree writes nothing.
+  const before = scripts.length
+  const refused = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'plan', tree: [{ kind: 'task', title: 'x', blocked_by: ['ghost'] }] } as never)
+  expect(refused.deny).toContain('No item ghost')
+  expect(scripts.slice(before).some(one => one.includes('INSERT'))).toBe(false)
 })

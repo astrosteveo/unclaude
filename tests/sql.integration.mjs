@@ -281,3 +281,30 @@ test('labels are normalized, replaced as a set and logged; relations link, unlin
   assert.deepEqual(log('T1').slice(1), ['claude: labels: auth-flow, ui', 'claude: labels cleared', 'claude: relates to T2', 'claude: relates to T3', 'claude: no longer relates to T2'])
   assert.deepEqual(log('T2').slice(1), ['user: duplicate of T3', 'user: status todo → done (closed as a duplicate)'])
 })
+
+test('a claim starts a lease; a live one holds, a stale one is taken over and logged, and renew keeps it alive', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  assert.equal(sql(db.claim('explore:a', 'T1', false)), 'explore:a')
+  assert.ok(item('T1').lease_at)
+  // Live: someone else is refused.
+  assert.equal(sql(db.claim('claude', 'T1', false, 'explore:a')), 'explore:a')
+  // Gone quiet for 31 minutes: renew only touches the holder's own claims, and the claim goes through.
+  sql("UPDATE items SET lease_at=strftime('%Y-%m-%dT%H:%M:%SZ','now','-31 minutes');")
+  sql(db.renew('someone-else'))
+  assert.equal(sql(db.claim('claude', 'T1', false, 'explore:a')), 'claude')
+  assert.equal(item('T1').status, 'in_progress')
+  assert.deepEqual(log('T1').slice(1), ['explore:a: claimed', 'claude: took over stale claim from explore:a'])
+  // The new holder's heartbeat moves the lease on.
+  sql("UPDATE items SET lease_at='2000-01-01T00:00:00Z';")
+  sql(db.renew('claude'))
+  assert.notEqual(item('T1').lease_at, '2000-01-01T00:00:00Z')
+  assert.equal(sql(db.claim('explore:a', 'T1', false, 'claude')), 'claude')
+})
+
+test('a claim from before leases counts its last change as the heartbeat', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null, assignee: 'old', status: 'in_progress' }))
+  assert.equal(item('T1').lease_at, null)
+  assert.equal(sql(db.claim('claude', 'T1', false, 'old')), 'old')
+  sql("UPDATE items SET updated_at='2000-01-01T00:00:00Z';")
+  assert.equal(sql(db.claim('claude', 'T1', false, 'old')), 'claude')
+})

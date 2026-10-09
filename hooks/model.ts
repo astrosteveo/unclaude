@@ -1,4 +1,4 @@
-import type { Activity, Commit, IssueType, Item, Kind, Pr, Priority, Refs, Snapshot, Status } from '../types'
+import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Refs, Snapshot, Status } from '../types'
 
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
 export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
@@ -29,6 +29,74 @@ export function checkParent(items: Item[], kind: Kind, parent: string | undefine
   if (found.id === self) throw new Error(`${self} cannot be its own parent`)
   if (!PARENTS[kind].includes(found.kind)) throw new Error(`A ${kind} cannot sit under a ${found.kind} (${found.id})`)
   return found.id
+}
+
+/** How long a claim lasts without a sign of life from its holder before anyone may take it over. */
+export const LEASE_MS = 30 * 60_000
+
+/**
+ * Whether a task's claim has gone quiet: in progress under someone whose last heartbeat (or, for a claim
+ * made before leases, the task's last change) is older than LEASE_MS.
+ */
+export function isStale(item: Item, now: number): boolean {
+  if (item.kind !== 'task' || item.status !== 'in_progress' || !item.assignee) return false
+  const at = Date.parse(item.lease_at ?? item.updated_at)
+  return Number.isFinite(at) && now - at > LEASE_MS
+}
+
+/**
+ * A whole plan checked before anything is written, flattened parents first, or throws naming the first
+ * problem: a bad kind or nesting, a missing title, a ref used twice, a blocker that is neither a new
+ * task nor an existing one, or new tasks waiting on each other in a cycle.
+ */
+export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | undefined): PlannedItem[] {
+  const out: PlannedItem[] = []
+  const refs = new Map<string, PlannedItem>()
+  const walk = (list: PlanNode[], parentId: string | null, parentRef: string | null, parentKind: Kind | null) => {
+    for (const node of list) {
+      const ref = String(node.ref ?? `#${out.length + 1}`).trim()
+      const where = `${ref}${node.title ? ` (${node.title})` : ''}`
+      if (!KINDS.includes(node.kind)) throw new Error(`${where}: kind must be one of ${KINDS.join(', ')}`)
+      if (!node.title?.trim()) throw new Error(`${where}: title is required`)
+      if (refs.has(ref)) throw new Error(`ref ${ref} is used twice`)
+      if (find(items, ref)) throw new Error(`ref ${ref} is an existing item's id; pick another`)
+      if (node.priority && !PRIORITIES.includes(node.priority)) throw new Error(`${where}: priority must be one of ${PRIORITIES.join(', ')}`)
+      if (node.type && !TYPES.includes(node.type)) throw new Error(`${where}: type must be one of ${TYPES.join(', ')}`)
+      if (node.kind !== 'task' && (node.checklist?.length || node.blocked_by?.length))
+        throw new Error(`${where}: only tasks carry a checklist or blocked_by`)
+      if (parentKind === null) checkParent(items, node.kind, parentId ?? undefined)
+      else if (!PARENTS[node.kind].includes(parentKind)) throw new Error(`${where}: a ${node.kind} cannot sit under a ${parentKind}`)
+      const planned: PlannedItem = { ref, node, parentId: parentRef ? null : parentId, parentRef, blockerRefs: [], blockerIds: [] }
+      refs.set(ref, planned)
+      out.push(planned)
+      walk(node.children ?? [], null, ref, node.kind)
+    }
+  }
+  const top = parent ? find(items, parent)?.id ?? null : null
+  if (parent && !top) throw new Error(`No item ${parent}`)
+  walk(nodes, top, null, null)
+  for (const one of out) {
+    for (const raw of one.node.blocked_by ?? []) {
+      const name = String(raw).trim()
+      const local = refs.get(name)
+      if (local) {
+        if (local.node.kind !== 'task') throw new Error(`${one.ref}: only tasks block tasks; ${name} is a ${local.node.kind}`)
+        if (local === one) throw new Error(`${one.ref} cannot block itself`)
+        one.blockerRefs.push(local.ref)
+      } else one.blockerIds.push(...checkBlockers(items, '\u0000new', [name]))
+    }
+  }
+  // Existing tasks can't wait on new ones, so a cycle can only run through the new tasks.
+  const state = new Map<string, 'open' | 'done'>()
+  const visit = (ref: string) => {
+    if (state.get(ref) === 'done') return
+    if (state.get(ref) === 'open') throw new Error(`blocked_by runs in a cycle through ${ref}`)
+    state.set(ref, 'open')
+    for (const next of refs.get(ref)!.blockerRefs) visit(next)
+    state.set(ref, 'done')
+  }
+  for (const one of out) visit(one.ref)
+  return out
 }
 
 /** The tasks `item` waits on that are not done yet. */
@@ -174,8 +242,11 @@ export function outline(items: Item[], root: string | null = null): string {
  */
 export const unread = (snap: Snapshot, id: string, reader: string) =>
   snap.activity.filter(
-    one => one.item_id === id && one.author !== reader && one.type === 'comment' && one.id > (snap.seen[id] ?? 0),
+    one => one.item_id === id && one.author !== reader && isMessage(one) && one.id > (snap.seen[id] ?? 0),
   )
+
+/** Whether an entry is something someone wrote (a comment or a handoff note), not a change the tracker logged. */
+export const isMessage = (one: Activity) => one.type === 'comment' || one.type === 'handoff'
 
 export const timeline = (activity: Activity[], id: string) =>
   activity.filter(one => one.item_id === id).sort((a, b) => a.id - b.id)
@@ -184,6 +255,9 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
   const parts = [line(snap.items, item)]
   const where = path(snap.items, item)
   if (where) parts.push(`in: ${where}`)
+  // Whoever picks the task up reads the last holder's note before anything else.
+  const handoff = timeline(snap.activity, item.id).filter(one => one.type === 'handoff').at(-1)
+  if (handoff) parts.push(`Handoff from ${handoff.author} (${handoff.at.slice(0, 16).replace('T', ' ')}):\n  ${handoff.body}`)
   if (item.description) parts.push(item.description)
   if (item.checklist?.length)
     parts.push('Checklist:\n' + item.checklist.map(c => `  [${c.done ? 'x' : ' '}] ${c.n}. ${c.text}`).join('\n'))
@@ -205,9 +279,10 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
 
 /**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
- * unassigned todo tasks that wait on nothing unfinished, by priority, then due date.
+ * unassigned todo tasks that wait on nothing unfinished, by priority, then due date, then others'
+ * claims gone stale (given `now`), which a claim takes over.
  */
-export function nextUp(items: Item[], actor: string): Item[] {
+export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   const tasks = items.filter(item => item.kind === 'task')
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done')
   const due = (task: Item) => {
@@ -221,14 +296,16 @@ export function nextUp(items: Item[], actor: string): Item[] {
     .sort((a, b) => byPriority(a, b) || due(a).localeCompare(due(b)) || byId(a, b))
   // Work in review waits on the user, so it comes after everything an agent can move on itself.
   const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, review: 3, done: 4 }
+  const stale = now === undefined ? [] : tasks.filter(task => task.assignee !== actor && isStale(task, now)).sort(byPriority)
   return [
     ...mine.sort((a, b) => Number(isWaiting(a)) - Number(isWaiting(b)) || rank[a.status] - rank[b.status] || byPriority(a, b)),
     ...free,
+    ...stale,
   ]
 }
 
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */
-export function brief(snap: Snapshot, actor: string, news: Activity[]): string | undefined {
+export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number): string | undefined {
   if (snap.items.length === 0) return undefined
   const items = snap.items
   const tasks = items.filter(item => item.kind === 'task')
@@ -239,13 +316,16 @@ export function brief(snap: Snapshot, actor: string, news: Activity[]): string |
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done' && task.status !== 'review')
   const blocked = tasks.filter(task => task.status === 'blocked')
   const review = tasks.filter(task => task.status === 'review')
-  const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor)
+  const stale = now === undefined ? [] : tasks.filter(task => task.assignee !== actor && isStale(task, now))
+  const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor && !stale.includes(task))
   const parts = [
     'Project roadmap (roadmap tool; .claude/roadmap.db). Keep it current: claim a task before working on it, comment on progress and decisions, set done when finished (it goes to review for the user to approve).',
   ]
   if (milestones.length) parts.push('Open milestones:\n' + list(milestones, 4))
   if (mine.length) parts.push(`Assigned to you (${actor}):\n` + list(mine))
   if (active.length) parts.push('In progress by others:\n' + list(active))
+  if (stale.length)
+    parts.push(`Stale claims (holder silent over ${LEASE_MS / 60_000} min; claiming takes one over):\n` + list(stale))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
   if (review.length) parts.push("Waiting on the user's review (they approve on the board, or tell you to):\n" + list(review))
   if (news.length)

@@ -164,23 +164,34 @@ COMMIT;`,
   }
 }
 
+// When a lease taken or renewed now runs out, as the SQL compares it.
+const LEASE_CUTOFF = `strftime('%Y-%m-%dT%H:%M:%SZ','now','-30 minutes')`
+
 /**
- * Claims a task for `actor` in one transaction: it takes the task only when no one else holds it
- * (or `force`), and starts it. Answers who holds the task afterwards.
+ * Claims a task for `actor` in one transaction: it takes the task only when no one else holds it, the
+ * holder's lease has run out (see LEASE_MS), or `force`; starts it, and starts a lease. Answers who
+ * holds the task afterwards. `from` is who held it as last read, for the log of a takeover.
  */
-export function claim(actor: string, id: string, force: boolean): string {
+export function claim(actor: string, id: string, force: boolean, from?: string | null): string {
+  const note = from && from !== actor ? (force ? `took over from ${from}` : `took over stale claim from ${from}`) : 'claimed'
   return `BEGIN IMMEDIATE;
-UPDATE items SET assignee=${q(actor)}, status=CASE status WHEN 'todo' THEN 'in_progress' ELSE status END, updated_at=${NOW}
-  WHERE id=${q(id)} AND (assignee IS NULL OR assignee=${q(actor)} OR ${force ? 1 : 0})
+UPDATE items SET assignee=${q(actor)}, status=CASE status WHEN 'todo' THEN 'in_progress' ELSE status END,
+  lease_at=${NOW}, updated_at=${NOW}
+  WHERE id=${q(id)} AND (assignee IS NULL OR assignee=${q(actor)} OR ${force ? 1 : 0}
+    OR (status='in_progress' AND COALESCE(lease_at, updated_at) < ${LEASE_CUTOFF}))
   -- Already theirs (handed over from the board): claiming still starts it.
   AND (assignee IS NOT ${q(actor)} OR status='todo');
-INSERT INTO activity(item_id, author, type, body) SELECT ${q(id)}, ${q(actor)}, 'assign', 'claimed' WHERE changes() > 0;
+INSERT INTO activity(item_id, author, type, body) SELECT ${q(id)}, ${q(actor)}, 'assign', ${q(note)} WHERE changes() > 0;
 COMMIT;
 SELECT assignee FROM items WHERE id=${q(id)};`
 }
 
-export const comment = (actor: string, id: string, body: string) =>
-  `BEGIN IMMEDIATE;\n${activity(id, actor, 'comment', body)}\nCOMMIT;`
+/** Renews the leases on everything `actor` is working on: a heartbeat, so it leaves no trace in the timeline. */
+export const renew = (actor: string) =>
+  `UPDATE items SET lease_at=${NOW} WHERE assignee=${q(actor)} AND status='in_progress' AND kind='task';`
+
+export const comment = (actor: string, id: string, body: string, type: 'comment' | 'handoff' = 'comment') =>
+  `BEGIN IMMEDIATE;\n${activity(id, actor, type, body)}\nCOMMIT;`
 
 export function remove(ids: string[]): string {
   const list = ids.map(q).join(', ')

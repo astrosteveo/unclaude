@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } from '../types'
+import type { IssueType, Item, Kind, PlanNode, Priority, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, checkLinks, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, line, checkLinks, checkPlan, isMessage, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -96,6 +96,18 @@ async function actorFor($: EngineInterface, agentId: string | undefined, as: str
   const name = agentName(info.type, info.description, info.teammateId)
   agentNames.set(agentId, name)
   return name
+}
+
+// When each actor's leases were last renewed, so a busy agent renews at most every RENEW_EVERY.
+const renewedAt = new Map<string, number>()
+const RENEW_EVERY = 5 * 60_000
+
+/** Renews `actor`'s leases, unless done within RENEW_EVERY (or `isForced`), in a project with a roadmap. */
+async function heartbeat($: EngineInterface, actor: string, isForced = false) {
+  const now = await $.clock.now()
+  if (!isForced && now - (renewedAt.get(actor) ?? 0) < RENEW_EVERY) return
+  renewedAt.set(actor, now)
+  if (await hasDb($)) await sql($, db.renew(actor))
 }
 
 /** Runs one script through sqlite3 and answers what its last statement printed. */
@@ -222,7 +234,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'add' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
+  action: 'show' | 'next' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
   id?: string
   kind?: Kind
   title?: string
@@ -234,6 +246,7 @@ type Input = {
   priority?: Priority
   type?: IssueType
   labels?: string[] | string
+  tree?: PlanNode[] | PlanNode | string
   relates_to?: string[] | string
   duplicates?: string
   body?: string
@@ -299,7 +312,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {
-      const up = nextUp(snap.items, actor).slice(0, 5)
+      const up = nextUp(snap.items, actor, await $.clock.now().catch(() => undefined)).slice(0, 5)
       if (up.length === 0) return 'Nothing open: no tasks assigned to you and no unassigned todo tasks.'
       return up.map(task => detail(snap, task, 5)).join('\n\n')
     }
@@ -398,16 +411,23 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const waiting = waitingOn(snap.items, it)
       if (waiting.length && !a.force)
         fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
-      const holder = (await sql($, db.claim(actor, it.id, a.force === true))) || null
-      return holder === actor
-        ? `${it.id} is yours (${actor}), in progress.`
-        : fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
+      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee))) || null
+      const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
+      if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
+      // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
+      const after = await refresh($)
+      // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
+      const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
+      const linked = refsText(refsFor(after.items, known, it))
+      return `${it.id} is yours (${actor}), in progress.${tookOver}\n\n${detail(after, find(after.items, it.id) ?? it, 10)}${linked ? `\n${linked}` : ''}`
     }
     case 'release': {
       const it = need()
+      // The note goes in first, so the timeline reads: what was left, then who let go.
+      if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'))
       const { script } = db.change(actor, it, { assignee: null })
       if (script) await sql($, script)
-      return `${it.id} released.`
+      return `${it.id} released${a.body?.trim() ? ', with your handoff note' : ''}.`
     }
     case 'check': {
       const it = need()
@@ -426,6 +446,49 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (!a.body?.trim()) fail('body is required')
       await sql($, db.comment(actor, it.id, a.body!.trim()))
       return `Commented on ${it.id}.`
+    }
+    case 'plan': {
+      let tree: unknown = a.tree
+      if (typeof tree === 'string') {
+        try {
+          tree = JSON.parse(tree)
+        } catch {
+          fail('tree must be a list of items (JSON)')
+        }
+      }
+      const nodes = (Array.isArray(tree) ? tree : tree ? [tree] : []) as PlanNode[]
+      if (nodes.length === 0) fail('tree is required: a list of { kind, title, …, children }')
+      // All or nothing up front: nothing is written until the whole tree has passed.
+      const planned = checkPlan(snap.items, nodes, a.parent || undefined)
+      const ids = new Map<string, string>()
+      for (const one of planned) {
+        const n = one.node
+        const id = await sql($, db.insert(actor, {
+          kind: n.kind,
+          title: n.title.trim(),
+          parent: one.parentRef ? ids.get(one.parentRef)! : one.parentId,
+          description: n.description,
+          due: n.due,
+          assignee: n.assignee,
+          priority: n.priority,
+          type: n.type,
+        }))
+        ids.set(one.ref, id)
+      }
+      const after = (await refresh($)).items
+      for (const one of planned) {
+        const created = find(after, ids.get(one.ref))!
+        const blockers = [...one.blockerRefs.map(ref => ids.get(ref)!), ...one.blockerIds]
+        if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
+        if (one.node.checklist?.length) await sql($, db.setChecklist(actor, created, texts(one.node.checklist)).script)
+        if (one.node.labels?.length) await sql($, db.setLabels(actor, created, idList(one.node.labels)).script)
+      }
+      const final = (await refresh($)).items
+      const roots = planned.filter(one => !one.parentRef).map(one => ids.get(one.ref)!)
+      return [
+        `Planned ${planned.length} item(s): ${planned.map(one => `${one.ref} → ${ids.get(one.ref)}`).join(', ')}`,
+        ...roots.map(id => [line(final, find(final, id)!), outline(final, id)].filter(Boolean).join('\n')),
+      ].join('\n')
     }
     case 'remove': {
       const it = need()
@@ -548,7 +611,10 @@ export const register: Register = on => {
         'Hierarchy: milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
         'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by due date),',
         'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
-        'claim (id: take a task and start it; refused when someone else holds it or it waits on unfinished tasks), release (id), comment (id, body), remove (id; cascade for children).',
+        'claim (id: take a task and start it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks), release (id; body leaves a handoff note for whoever picks it up next),',
+        'comment (id, body), remove (id; cascade for children).',
+        'plan (tree; optional parent): add a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
+        "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
         'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
         'Review: setting a task done moves it to review, where the user approves it on the board. Pass approved: true with status done only when',
@@ -560,7 +626,7 @@ export const register: Register = on => {
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['show', 'next', 'add', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
+          action: { type: 'string', enum: ['show', 'next', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
           id: { type: 'string', description: 'Item id, e.g. T12' },
           kind: { type: 'string', enum: KINDS },
           title: { type: 'string' },
@@ -579,6 +645,11 @@ export const register: Register = on => {
           },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
+          tree: {
+            type: 'array',
+            description: 'plan: new items, each { ref?, kind, title, description?, due?, assignee?, priority?, type?, labels?, checklist?, blocked_by?, children? }',
+            items: { type: 'object', properties: { ref: { type: 'string' }, kind: { type: 'string', enum: KINDS }, title: { type: 'string' }, children: { type: 'array' } }, required: ['kind', 'title'] },
+          },
           labels: { type: 'array', items: { type: 'string' }, description: 'Tags such as "ui" or "auth" (add/update); replaces the list, [] clears.' },
           relates_to: {
             type: 'array', items: { type: 'string' },
@@ -587,7 +658,7 @@ export const register: Register = on => {
           duplicates: { type: 'string', description: 'The item this one duplicates (add/update); closes this task as done. Empty string clears.' },
           priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3 can wait; p2 is the default. next picks higher priority first.' },
           type: { type: 'string', enum: TYPES, description: 'What sort of work: feature (default), bug or chore' },
-          body: { type: 'string', description: 'Comment text (comment)' },
+          body: { type: 'string', description: 'Comment text (comment), or a handoff note (release): where you got to and what is left' },
           as: { type: 'string', description: `Who is acting, to override the default: "${CLAUDE}", or a subagent's name from its type and task.` },
           approved: { type: 'boolean', description: 'update with status done: the user has explicitly approved this work in chat, so it skips review. Never on your own judgment.' },
           force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
@@ -612,6 +683,8 @@ export const register: Register = on => {
     try {
       // The person's name is theirs: what they do happens on the board, not through an agent's call.
       if (actor === USER) fail(`"${USER}" is the person at the board; act as yourself`)
+      // Any call to the tracker is a sign of life for the caller's claims.
+      await heartbeat($, actor, true).catch(() => undefined)
       const reply = await act($, actor, a, agentId !== undefined)
       if (!agentId && a.action !== 'show' && a.action !== 'next') hasWorkedSinceUpdate = false
       await refresh($)
@@ -634,6 +707,11 @@ export const register: Register = on => {
   // Note work done in the main loop, for the nudge below.
   on('tool.call', async ($, e, next) => {
     if (!e.agentId && WORK.has(String(e.tool))) hasWorkedSinceUpdate = true
+    // An agent busy with other tools is alive too; renewed now and then rather than on every call.
+    if (String(e.tool) !== TOOL) {
+      const actor = await actorFor($, e.agentId === undefined ? undefined : String(e.agentId), undefined)
+      await heartbeat($, actor).catch(() => undefined)
+    }
     return next(e)
   }).catch(($, e, next) => next(e)) // Bookkeeping only: never stands in the way of a tool.
 
@@ -646,7 +724,7 @@ export const register: Register = on => {
       const newest = snap.activity.reduce((max, one) => Math.max(max, one.id), 0)
       const news = snap.activity.filter(one => one.id > seenActivity && one.author === USER)
       if (seenActivity < 0 || news.length > 0) {
-        const text = brief(snap, CLAUDE, seenActivity < 0 ? [] : news)
+        const text = brief(snap, CLAUDE, seenActivity < 0 ? [] : news, await $.clock.now().catch(() => undefined))
         if (text) context.push(text)
       } else if (hasWorkedSinceUpdate) {
         const open = snap.items.filter(item => item.kind === 'task' && item.assignee === CLAUDE && item.status === 'in_progress')
@@ -734,6 +812,8 @@ export const register: Register = on => {
     const isWide = width >= 100
     // Inline the pane gets about a third of the screen, so an open card there spends as few rows as it can.
     const isCompact = e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'inline'
+    // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
+    const now = await $.clock.now().catch(() => 0)
     const choose = (id: string | null) => () => void open($, id)
     const badge = (item: Item) => {
       const count = unread(snap, item.id, USER).length
@@ -742,6 +822,7 @@ export const register: Register = on => {
 
     const card = (item: Item, room: number) => {
       const who = item.assignee ? ` @${item.assignee}` : ''
+      const stale = isStale(item, now) ? ' ⌛stale' : ''
       const news = badge(item)
       const waits = waitingOn(items, item).map(one => one.id)
       const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
@@ -749,7 +830,7 @@ export const register: Register = on => {
       const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
       const tags = marks(item)
       const tag = tags.length ? ` ${tags.join(' ')}` : ''
-      const extra = item.id.length + who.length + news.length + wait.length + ticks.length + tag.length + 1
+      const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + 1
       const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
       return (
         <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
@@ -762,6 +843,9 @@ export const register: Register = on => {
             {wait}
           </Text>
           <Text color="cyan">{who}</Text>
+          <Text color="red" dimColor>
+            {stale}
+          </Text>
           <Text color="magenta" bold>
             {news}
           </Text>
@@ -927,17 +1011,18 @@ export const register: Register = on => {
                 onSubmit={(value: string) => void (value.trim() && userAct($, { action: 'comment', id: item.id, body: value }))} />
             ) }]
           : []),
-        // Comments read as messages, author over body; what the tracker did reads as one dim line.
+        // Comments and handoff notes read as messages, author over body; what the tracker did reads as one dim line.
         ...timeline(snap.activity, item.id)
           .slice(-6)
           .map(one => {
             const when = one.at.slice(5, 16).replace('T', ' ')
             const who = <Text color={one.author === USER ? 'magenta' : 'cyan'}>{one.author}</Text>
-            return one.type === 'comment'
+            return isMessage(one)
               ? { key: `act-${one.id}`, rows: 1 + tall(one.body, 2), node: (
                   <Box key={`act-${one.id}`} flexDirection="column">
                     <Text>
                       {who}
+                      {one.type === 'handoff' && <Text color="yellow"> handoff</Text>}
                       <Text dimColor> {when}</Text>
                     </Text>
                     <Text>  {one.body}</Text>
@@ -1069,6 +1154,7 @@ export const register: Register = on => {
           <Text>
             <Text dimColor>assignee </Text>
             <Text color="cyan">{item.assignee ?? 'none'}</Text>
+            {isStale(item, now) && <Text color="red"> (claim gone stale)</Text>}
             {item.kind === 'task' && <Text dimColor>  priority </Text>}
             {item.kind === 'task' && <Text color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>}
             {item.kind === 'task' && <Text dimColor>  {item.type}</Text>}

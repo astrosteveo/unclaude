@@ -32,6 +32,34 @@ export type Item = {
   updated_at: string
 }
 
+/** One item of a `plan` call: a new item and, nested under it, its own new items. */
+export type PlanNode = {
+  /** A name other nodes' blocked_by can use before the item has an id; defaults to its place, `#1`, `#2`… */
+  ref?: string
+  kind: Kind
+  title: string
+  description?: string
+  due?: string
+  assignee?: string
+  priority?: Priority
+  type?: IssueType
+  labels?: string[]
+  checklist?: string[]
+  /** Refs of other new tasks, or ids of existing ones. */
+  blocked_by?: string[]
+  children?: PlanNode[]
+}
+
+/** A plan node checked and placed: under an existing item (`parentId`) or a new one (`parentRef`). */
+export type PlannedItem = {
+  ref: string
+  node: PlanNode
+  parentId: string | null
+  parentRef: string | null
+  blockerRefs: string[]
+  blockerIds: string[]
+}
+
 /** One acceptance criterion: `n` is its 1-based place in the list. */
 export type Check = { n: number; text: string; done: boolean }
 
@@ -40,7 +68,8 @@ export type Activity = {
   id: number
   item_id: string
   author: string
-  type: 'create' | 'status' | 'assign' | 'edit' | 'comment'
+  /** `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. */
+  type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff'
   body: string
   at: string
 }
