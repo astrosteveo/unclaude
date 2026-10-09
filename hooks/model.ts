@@ -1,4 +1,4 @@
-import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Section, Snapshot, Status } from '../types'
+import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Release, Section, Snapshot, Status } from '../types'
 
 // The person at the board, and the main loop's agent; subagents go by names from agentName.
 export const USER = 'user'
@@ -485,10 +485,12 @@ export const isMessage = (one: Activity) => one.type === 'comment' || one.type =
 export const timeline = (activity: Activity[], id: string) =>
   activity.filter(one => one.item_id === id).sort((a, b) => a.id - b.id)
 
-export function detail(snap: Snapshot, item: Item, limit = 15): string {
+export function detail(snap: Snapshot, item: Item, limit = 15, refs?: Refs): string {
   const parts = [line(snap.items, item)]
   const where = path(snap.items, item)
   if (where) parts.push(`in: ${where}`)
+  const shipped = shipNote(snap, item, refs)
+  if (shipped) parts.push(shipped.charAt(0).toUpperCase() + shipped.slice(1))
   // Whoever picks the task up reads the last holder's note before anything else.
   const handoff = timeline(snap.activity, item.id).filter(one => one.type === 'handoff').at(-1)
   if (handoff) parts.push(`Handoff from ${handoff.author} (${handoff.at.slice(0, 16).replace('T', ' ')}):\n  ${handoff.body}`)
@@ -599,6 +601,33 @@ export function shippedIn(items: Item[], body: string, taken: Set<string> = new 
     .map(task => ({ id: task.id, note: task.note!, section: sectionFor(task) }))
 }
 
+/** The release a task shipped in, from the record of releases. */
+export const releaseOf = (snap: Snapshot, id: string): Release | undefined => (snap.releases ?? []).find(one => one.tasks.some(task => task.id === id))
+
+/** Merged work no release carries yet: the tasks whose notes the next release would ship. */
+export function unreleased(snap: Snapshot, refs: Refs): Item[] {
+  const shipped = new Set((snap.releases ?? []).flatMap(one => one.tasks.map(task => task.id)))
+  return mergedNotes(snap.items, refs).filter(task => !shipped.has(task.id))
+}
+
+/**
+ * How an item stands against releases, in a few words, or undefined: a task "shipped in vX", or "merged,
+ * not released" (given `refs`); a milestone how many of its noted tasks are out, and in which versions.
+ */
+export function shipNote(snap: Snapshot, item: Item, refs?: Refs): string | undefined {
+  if (item.kind === 'task') {
+    const release = releaseOf(snap, item.id)
+    if (release) return `shipped in v${release.version}`
+    return refs && unreleased(snap, refs).some(one => one.id === item.id) ? 'merged, not released' : undefined
+  }
+  if (item.kind !== 'milestone') return undefined
+  const noted = tasksIn(snap.items, item).filter(hasNote)
+  const out = noted.map(task => releaseOf(snap, task.id)).filter((one): one is Release => one !== undefined)
+  if (out.length === 0) return undefined
+  const versions = [...new Set(out.map(one => one.version))].sort((a, b) => (isAfter(versionOf(a)!, versionOf(b)!) ? 1 : -1))
+  return `${out.length}/${noted.length} shipped (${versions.map(one => `v${one}`).join(', ')})`
+}
+
 /** Open work first, then what is done, each in the order `list` gives. */
 export const openFirst = (items: Item[], list: Item[]): Item[] => [
   ...list.filter(one => statusOf(items, one) !== 'done'),
@@ -672,6 +701,9 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
         review.slice(0, 8).map(item => `- ${line(items, item)}${pr(item)}`).join('\n'),
     )
   }
+  // What a release would ship now: said so a "release" from the user finds it in hand.
+  const waiting = refs ? unreleased(snap, refs) : []
+  if (waiting.length) parts.push(`Merged, not released yet: ${waiting.slice(0, 8).map(one => one.id).join(', ')}${waiting.length > 8 ? ` and ${waiting.length - 8} more` : ''}.`)
   if (news.length)
     parts.push(
       'Changes by the user since you last looked:\n' +

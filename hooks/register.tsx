@@ -561,7 +561,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (a.id) {
         const it = need()
         const linked = refsText(refsFor(snap.items, await refreshRefs($, true), it))
-        return detail(await withHistory($, snap, it.id, t), it) + (linked ? `\n${linked}` : '')
+        return detail(await withHistory($, snap, it.id, t), it, 15, await read($, refs)) + (linked ? `\n${linked}` : '')
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {

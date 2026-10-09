@@ -367,3 +367,28 @@ test('inbox: i files a line from any tab; the Inbox tab lists what waits, with w
   expect(lines.some(line => /^I3 .* — general-purpose-implement-the-login-and-session-flow, 10-09$/.test(line))).toBe(true)
   await ui.unmount()
 })
+
+test('releases on the board: a done card and its plan row name the version it shipped in, or say unreleased; the card says so too', async ($, on) => {
+  const items = [
+    item('T1', { status: 'done', title: 'Shipped one', note: 'One.' }),
+    item('T2', { status: 'done', title: 'Merged one', note: 'Two.' }),
+  ]
+  const snap = { items, activity: [], seen: {}, releases: [{ version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: '- One.', tasks: [{ id: 'T1', note: 'One.', section: 'Added' as const }] }] }
+  on('process.run', ($, e) => ({ value: e.argv[0] === 'sqlite3' ? fake(e.init?.stdin, snap) : { exitCode: 0, stdout: '[]', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  expect((await ui.find({ key: 'card-T1' }))?.text).toContain('v0.6.3')
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('unreleased')
+  await ui.press({ key: 'tab-plan' })
+  await ui.press({ key: 'fold-loose' })
+  expect((await ui.find({ key: 'row-T1' }))?.text).toContain('v0.6.3')
+  await ui.press({ key: 'row-T1' })
+  expect(paintPane(await ui.drawn(), 84).lines.some(line => line.includes('shipped in v0.6.3'))).toBe(true)
+  await ui.unmount()
+})

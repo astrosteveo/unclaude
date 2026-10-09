@@ -4,7 +4,7 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, upOf, tasksIn, targetOf, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, tasksIn, targetOf, releaseOf, unreleased, shipNote, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -310,6 +310,8 @@ export function drawPane(
    * with the title cut. Only the title and a long name are ever cut.
    */
   // What a card says beside its title, each piece led by a space.
+  // Merged work the next release would ship, for the cards that say so.
+  const unreleasedIds = new Set(unreleased(snap, known).map(one => one.id))
   const piecesOf = (item: Item) => {
     const list = item.checklist ?? []
     const part = item.kind === 'task' ? undefined : progress(items, item)
@@ -328,10 +330,12 @@ export function drawPane(
       // Past when it was due, its own date or one above it.
       late: isLate(items, item, now) ? ' ⚠late' : '',
       news: badge(item),
+      // Done work says where it went: the version it shipped in, or that the next release will carry it.
+      ship: item.kind === 'task' && item.status === 'done' ? (releaseOf(snap, item.id) ? ` v${releaseOf(snap, item.id)!.version}` : unreleasedIds.has(item.id) ? ' unreleased' : '') : '',
     }
   }
   type Slots = Record<Exclude<keyof ReturnType<typeof piecesOf>, 'pr'> | 'id', number>
-  const SLOT_KEYS = ['tag', 'ticks', 'prTag', 'wait', 'who', 'stale', 'late', 'news'] as const
+  const SLOT_KEYS = ['tag', 'ticks', 'prTag', 'wait', 'who', 'stale', 'late', 'ship', 'news'] as const
   // A name is given at most this much of a stacked row's slots; a longer one is cut.
   const WHO_SLOT = 19
   /** The width of each piece's slot over `list`: the widest of each, so stacked rows line them up. */
@@ -352,12 +356,12 @@ export function drawPane(
    * they line up); else one line with the title cut. Only the title and a long name are ever cut.
    */
   const cardLayout = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
-    const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, news } = piecesOf(item)
-    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + news.length
+    const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, ship, news } = piecesOf(item)
+    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + ship.length + news.length
     const head = item.id.length + 1
     const cutWho = (whoRoom: number) => (fullWho.length <= whoRoom ? fullWho : whoRoom >= 5 ? `${fullWho.slice(0, whoRoom - 1)}…` : '')
     const cutTitle = (titleRoom: number) => (item.title.length <= titleRoom ? item.title : `${item.title.slice(0, Math.max(1, titleRoom - 1))}…`)
-    const bits = { tag, ticks, pr, prTag, wait, stale, late, news }
+    const bits = { tag, ticks, pr, prTag, wait, stale, late, ship, news }
     const slotted = slots ? SLOT_KEYS.reduce((sum, key) => sum + slots[key], 0) : 0
     if (isStacked && slots && room - slots.id - 1 - slotted >= 16) {
       const fit = (text: string, key: keyof Slots) => (text.length > slots[key] ? `${text.slice(0, slots[key] - 1)}…` : text).padEnd(slots[key])
@@ -365,7 +369,7 @@ export function drawPane(
       const title = cutTitle(room - lead - slotted)
       return {
         id: item.id.padEnd(slots.id), tag: fit(tag, 'tag'), ticks: fit(ticks, 'ticks'), pr, prTag: fit(prTag, 'prTag'), wait: fit(wait, 'wait'), who: fit(fullWho, 'who'),
-        stale: fit(stale, 'stale'), late: fit(late, 'late'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
+        stale: fit(stale, 'stale'), late: fit(late, 'late'), ship: fit(ship, 'ship'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
       }
     }
     if (!isSplit && head + item.title.length + others + fullWho.length <= room) {
@@ -383,7 +387,7 @@ export function drawPane(
   }
   const card = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
     const laid = cardLayout(item, room, isStacked, isSplit, slots)
-    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news, pad, rows } = laid
+    const { title, tag, ticks, pr, prTag, wait, who, stale, late, ship, news, pad, rows } = laid
     const id = 'id' in laid && laid.id ? laid.id : item.id
     const isOpen = pick === item.id
     // A detail line leads with its first detail, its space dropped, under the title.
@@ -415,6 +419,9 @@ export function drawPane(
           {detail(stale)}
         </Text>
         <Text color="red">{detail(late)}</Text>
+        <Text color={ship.trim() === 'unreleased' ? 'yellow' : 'green'} dimColor>
+          {detail(ship)}
+        </Text>
         <Text color="magenta" bold>
           {detail(news)}
         </Text>
@@ -643,6 +650,8 @@ export function drawPane(
   const everyRow = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
   const looseDone = everyRow.filter(isLooseDone)
   const allRows = showsLoose ? everyRow : everyRow.filter(row => !isLooseDone(row))
+  // Merged work the next release would ship.
+  const waitingRelease = new Set(unreleased(snap, known).map(one => one.id))
   const firstUnplanned = allRows.findIndex(({ item, depth }) => depth === 0 && item.kind !== 'milestone')
   const isTriage = (item: Item) => item.kind === 'task' && item.status === 'todo' && !item.assignee && !targetOf(items, item)
   const unheld = allRows.filter(({ item }) => isTriage(item)).length
@@ -655,7 +664,8 @@ export function drawPane(
   const planRow = ({ item, depth }: { item: Item; depth: number }) => {
     const p = progress(items, item)
     const status = statusOf(items, item)
-    const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
+    const release = item.kind === 'task' ? releaseOf(snap, item.id) : undefined
+    const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}${release ? `  v${release.version}` : waitingRelease.has(item.id) ? '  unreleased' : ''}`
     const news = badge(item)
     const controls = isTriage(item)
     // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
@@ -996,6 +1006,8 @@ export function drawPane(
   // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
   // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
   const tagLine = item?.labels?.length ? item.labels.map(one => `#${one}`).join(' ') : ''
+  // Where it stands against releases: shipped in a version, or merged and waiting for the next.
+  const shipped = item ? shipNote(snap, item, known) : undefined
   const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', tagLine, item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
   // The title, beside the ✕ that closes the card.
   const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 + 2 : 0)
@@ -1053,7 +1065,7 @@ export function drawPane(
     : (item.kind === 'task' ? buttonRows([...STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one])), `${WONTDO_GLYPH} Won't do`]) : 1) +
       (isRequesting || handing === item.id || merging === item.id || noting === item.id || dropping === item.id || stacking === item.id ? 1 :
         parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
-  const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
+  const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}${shipped ? `  ${shipped}` : ''}` : ''
   // Key hints, most useful first: as many as fit in the rows the pane gives them (one wide, two narrow),
   // each whole, the rest dropped from the end. Drawn in that order of usefulness, not of the keys.
   const hints = (draft
@@ -1240,6 +1252,7 @@ export function drawPane(
           {tagLine && <Text color="blue">  {tagLine}</Text>}
           {item.due && <Text dimColor>  due {item.due}</Text>}
           {where && <Text dimColor>  in {where}</Text>}
+          {shipped && <Text color={shipped.startsWith('merged') ? 'yellow' : 'green'}>  {shipped}</Text>}
         </Text>
       )}
       {body}

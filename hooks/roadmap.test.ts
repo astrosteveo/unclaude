@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -561,6 +561,29 @@ test('roll-ups follow targets: a milestone is the tasks that target it; hand-off
   expect(handedScope(handed, find(handed, 'T2')!)?.id).toBe('M2')
   expect(handedScope(handed, find(handed, 'T1')!)).toBeUndefined()
   expect(readyIn(handed, find(handed, 'M2')!, 'claude')?.id).toBe('T2')
+})
+
+test('shipped in vX: a task says which release carried it, or that it is merged and waiting; a milestone how many are out', () => {
+  const items = [
+    item('M1'), item('E1', { milestone: 'M1' }),
+    item('T1', { parent: 'E1', status: 'done', note: 'One.' }),
+    item('T2', { parent: 'E1', status: 'done', note: 'Two.' }),
+    item('T3', { parent: 'E1', status: 'done', note: 'Three.' }),
+    item('T4', { parent: 'E1', status: 'done', note: '-' }),
+  ]
+  const releases = [
+    { version: '0.6.0', tag: 'v0.6.0', at: '2026-10-09', pr: 27, notes: '- One.', tasks: [{ id: 'T1', note: 'One.', section: 'Added' as const }] },
+    { version: '0.6.1', tag: 'v0.6.1', at: '2026-10-09', pr: 29, notes: '- Two.', tasks: [{ id: 'T2', note: 'Two.', section: 'Added' as const }] },
+  ]
+  const snap = { items, activity: [], seen: {}, releases }
+  const refs = { commits: [], prs: [] }
+  expect(shipNote(snap, find(items, 'T1')!, refs)).toBe('shipped in v0.6.0')
+  expect(shipNote(snap, find(items, 'T3')!, refs)).toBe('merged, not released')
+  expect(shipNote(snap, find(items, 'T4')!, refs)).toBeUndefined()
+  expect(shipNote(snap, find(items, 'M1')!, refs)).toBe('2/3 shipped (v0.6.0, v0.6.1)')
+  expect(unreleased(snap, refs).map(one => one.id)).toEqual(['T3'])
+  expect(detail(snap, find(items, 'T2')!, 15, refs)).toContain('\nShipped in v0.6.1')
+  expect(brief(snap, 'claude', [], undefined, refs)).toContain('Merged, not released yet: T3.')
 })
 
 test('the filter takes m:M2: what targets M2, and M2 itself', () => {
