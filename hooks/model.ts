@@ -568,6 +568,31 @@ export function dueOf(items: Item[], item: Item): string | undefined {
   return item.kind === 'milestone' ? undefined : find(items, targetOf(items, item) ?? undefined)?.due ?? undefined
 }
 
+/**
+ * Where a milestone or epic sits on the roadmap's time axis: from its start, given or derived, to its
+ * end, its due date (an epic's, else its milestone's). An epic without a start begins at its first claim
+ * (the earliest claim or status change on its tasks), else when it was made; a milestone at the earliest
+ * of what targets it, else when it was made. `isStartGiven` says which.
+ */
+export function spanOf(snap: Snapshot, item: Item): { start: string; end?: string; isStartGiven: boolean } {
+  const items = snap.items
+  const end = dueOf(items, item)
+  if (item.start) return { start: item.start, end, isStartGiven: true }
+  const made = item.created_at.slice(0, 10)
+  if (item.kind === 'milestone') {
+    const parts = items.filter(one => one.kind === 'epic' && targetOf(items, one) === item.id).map(one => spanOf(snap, one).start)
+    const loose = tasksIn(items, item).filter(one => !one.parent).map(one => one.created_at.slice(0, 10))
+    const first = [...parts, ...loose].sort()[0]
+    return { start: first ?? made, end, isStartGiven: false }
+  }
+  const ids = new Set(tasksIn(items, item).map(one => one.id))
+  const begun = snap.activity
+    .filter(one => ids.has(one.item_id) && (one.type === 'status' || (one.type === 'assign' && one.body === 'claimed')))
+    .map(one => one.at.slice(0, 10))
+    .sort()[0]
+  return { start: begun ?? made, end, isStartGiven: false }
+}
+
 /** Whether an item is past when it was due (its own date or one above it) and not done; never without a clock. */
 export const isLate = (items: Item[], item: Item, now: number) => {
   const due = dueOf(items, item)

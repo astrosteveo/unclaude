@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { nextVersion, shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { spanOf, nextVersion, shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -44,6 +44,7 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   status: 'todo',
   parent: null,
   milestone: null,
+  start: null,
   description: null,
   assignee: null,
   due: null,
@@ -592,6 +593,25 @@ test('the next version: a patch when the waiting notes only fix, else a minor; n
   expect(nextVersion(undefined, [])).toBe('0.1.0')
   const some = [item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done', note: 'Not yet.' }), item('T2', { parent: 'E1' }), item('T3', { status: 'done', note: 'Lone.' })]
   expect(mergedNotes(some, { commits: [], prs: [] }).map(one => one.id)).toEqual(['T3'])
+})
+
+test('spans on the roadmap: a start given or derived (first claim, else made), to the due date or the milestone\'s', () => {
+  const items = [
+    item('M1', { due: '2026-12-01', created_at: '2026-09-01T00:00:00Z' }),
+    item('E1', { milestone: 'M1', created_at: '2026-09-10T00:00:00Z' }),
+    item('T1', { parent: 'E1' }),
+    item('E2', { milestone: 'M1', start: '2026-10-15', due: '2026-11-01' }),
+    item('E3', { created_at: '2026-09-20T00:00:00Z' }),
+  ]
+  const activity = [
+    { id: 1, item_id: 'T1', author: 'claude', type: 'assign', body: 'claimed', at: '2026-10-02T10:00:00Z' },
+    { id: 2, item_id: 'T1', author: 'claude', type: 'status', body: 'status todo → in_progress', at: '2026-10-02T10:00:00Z' },
+  ]
+  const snap = { items, activity, seen: {} } as never
+  expect(spanOf(snap, find(items, 'E1')!)).toEqual({ start: '2026-10-02', end: '2026-12-01', isStartGiven: false })
+  expect(spanOf(snap, find(items, 'E2')!)).toEqual({ start: '2026-10-15', end: '2026-11-01', isStartGiven: true })
+  expect(spanOf(snap, find(items, 'E3')!)).toEqual({ start: '2026-09-20', end: undefined, isStartGiven: false })
+  expect(spanOf(snap, find(items, 'M1')!)).toEqual({ start: '2026-10-02', end: '2026-12-01', isStartGiven: false })
 })
 
 test('the filter takes m:M2: what targets M2, and M2 itself', () => {

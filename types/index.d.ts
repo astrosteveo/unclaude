@@ -20,6 +20,8 @@ export type Item = {
   milestone: string | null
   description: string | null
   assignee: string | null
+  /** When a milestone or epic is meant to start (YYYY-MM-DD); without one, the roadmap derives it. */
+  start: string | null
   due: string | null
   priority: Priority
   type: IssueType
@@ -68,6 +70,8 @@ export type PlanNode = {
   kind: Kind
   title: string
   description?: string
+  /** A milestone's or epic's start date, YYYY-MM-DD. */
+  start?: string
   due?: string
   assignee?: string
   priority?: Priority

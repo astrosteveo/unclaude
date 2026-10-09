@@ -925,6 +925,7 @@ export function drawPane(
       isLong
         ? { key: 'edit-desc-long', rows: 1, node: <Text key="edit-desc-long" dimColor>Description runs several lines: ask Claude to change it.</Text> }
         : field('edit-desc', 'Description', item.description ?? '', v => save({ description: v }), 'one line; empty clears it'),
+      ...(item.kind === 'task' ? [] : [field('edit-start', 'Start', item.start ?? '', v => save({ start: v }), 'YYYY-MM-DD; empty: from its work')]),
       field('edit-due', 'Due', item.due ?? '', v => save({ due: v }), 'YYYY-MM-DD; empty clears it'),
       ...(item.kind === 'task'
         ? [

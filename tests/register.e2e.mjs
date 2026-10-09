@@ -439,3 +439,13 @@ test('targets in the tool: add, update and plan take milestone; a task can targe
   assert.doesNotMatch(found, /T1 /)
   assert.match(await ok({ action: 'find', milestone: 'M1' }), /E1 [\s\S]*T1 /)
 })
+
+test('start dates: milestones and epics take one on add, update and plan; a task is refused; empty clears it', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1', start: '2026-10-01', due: '2026-12-01' })
+  await ok({ action: 'plan', parent: 'M1', tree: [{ kind: 'epic', title: 'Auth', start: '2026-10-15' }] })
+  assert.match((await call({ action: 'add', kind: 'task', title: 'x', start: '2026-10-01' })).text, /Only milestones and epics take a start date/)
+  assert.match((await call({ action: 'update', id: 'E1', start: 'soon' })).text, /start must be a date/)
+  assert.equal(query("SELECT group_concat(id || ' ' || COALESCE(start, '-'), '; ') FROM items;"), 'M1 2026-10-01; E1 2026-10-15')
+  await ok({ action: 'update', id: 'E1', start: '' })
+  assert.equal(query("SELECT COALESCE(start, '-') FROM items WHERE id='E1';"), '-')
+})

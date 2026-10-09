@@ -460,6 +460,7 @@ type Input = {
   note?: string
   wontdo?: string
   milestone?: string
+  start?: string
   section?: string
   version?: string
 }
@@ -566,6 +567,9 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
   if (a.priority && !PRIORITIES.includes(a.priority)) fail(`priority must be one of ${PRIORITIES.join(', ')}`)
   if (a.type && !TYPES.includes(a.type)) fail(`type must be one of ${TYPES.join(', ')}`)
   if (a.due && !/^\d{4}-\d{2}-\d{2}$/.test(a.due)) fail('due must be a date, YYYY-MM-DD')
+  if (a.start && !/^\d{4}-\d{2}-\d{2}$/.test(a.start)) fail('start must be a date, YYYY-MM-DD')
+  const startsKind = a.action === 'add' ? a.kind : a.id ? find(snap.items, a.id)?.kind : undefined
+  if (a.start && startsKind === 'task') fail('Only milestones and epics take a start date; a task starts when it is claimed')
 
   switch (a.action) {
     case 'show':
@@ -644,6 +648,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         title: a.title!.trim(),
         ...place,
         description: a.description,
+        start: a.start,
         due: a.due,
         status: a.status,
         assignee: a.assignee,
@@ -718,6 +723,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         status: isToReview ? 'review' : a.status,
         description: a.description === undefined ? undefined : a.description || null,
         due: a.due === undefined ? undefined : a.due || null,
+        start: a.start === undefined ? undefined : a.start || null,
         assignee: a.assignee === undefined ? undefined : a.assignee || null,
         // Unassigned without a status of its own (the board's Unassign), a task under way goes back to todo.
         ...(a.assignee === '' && a.status === undefined && it.assignee ? { status: letGo(it).status } : {}),
@@ -831,6 +837,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
           milestone: n.milestone ? ids.get(String(n.milestone).trim()) ?? find(snap.items, String(n.milestone).trim())!.id : isTarget ? under : null,
           description: n.description,
           due: n.due,
+          start: n.start,
           assignee: n.assignee,
           priority: n.priority,
           type: n.type,
@@ -1554,6 +1561,7 @@ export const register: Register = on => {
           blocked_by: { type: 'array', items: { type: 'string' }, description: 'Tasks this one waits on; replaces the list' },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}" or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'YYYY-MM-DD' },
+          start: { type: 'string', description: 'YYYY-MM-DD: when a milestone or epic starts, for the roadmap' },
           under: { type: 'string' },
           text: { type: 'string' },
           tree: {

@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS shipped(version TEXT NOT NULL, item_id TEXT NOT NULL,
   // v9: the inbox: things filed to sort later, kept apart from planned work.
   `CREATE TABLE IF NOT EXISTS inbox(id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, author TEXT NOT NULL,
   at TEXT NOT NULL DEFAULT (${NOW}), state TEXT NOT NULL DEFAULT 'open', became TEXT, reason TEXT);`,
+  // v10: when a milestone or epic is meant to start, for the roadmap's time axis.
+  `ALTER TABLE items ADD COLUMN start TEXT;`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -196,7 +198,7 @@ export const RECENT = 20
 /** Loads the roadmap, with what `reader` has seen of each item. */
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
-        'parent', parent, 'milestone', milestone, 'description', description, 'assignee', assignee, 'due', due,
+        'parent', parent, 'milestone', milestone, 'description', description, 'assignee', assignee, 'start', start, 'due', due,
         'priority', priority, 'type', type, 'note', note, 'section', section, 'resolution', resolution, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
         'labels', json((SELECT json_group_array(label) FROM (SELECT label FROM labels WHERE item_id=items.id ORDER BY label))),
         'relations', json((SELECT json_group_array(json_object('type', type, 'id', b)) FROM relations WHERE a=items.id)),
@@ -243,6 +245,7 @@ export type NewItem = {
   title: string
   parent: string | null
   milestone?: string | null
+  start?: string
   description?: string
   due?: string
   status?: Status
@@ -263,15 +266,15 @@ export function insert(actor: string, item: NewItem): string {
 INSERT INTO counters(prefix, n) VALUES (${q(prefix)},
   COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM items WHERE SUBSTR(id, 1, 1)=${q(prefix)}), 0) + 1)
   ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
-INSERT INTO items(id, kind, title, status, parent, milestone, description, assignee, due, priority, type) VALUES (${id}, ${q(item.kind)},
+INSERT INTO items(id, kind, title, status, parent, milestone, description, assignee, start, due, priority, type) VALUES (${id}, ${q(item.kind)},
   ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.milestone ?? null)}, ${q(item.description || null)},
-  ${q(item.assignee || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
+  ${q(item.assignee || null)}, ${q(item.start || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
 INSERT INTO activity(item_id, author, type, body, op) VALUES (${id}, ${q(actor)}, 'create', ${q(created)}, (SELECT n FROM op));
 SELECT ${id};
 COMMIT;`
 }
 
-export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'milestone' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
+export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'milestone' | 'start' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
 
 /** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
@@ -361,7 +364,7 @@ export function remove(ids: string[], log?: { actor: string; body: string; rows:
 
 /** Every table's columns, as `dump` reads and `restore` writes them. */
 export const TABLES = {
-  items: ['id', 'kind', 'title', 'status', 'parent', 'milestone', 'description', 'assignee', 'due', 'priority', 'type', 'note', 'section', 'resolution', 'lease_at', 'created_at', 'updated_at'],
+  items: ['id', 'kind', 'title', 'status', 'parent', 'milestone', 'description', 'assignee', 'start', 'due', 'priority', 'type', 'note', 'section', 'resolution', 'lease_at', 'created_at', 'updated_at'],
   activity: ['id', 'item_id', 'author', 'type', 'body', 'at', 'undo', 'redo', 'op', 'undone', 'reverts'],
   links: ['blocker', 'blocked'],
   checks: ['item_id', 'n', 'text', 'done'],
