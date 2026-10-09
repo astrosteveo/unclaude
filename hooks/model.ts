@@ -213,6 +213,12 @@ export function linksOf(items: Item[], item: Item) {
   }
 }
 
+/** Where a new item of `kind` may go: the open milestones (and, for a task, epics) it can sit under. */
+export const homesFor = (items: Item[], kind: Kind): Item[] =>
+  rows(items)
+    .map(row => row.item)
+    .filter(one => PARENTS[kind].includes(one.kind) && statusOf(items, one) !== 'done')
+
 /** Ids in an item's subtree, the item first. */
 export function subtree(items: Item[], id: string): string[] {
   const out = [id]

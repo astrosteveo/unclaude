@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, brief, checkLinks, handedScope, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, brief, checkLinks, handedScope, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -866,5 +866,128 @@ test('a handed epic in review is approved, or sent back, from its card', async (
   await ui.press({ key: 'request' })
   await ui.input({ key: 'changes', text: 'add an empty state' } as never)
   expect(submitted).toContain('sent roadmap epic E1')
+  await ui.unmount()
+})
+
+test('new item from the board: n opens the form, choices narrow the parents, Enter creates and opens it', async ($, on) => {
+  const some = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' }), item('M2'), item('T2', { parent: 'M2', status: 'done' })]
+  expect(homesFor(some, 'task').map(one => one.id)).toEqual(['M1', 'E1'])
+  expect(homesFor(some, 'epic').map(one => one.id)).toEqual(['M1'])
+  expect(homesFor(some, 'milestone')).toEqual([])
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    return { value: stdin.includes('INSERT INTO counters') ? { ...fakeSqlite('', null), stdout: 'T9' } : fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'new' })
+  expect(await ui.find({ key: 'new-title' })).toBeDefined()
+  await ui.select({ key: 'new-parent', value: 'E1' } as never)
+  await ui.select({ key: 'new-priority', value: 'p1' } as never)
+  await ui.select({ key: 'new-type', value: 'bug' } as never)
+  await ui.input({ key: 'new-title', text: 'Crash on empty input' } as never)
+  const insert = scripts.find(one => one.includes('INSERT INTO items'))!
+  expect(insert).toContain("'Crash on empty input'")
+  expect(insert).toContain("'E1'")
+  expect(insert).toContain("'p1', 'bug'")
+  expect(await ui.find({ key: 'new-title' })).toBeUndefined()
+
+  // From an open epic, n adds under it; switching to a milestone drops the parent it can't take.
+  await ui.press({ key: 'close' }).catch(() => undefined)
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'row-E1' })
+  await ui.press({ key: 'new-under' })
+  expect((await ui.find({ key: 'new-parent' }))?.props.value).toBe('E1')
+  await ui.select({ key: 'new-kind', value: 'milestone' } as never)
+  expect(await ui.find({ key: 'new-parent' })).toBeUndefined()
+  await ui.press({ key: 'new-cancel' })
+  expect(await ui.find({ key: 'hand' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('edit a card: e shows its fields; each saves on its own through update', async ($, on) => {
+  const some = [
+    item('M1'), item('E1', { parent: 'M1' }), item('E2', { parent: 'M1' }),
+    item('T1', { parent: 'E1', title: 'Old title', description: 'one line', labels: ['ui'] }),
+    item('T2', { description: 'first\nsecond' }),
+  ]
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  const wrote = (...needles: string[]) => scripts.some(one => needles.every(n => one.includes(n)))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ key: 'edit-title' })).toBeUndefined()
+  await ui.press({ key: 'edit' })
+  expect((await ui.find({ key: 'edit-title' }))?.props.value).toBe('Old title')
+  await ui.input({ key: 'edit-title', text: 'New title' } as never)
+  expect(wrote("title='New title'", "WHERE id='T1'")).toBe(true)
+  await ui.input({ key: 'edit-labels', text: 'ui, Auth Flow' } as never)
+  expect(wrote("INSERT INTO labels(item_id, label) VALUES ('T1', 'auth-flow')")).toBe(true)
+  await ui.select({ key: 'edit-priority', value: 'p0' } as never)
+  expect(wrote("priority='p0'")).toBe(true)
+  await ui.select({ key: 'edit-parent', value: 'E2' } as never)
+  expect(wrote("parent='E2'")).toBe(true)
+  await ui.input({ key: 'edit-desc', text: '' } as never)
+  expect(wrote('description=NULL')).toBe(true)
+  const before = scripts.length
+  await ui.input({ key: 'edit-due', text: 'next week' } as never)
+  expect(scripts.slice(before).some(one => one.includes('due='))).toBe(false)
+  await ui.press({ key: 'edit' })
+  expect(await ui.find({ key: 'edit-title' })).toBeUndefined()
+  // A description of several lines isn't flattened by a one-line field.
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  await ui.press({ key: 'edit' })
+  expect(await ui.find({ key: 'edit-desc' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('edit a card\'s checklist and blockers: reword, drop, add, and set what it waits on', async ($, on) => {
+  const some = [
+    item('T1', { checklist: [{ n: 1, text: 'parses', done: true }, { n: 2, text: 'errs', done: false }, { n: 3, text: 'docs', done: true }] }),
+    item('T2'), item('T3', { blocked_by: ['T1'] }),
+  ]
+  const scripts: string[] = []
+  let toast = ''
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', ($, e) => ((toast = String((e as { text?: string }).text ?? JSON.stringify(e))), { value: undefined }) as never)
+  const wrote = (...needles: string[]) => scripts.some(one => needles.every(n => one.includes(n)))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'edit' })
+  await ui.input({ key: 'edit-check-2', text: 'errors are named' } as never)
+  expect(wrote("VALUES ('T1', 1, 'parses', 1)", "VALUES ('T1', 2, 'errors are named', 0)", "VALUES ('T1', 3, 'docs', 1)")).toBe(true)
+  await ui.input({ key: 'edit-check-1', text: '' } as never)
+  expect(wrote("VALUES ('T1', 1, 'errs', 0)", "VALUES ('T1', 2, 'docs', 1)")).toBe(true)
+  await ui.input({ key: 'edit-check-new', text: 'tested' } as never)
+  expect(wrote("VALUES ('T1', 4, 'tested', 0)")).toBe(true)
+  await ui.input({ key: 'edit-blockers', text: 'T2' } as never)
+  expect(wrote("INSERT OR IGNORE INTO links(blocker, blocked) VALUES ('T2', 'T1')")).toBe(true)
+  // T3 already waits on T1: T1 waiting on T3 would be a cycle, and says so.
+  await ui.input({ key: 'edit-blockers', text: 'T3' } as never)
+  expect(toast).toContain('cycle')
   await ui.unmount()
 })
