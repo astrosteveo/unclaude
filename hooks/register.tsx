@@ -1734,7 +1734,7 @@ export const register: Register = on => {
       undo: ids => void userUndo($, ids),
       markAllRead: () => void sql($, db.markAllSeen(USER)).then(() => refresh($)).catch(() => undefined),
       setPicked: ids => void update($, picked, () => ids),
-      askParallel: ids => void update($, parallelAsk, () => ids).then(() => focusOn($, ids ? 'parallel-cancel' : pick ? 'close' : 'tab-backlog')),
+      askParallel: ids => void update($, parallelAsk, () => ids).then(() => focusOn($, ids ? 'parallel-cancel' : pick ? 'close' : 'tab-plan')),
       runParallel: ids => void runParallel($, ids),
       askStack: id => void update($, stacking, () => id).then(() => focusOn($, id ? 'stack-cancel' : 'close')),
       mergeStack: stack => void mergeStack($, stack),

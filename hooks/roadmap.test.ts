@@ -296,7 +296,7 @@ test('the board draws on terminal and desktop, and a card opens and closes from 
       await ui.press({ key: 'close' })
       expect(await ui.find({ key: 'hand' })).toBeUndefined()
       expect(await ui.find({ key: 'card-T2' })).toBeDefined()
-      await ui.press({ key: 'tab-tree' })
+      await ui.press({ key: 'tab-plan' })
       expect(await ui.find({ key: 'row-M1' })).toBeDefined()
       await ui.press({ key: 'tab-board' })
       await ui.unmount()
@@ -419,7 +419,7 @@ test('the detail bar sits right under the title on every card, short or long, ta
     expect((await ui.find({ key: 'set-done' }))?.props.variant).toBe('secondary')
     await ui.press({ key: 'close' })
   }
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   at.push(await barIndex())
   expect(await ui.find({ key: 'set-todo' })).toBeUndefined()
@@ -1088,7 +1088,7 @@ test('board filter: a typed query narrows the board and the tree, shows in the h
   expect(await ui.find({ key: 'card-T1' })).toBeDefined()
   expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
   expect((await ui.find({ key: 'filter' }))?.text).toContain('Filter: #ui')
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   expect(await ui.find({ key: 'row-M1' })).toBeDefined()
   expect(await ui.find({ key: 'row-T1' })).toBeDefined()
   expect(await ui.find({ key: 'row-T2' })).toBeUndefined()
@@ -1102,8 +1102,9 @@ test('board filter: a typed query narrows the board and the tree, shows in the h
   await ui.unmount()
 })
 
-test('backlog: unheld todo tasks, homeless first then by priority; a row sets priority and hands off', async ($, on) => {
+test('plan: milestones first, then Unplanned; there an unheld todo task keeps the backlog\'s picker, priority and hand-off', async ($, on) => {
   const some = [
+    item('M1'), item('E2', { milestone: 'M1' }), item('T6', { parent: 'E2' }),
     item('E1'),
     item('T1', { parent: 'E1', priority: 'p3' }),
     item('T2', { parent: 'E1', priority: 'p0', labels: ['ui'] }),
@@ -1111,7 +1112,6 @@ test('backlog: unheld todo tasks, homeless first then by priority; a row sets pr
     item('T4', { assignee: 'claude' }),
     item('T5', { status: 'done' }),
   ]
-  expect(backlog(some).map(one => one.id)).toEqual(['T3', 'T2', 'T1'])
   const scripts: string[] = []
   let submitted = ''
   on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
@@ -1124,11 +1124,15 @@ test('backlog: unheld todo tasks, homeless first then by priority; a row sets pr
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
   })
-  // v steps board → tree → backlog.
-  await ui.press({ key: 'tab-tree' })
-  await ui.press({ key: 'tab-backlog' })
-  expect(await ui.find({ key: 'row-T3' })).toBeDefined()
-  expect(await ui.find({ key: 'row-T4' })).toBeUndefined()
+  await ui.press({ key: 'tab-plan' })
+  const order = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('row-')).map(key => key.slice(4))
+  // M1 and what targets it, then Unplanned: E1 with its tasks, then loose open tasks; finished loose ones fold.
+  expect(order).toEqual(['M1', 'E2', 'T6', 'E1', 'T1', 'T2', 'T3', 'T4'])
+  expect((await ui.find({ key: 'fold-loose' }))?.text).toBe('▸ 1 finished task in no epic')
+  expect((await ui.find({ key: 'unplanned-head' }))?.text).toContain('Unplanned  3 for anyone to take')
+  // Controls on unplanned, unheld todo tasks only: not on T6 (M1 holds it), T4 (held) or T5 (done).
+  for (const id of ['T1', 'T2', 'T3']) expect(await ui.find({ key: `hand-${id}` })).toBeDefined()
+  for (const id of ['T6', 'T4', 'T5']) expect(await ui.find({ key: `hand-${id}` })).toBeUndefined()
   await ui.select({ key: 'prio-T1', value: 'p1' } as never)
   expect(scripts.some(one => one.includes("priority='p1'") && one.includes("WHERE id='T1'"))).toBe(true)
   await ui.press({ key: 'hand-T2' })
@@ -1196,7 +1200,7 @@ test('a handed epic in review is approved, or sent back, from its card', async (
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
   })
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   await ui.press({ key: 'approve' })
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='E1'"))).toBe(true)
@@ -1276,7 +1280,7 @@ test('new item from the board: n opens the form, choices narrow the parents, Ent
 
   // From an open epic, n adds under it; switching to a milestone drops the parent it can't take.
   await ui.press({ key: 'close' }).catch(() => undefined)
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   await ui.press({ key: 'new-under' })
   expect((await ui.find({ key: 'new-parent' }))?.props.value).toBe('E1')
@@ -1624,7 +1628,7 @@ test('review with a pull request: checks on the card; Approve offers to merge an
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   expect(await ui.find({ type: 'Text', text: /✗ checks failing/ })).toBeDefined()
   const wrote = (needle: string) => scripts.some(one => one.includes(needle))
@@ -2092,7 +2096,7 @@ test('run tasks at once: picked backlog rows each get an agent, a worktree and a
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
-  await ui.press({ key: 'tab-backlog' })
+  await ui.press({ key: 'tab-plan' })
   for (const id of ['T1', 'T2', 'T3']) await ui.press({ key: `pick-${id}` })
   await ui.press({ key: 'run-picked' })
   expect(await ui.find({ type: 'Text', text: /Run T1, T2, T3 at once, each by its own agent in its own worktree\? T3 starts when what it waits on is done\./ })).toBeDefined()

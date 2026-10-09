@@ -74,8 +74,7 @@ const fake = (stdin: string | undefined, snap: Snapshot) => {
 /** Each view: the tab that shows it, and the key of a row that opens a card from it. */
 const VIEWS = [
   ['board', 'tab-board', 'card-T5'],
-  ['tree', 'tab-tree', 'row-T5'],
-  ['backlog', 'tab-backlog', 'row-T8'],
+  ['plan', 'tab-plan', 'row-T5'],
   ['timeline', 'tab-timeline', 'time-E2'],
   ['inbox', 'tab-inbox', null],
 ] as const
@@ -215,9 +214,9 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
 test('the header: views as tabs, a progress bar, actions apart; one row wide, two at 84; hints whole, least useful dropped', async ($, on) => {
   expect(progressBar(3, 4, 8)).toEqual({ done: '██████', left: '░░' })
   expect(progressBar(0, 0, 8)).toEqual({ done: '', left: '░░░░░░░░' })
-  const hints = ['Enter opens', 'Tab/↑↓ move', 'v tree', 't p b r d jump to a column', 'n new', 'i file to the inbox', 'f filter']
+  const hints = ['Enter opens', 'Tab/↑↓ move', 'v plan', 't p b r d jump to a column', 'n new', 'i file to the inbox', 'f filter']
   expect(fitHints(hints, 200, 1)).toEqual(hints)
-  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v tree'])
+  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v plan'])
   expect(fitHints(hints, 40, 2)).toEqual(hints.slice(0, 5))
 
   const snap = bigRoadmap()
@@ -234,7 +233,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     const { lines } = paintPane(await ui.drawn(), width)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Board +v: +Tree +Backlog +Timeline +Inbox 3 +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Board +v: +Plan +Timeline +Inbox 3 +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -265,7 +264,7 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   })
   const rowsOf = async (prefix: string) =>
     (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   // Open milestones lead, done tasks after open ones; finished M1 is one line, its epic and tasks folded away.
   expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1'])
   expect((await ui.find({ key: 'fold-M1' }))?.text).toBe('▸')
@@ -283,7 +282,7 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   // A card open on work inside a folded scope unfolds what holds it.
   await ui.press({ key: 'tab-board' })
   await ui.press({ key: 'card-T1' })
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   expect(await rowsOf('row-')).toContain('T1')
   await ui.press({ key: 'close' })
 
@@ -323,7 +322,7 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   const card = await ui.find({ key: 'card-T2' })
   expect(card?.text).toContain("✕ won't do")
   expect(JSON.stringify(card)).toContain('"strikethrough":true')
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2 Dropped/)
   // Its card shows Won't do where Done would be.
   await ui.press({ key: 'row-T2' })

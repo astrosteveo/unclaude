@@ -4,14 +4,14 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, upOf, tasksIn, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, tasksIn, targetOf, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog'], ['timeline', 'Timeline'], ['inbox', 'Inbox']]
+const VIEWS: [View, string][] = [['board', 'Board'], ['plan', 'Plan'], ['timeline', 'Timeline'], ['inbox', 'Inbox']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -618,47 +618,6 @@ export function drawPane(
     ) : (
       <Text key={`fold-${item.id}`}> </Text>
     )
-  const treeRows = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
-  // Docked, a window of rows that keeps the open item in sight.
-  const treeFrom = isDocked && treeRows.length > topRows
-    ? Math.max(0, Math.min(treeRows.findIndex(row => row.item.id === pick) - Math.floor(topRows / 2), treeRows.length - (topRows - 1)))
-    : 0
-  const treeShown = isDocked && treeRows.length > topRows ? treeRows.slice(treeFrom, treeFrom + topRows - 1) : treeRows
-  const tree = (
-    <Box flexDirection="column">
-      {treeShown.map(({ item, depth }) => {
-        const p = progress(items, item)
-        const status = statusOf(items, item)
-        const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
-        const news = badge(item)
-        // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
-        // name, then the title, is cut.
-        const lead = depth * 2 + 2 + 2 + item.id.length + 1
-        const fullWho = item.assignee ? `  @${item.assignee}` : ''
-        const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
-        const room = width - lead - facts.length - who.length - news.length
-        const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
-        return (
-          <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
-            {foldToggle(item)}
-            <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
-              {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>} <Text dimColor>{item.id}</Text>{' '}
-              <Text bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
-                {title}
-              </Text>
-              <Text dimColor>{facts}</Text>
-              <Text color="cyan">{who}</Text>
-              <Text color="magenta" bold>
-                {news}
-              </Text>
-            </Button>
-          </Box>
-        )
-      })}
-      {treeShown.length < treeRows.length && <Text key="tree-more" dimColor>…{treeRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
-    </Box>
-  )
-
   // Handing several out at once takes a yes, naming them and what waits.
   const confirmParallel = (ids: string[], key: string) => {
     const waits = ids.filter(id => { const one = find(items, id); return one && waitingOn(items, one).length > 0 })
@@ -673,58 +632,107 @@ export function drawPane(
     )
   }
 
-  // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
-  const triageAll = backlog(items).filter(isShown)
-  // Docked, as many rows as fit above the card, each as tall as its title wraps beside the picker and hand-off.
-  const triageRows = (task: Item) => {
-    const where = upOf(task) ? ` [${upOf(task)}]` : ' (no epic)'
-    const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
-    return rowsOf(`${task.id} ${task.title}${where}${tags ? ` ${tags}` : ''}`, Math.max(10, width - BACKLOG_EDGES))
+  // The plan: milestones (by date, open first) with what targets them, then Unplanned: epics and tasks no
+  // milestone holds. There, a task nobody holds yet keeps the backlog's controls: a pick for running several
+  // at once, a priority picker and a hand-off.
+  // Finished tasks no epic or milestone holds fold behind one line at the foot of Unplanned, as finished
+  // epics do: open with its toggle (or a filter, or a card open on one of them).
+  const LOOSE = '_loose'
+  const isLooseDone = ({ item, depth }: { item: Item; depth: number }) => depth === 0 && item.kind === 'task' && item.status === 'done' && item.id !== pick
+  const showsLoose = Boolean(query) || flipped.includes(LOOSE)
+  const everyRow = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
+  const looseDone = everyRow.filter(isLooseDone)
+  const allRows = showsLoose ? everyRow : everyRow.filter(row => !isLooseDone(row))
+  const firstUnplanned = allRows.findIndex(({ item, depth }) => depth === 0 && item.kind !== 'milestone')
+  const isTriage = (item: Item) => item.kind === 'task' && item.status === 'todo' && !item.assignee && !targetOf(items, item)
+  const unheld = allRows.filter(({ item }) => isTriage(item)).length
+  // Docked, a window of rows that keeps the open item in sight.
+  const planRoom = topRows - 1 - (firstUnplanned >= 0 ? 1 : 0)
+  const treeFrom = isDocked && allRows.length > planRoom
+    ? Math.max(0, Math.min(allRows.findIndex(row => row.item.id === pick) - Math.floor(planRoom / 2), allRows.length - planRoom))
+    : 0
+  const treeShown = isDocked && allRows.length > planRoom ? allRows.slice(treeFrom, treeFrom + planRoom) : allRows
+  const planRow = ({ item, depth }: { item: Item; depth: number }) => {
+    const p = progress(items, item)
+    const status = statusOf(items, item)
+    const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
+    const news = badge(item)
+    const controls = isTriage(item)
+    // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
+    // name, then the title, is cut.
+    const lead = depth * 2 + 2 + 2 + item.id.length + 1 + (controls ? BACKLOG_EDGES : 0)
+    const fullWho = item.assignee ? `  @${item.assignee}` : ''
+    const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
+    const room = width - lead - facts.length - who.length - news.length
+    const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
+    const row = (
+      <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+        {foldToggle(item)}
+        {controls && (
+          <Button key={`pick-${item.id}`} plain
+            onPress={() => act.setPicked(picked.includes(item.id) ? picked.filter(id => id !== item.id) : [...picked, item.id])}>
+            <Text color={picked.includes(item.id) ? 'green' : undefined}>{picked.includes(item.id) ? '☑' : '☐'}</Text>
+          </Button>
+        )}
+        {controls && (Select ? (
+          <Select key={`prio-${item.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={item.priority}
+            onSelect={(value: string) => act.userAct({ action: 'update', id: item.id, priority: value })} />
+        ) : (
+          <Text key={`prio-${item.id}`} color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>
+        ))}
+        <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
+          {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>} <Text dimColor>{item.id}</Text>{' '}
+          <Text bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+            {title}
+          </Text>
+          <Text dimColor>{facts}</Text>
+          <Text color="cyan">{who}</Text>
+          <Text color="magenta" bold>
+            {news}
+          </Text>
+        </Button>
+        {controls && <Button key={`hand-${item.id}`} label="→ Claude" onPress={() => act.askHand(item.id)} />}
+      </Box>
+    )
+    return handing === item.id ? (
+      <Box key={`tree-wrap-${item.id}`} flexDirection="column">
+        {row}
+        {confirmHand(item)}
+      </Box>
+    ) : row
   }
-  const triage = isDocked ? fitRows(triageAll, triageAll.map(triageRows), topRows - 1) : triageAll
-  const backlogView = (
+  const tree = (
     <Box flexDirection="column">
-      {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
-      {/* Picked rows run at once: each its own agent, worktree and branch. */}
-      {picked.length > 0 && (parallelAsk && !pick ? confirmParallel(parallelAsk, 'parallel-confirm') : (
-        <Box key="picked-row" flexDirection="row" columnGap={1}>
-          <Button key="run-picked" label={`Run ${picked.length} at once…`} variant="primary" onPress={() => act.askParallel(picked)} />
-          <Button key="unpick" label="Clear picks" onPress={() => act.setPicked([])} />
-        </Box>
-      ))}
-      {triage.length < triageAll.length && <Text key="backlog-more" dimColor>…{triageAll.length - triage.length} more (close the card to see them all)</Text>}
-      {triage.map(task => {
-        const where = upOf(task) ? ` [${upOf(task)}]` : ' (no epic)'
-        const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
-        const row = (
-          <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
-            <Button key={`pick-${task.id}`} plain
-              onPress={() => act.setPicked(picked.includes(task.id) ? picked.filter(id => id !== task.id) : [...picked, task.id])}>
-              <Text color={picked.includes(task.id) ? 'green' : undefined}>{picked.includes(task.id) ? '☑' : '☐'}</Text>
-            </Button>
-            {Select ? (
-              <Select key={`prio-${task.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={task.priority}
-                onSelect={(value: string) => act.userAct({ action: 'update', id: task.id, priority: value })} />
-            ) : (
-              <Text key={`prio-${task.id}`} color={PRIORITY_COLOR[task.priority]}>{task.priority}</Text>
-            )}
-            <Button key={`row-${task.id}`} plain onPress={choose(task.id)}>
-              <Text dimColor>{task.id}</Text> {task.title}
-              <Text dimColor>
-                {where}
-                {tags ? ` ${tags}` : ''}
+      {allRows.length === 0 && <Text dimColor>Nothing planned yet. Press n to add a milestone, an epic or a task.</Text>}
+      {treeShown.map((one, i) => {
+        const isHead = allRows.indexOf(one) === firstUnplanned
+        return isHead ? (
+          <Box key={`unplanned-${one.item.id}`} flexDirection="column">
+            <Box key="unplanned-head" flexDirection="row" columnGap={1} flexWrap="wrap">
+              <Text bold dimColor>
+                Unplanned{unheld ? `  ${unheld} for anyone to take` : ''}
               </Text>
-            </Button>
-            <Button key={`hand-${task.id}`} label="→ Claude" onPress={() => act.askHand(task.id)} />
+              {/* Picked rows run at once: each its own agent, worktree and branch. */}
+              {picked.length > 0 && !(parallelAsk && !pick) && (
+                <Button key="run-picked" label={`Run ${picked.length} at once…`} variant="primary" onPress={() => act.askParallel(picked)} />
+              )}
+              {picked.length > 0 && !(parallelAsk && !pick) && <Button key="unpick" label="Clear picks" onPress={() => act.setPicked([])} />}
+            </Box>
+            {picked.length > 0 && parallelAsk && !pick && confirmParallel(parallelAsk, 'parallel-confirm')}
+            {planRow(one)}
           </Box>
+        ) : (
+          planRow(one)
         )
-        return handing === task.id ? (
-          <Box key={`back-wrap-${task.id}`} flexDirection="column">
-            {row}
-            {confirmHand(task)}
-          </Box>
-        ) : row
       })}
+      {treeShown.length < allRows.length && <Text key="tree-more" dimColor>…{allRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
+      {looseDone.length > 0 && !query && treeShown.length === allRows.length && (
+        <Button key="fold-loose" plain onPress={() => act.toggleFold(LOOSE)}>
+          <Text dimColor>
+            {showsLoose ? '▾' : '▸'} {looseDone.length} finished task{looseDone.length === 1 ? '' : 's'} in no epic
+          </Text>
+        </Button>
+      )}
     </Box>
   )
 
@@ -1313,12 +1321,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : backlogView}
+                {mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : tree}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : backlogView)
+            panel ?? (mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : tree)
           )
         )}
         {items.length > 0 && !trouble && (
