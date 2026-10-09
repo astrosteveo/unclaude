@@ -924,3 +924,59 @@ export function drawPane(
       ),
   }
 }
+
+/**
+ * The band above the prompt: what the agents are working on right now, pressable to open it. `working`
+ * is their tasks under way, the latest first; several (tasks run in parallel) are shown side by side.
+ */
+export function drawBand(els: Elements[keyof Elements], e: EventOf['ui.render'], snap: Snapshot, working: Item[], show: (id: string) => void): RenderElement {
+  const { Box, Button, Text } = els
+  const task = working[0]!
+  const room = ((e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 80) - 1
+  // Several agents at once (tasks run in parallel): each one's task and checklist, side by side, as many as fit.
+  if (working.length > 1) {
+    const ticksOf = (one: Item) => (one.checklist.length ? ` ☑${one.checklist.filter(c => c.done).length}/${one.checklist.length}` : '')
+    const head = `◐ ${working.length} agents: `
+    let used = head.length
+    const shown = working.filter(one => {
+      const width = `${one.id}${ticksOf(one)} · `.length
+      return (used += width) <= room - 8
+    })
+    return (
+      <Box flexDirection="row">
+        <Text color={COLOR.in_progress}>◐</Text>
+        <Text dimColor> {working.length} agents:</Text>
+        {shown.map((one, i) => (
+          <Button key={`agent-${one.id}`} plain onPress={() => show(one.id)}>
+            {i ? <Text dimColor> ·</Text> : null} <Text>{one.id}</Text>
+            <Text dimColor>{ticksOf(one)}</Text>
+          </Button>
+        ))}
+        {shown.length < working.length && <Text dimColor> +{working.length - shown.length} more</Text>}
+      </Box>
+    )
+  }
+  const milestone = (() => {
+    let at: Item | undefined = task
+    while (at && at.kind !== 'milestone') at = find(snap.items, at.parent ?? undefined)
+    return at
+  })()
+  const list = task.checklist ?? []
+  const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
+  const where = milestone ? ` · ${milestone.id} ${progress(snap.items, milestone).done}/${progress(snap.items, milestone).total}` : ''
+  const fixed = `◐ ${task.id}  @${task.assignee}${ticks}${where}`.length
+  const title = task.title.length + fixed > room ? task.title.slice(0, Math.max(8, room - fixed - 1)) + '…' : task.title
+
+  return (
+    <Box>
+      <Button key="current" plain onPress={() => show(task.id)}>
+        <Text color={COLOR.in_progress}>◐</Text> <Text dimColor>{task.id}</Text> {title}
+        <Text color="cyan"> @{task.assignee}</Text>
+        <Text dimColor>
+          {ticks}
+          {where}
+        </Text>
+      </Button>
+    </Box>
+  )
+}

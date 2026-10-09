@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Draft, IssueType, Item, Kind, Pr, PlanNode, Priority, Query, Refs, Section, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
-import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
+import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
   agentName, approvalNote, askAbout, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
@@ -1370,56 +1370,7 @@ export const register: Register = on => {
     const task = working[0]
     if (e.props.hasSurvey || !task) return next(e)
 
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const room = ((e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 80) - 1
-    // Several agents at once (tasks run in parallel): each one's task and checklist, side by side, as many as fit.
-    if (working.length > 1) {
-      const ticksOf = (one: Item) => (one.checklist.length ? ` ☑${one.checklist.filter(c => c.done).length}/${one.checklist.length}` : '')
-      const head = `◐ ${working.length} agents: `
-      let used = head.length
-      const shown = working.filter(one => {
-        const width = `${one.id}${ticksOf(one)} · `.length
-        return (used += width) <= room - 8
-      })
-      return (
-        <Box flexDirection="row">
-          <Text color={COLOR.in_progress}>◐</Text>
-          <Text dimColor> {working.length} agents:</Text>
-          {shown.map((one, i) => (
-            <Button key={`agent-${one.id}`} plain onPress={() => void showItem($, one.id)}>
-              {i ? <Text dimColor> ·</Text> : null} <Text>{one.id}</Text>
-              <Text dimColor>{ticksOf(one)}</Text>
-            </Button>
-          ))}
-          {shown.length < working.length && <Text dimColor> +{working.length - shown.length} more</Text>}
-        </Box>
-      )
-    }
-    const milestone = (() => {
-      let at: Item | undefined = task
-      while (at && at.kind !== 'milestone') at = find(snap.items, at.parent ?? undefined)
-      return at
-    })()
-    const list = task.checklist ?? []
-    const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
-    const more = working.length > 1 ? ` +${working.length - 1} more` : ''
-    const where = milestone ? ` · ${milestone.id} ${progress(snap.items, milestone).done}/${progress(snap.items, milestone).total}` : ''
-    const fixed = `◐ ${task.id}  @${task.assignee}${ticks}${where}${more}`.length
-    const title = task.title.length + fixed > room ? task.title.slice(0, Math.max(8, room - fixed - 1)) + '…' : task.title
-
-    return (
-      <Box>
-        <Button key="current" plain onPress={() => void showItem($, task.id)}>
-          <Text color={COLOR.in_progress}>◐</Text> <Text dimColor>{task.id}</Text> {title}
-          <Text color="cyan"> @{task.assignee}</Text>
-          <Text dimColor>
-            {ticks}
-            {where}
-            {more}
-          </Text>
-        </Button>
-      </Box>
-    )
+    return drawBand($.ui.resolve(e), e, snap, working, id => void showItem($, id))
   })
 
   // While a card is open its title and bar hold still and only the sections under them scroll.

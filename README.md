@@ -67,9 +67,10 @@ claude --plugin-dir .                  # run a session with this checkout loaded
 claude plugin validate .               # what the engine sees and would refuse
 claude plugin test .                   # unit and UI tests (hooks/*.test.ts)
 node --test tests/sql.integration.mjs  # the generated SQL against a real sqlite3
+node --test tests/register.e2e.mjs     # the roadmap tool end to end (hooks/register.tsx) against a real sqlite3
 ```
 
-CI runs all three on every push to `main` and on pull requests (`.github/workflows/test.yml`).
+CI runs all four on every push to `main` and on pull requests (`.github/workflows/test.yml`).
 
 This roadmap was built by working from itself: its own milestones are in this repo's `.claude/roadmap.db` (not committed).
 
