@@ -187,8 +187,11 @@ export function outline(items: Item[], root: string | null = null): string {
  */
 export const unread = (snap: Snapshot, id: string, reader: string) =>
   snap.activity.filter(
-    one => one.item_id === id && one.author !== reader && one.type === 'comment' && one.id > (snap.seen[id] ?? 0),
+    one => one.item_id === id && one.author !== reader && isMessage(one) && one.id > (snap.seen[id] ?? 0),
   )
+
+/** Whether an entry is something someone wrote (a comment or a handoff note), not a change the tracker logged. */
+export const isMessage = (one: Activity) => one.type === 'comment' || one.type === 'handoff'
 
 export const timeline = (activity: Activity[], id: string) =>
   activity.filter(one => one.item_id === id).sort((a, b) => a.id - b.id)
@@ -197,6 +200,9 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
   const parts = [line(snap.items, item)]
   const where = path(snap.items, item)
   if (where) parts.push(`in: ${where}`)
+  // Whoever picks the task up reads the last holder's note before anything else.
+  const handoff = timeline(snap.activity, item.id).filter(one => one.type === 'handoff').at(-1)
+  if (handoff) parts.push(`Handoff from ${handoff.author} (${handoff.at.slice(0, 16).replace('T', ' ')}):\n  ${handoff.body}`)
   if (item.description) parts.push(item.description)
   if (item.checklist?.length)
     parts.push('Checklist:\n' + item.checklist.map(c => `  [${c.done ? 'x' : ' '}] ${c.n}. ${c.text}`).join('\n'))

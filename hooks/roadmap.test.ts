@@ -596,3 +596,44 @@ test('heartbeat: every tracker call renews the caller\'s leases; other tools at 
   await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
   expect(renews()).toBe(3)
 })
+
+test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {
+  const activity: Activity[] = [
+    { id: 1, item_id: 'T1', author: 'claude', type: 'comment', body: 'started on the parser', at: '2026-10-09T10:00:00Z' },
+    { id: 2, item_id: 'T1', author: 'explore:a', type: 'handoff', body: 'parser done; tests for edge cases left', at: '2026-10-09T11:00:00Z' },
+  ]
+  const some = [item('T1', { description: 'Parse the config', checklist: [{ n: 1, text: 'edge cases', done: false }] })]
+  const snap = { items: some, activity, seen: {} }
+  const text = detail(snap, some[0]!)
+  expect(text.split('\n').slice(1, 3)).toEqual(['Handoff from explore:a (2026-10-09 11:00):', '  parser done; tests for edge cases left'])
+  expect(unread(snap, 'T1', 'user').map(one => one.id)).toEqual([1, 2])
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    scripts.push(e.init?.stdin ?? '')
+    // The claim answers its new holder; everything else, the snapshot.
+    const isClaim = e.init?.stdin?.includes("'assign'") && e.init?.stdin?.includes('lease_at=')
+    return { value: isClaim ? { ...fakeSqlite('', snap), stdout: 'claude' } : fakeSqlite(e.init?.stdin, snap) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const claimed = String((await call({ action: 'claim', id: 'T1' })).result)
+  expect(claimed).toContain('T1 is yours (claude), in progress.')
+  expect(claimed).toContain('Handoff from explore:a')
+  expect(claimed).toContain('[ ] 1. edge cases')
+  const released = String((await call({ action: 'release', id: 'T1', body: 'blocked on vendor docs' })).result)
+  expect(released).toBe('T1 released, with your handoff note.')
+  expect(scripts.some(one => one.includes("'handoff'") && one.includes('blocked on vendor docs'))).toBe(true)
+
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  expect((await ui.find({ key: 'act-2' }))?.type).toBe('Box')
+  expect(await ui.find({ type: 'Text', text: /explore:a handoff/ })).toBeDefined()
+  await ui.unmount()
+})

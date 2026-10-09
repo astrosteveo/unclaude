@@ -40,7 +40,8 @@ export type Activity = {
   id: number
   item_id: string
   author: string
-  type: 'create' | 'status' | 'assign' | 'edit' | 'comment'
+  /** `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. */
+  type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff'
   body: string
   at: string
 }

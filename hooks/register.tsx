@@ -5,7 +5,7 @@ import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } fr
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, checkLinks, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, checkLinks, isMessage, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -412,15 +412,21 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
       const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee))) || null
       const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
-      return holder === actor
-        ? `${it.id} is yours (${actor}), in progress.${tookOver}`
-        : fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
+      if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
+      // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
+      const after = await refresh($)
+      // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
+      const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
+      const linked = refsText(refsFor(after.items, known, it))
+      return `${it.id} is yours (${actor}), in progress.${tookOver}\n\n${detail(after, find(after.items, it.id) ?? it, 10)}${linked ? `\n${linked}` : ''}`
     }
     case 'release': {
       const it = need()
+      // The note goes in first, so the timeline reads: what was left, then who let go.
+      if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'))
       const { script } = db.change(actor, it, { assignee: null })
       if (script) await sql($, script)
-      return `${it.id} released.`
+      return `${it.id} released${a.body?.trim() ? ', with your handoff note' : ''}.`
     }
     case 'check': {
       const it = need()
@@ -561,7 +567,8 @@ export const register: Register = on => {
         'Hierarchy: milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
         'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by due date),',
         'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
-        'claim (id: take a task and start it; refused when someone else holds it or it waits on unfinished tasks), release (id), comment (id, body), remove (id; cascade for children).',
+        'claim (id: take a task and start it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks), release (id; body leaves a handoff note for whoever picks it up next),',
+        'comment (id, body), remove (id; cascade for children).',
         'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
         'Review: setting a task done moves it to review, where the user approves it on the board. Pass approved: true with status done only when',
@@ -600,7 +607,7 @@ export const register: Register = on => {
           duplicates: { type: 'string', description: 'The item this one duplicates (add/update); closes this task as done. Empty string clears.' },
           priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3 can wait; p2 is the default. next picks higher priority first.' },
           type: { type: 'string', enum: TYPES, description: 'What sort of work: feature (default), bug or chore' },
-          body: { type: 'string', description: 'Comment text (comment)' },
+          body: { type: 'string', description: 'Comment text (comment), or a handoff note (release): where you got to and what is left' },
           as: { type: 'string', description: `Who is acting, to override the default: "${CLAUDE}", or a subagent's name from its type and task.` },
           approved: { type: 'boolean', description: 'update with status done: the user has explicitly approved this work in chat, so it skips review. Never on your own judgment.' },
           force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
@@ -953,17 +960,18 @@ export const register: Register = on => {
                 onSubmit={(value: string) => void (value.trim() && userAct($, { action: 'comment', id: item.id, body: value }))} />
             ) }]
           : []),
-        // Comments read as messages, author over body; what the tracker did reads as one dim line.
+        // Comments and handoff notes read as messages, author over body; what the tracker did reads as one dim line.
         ...timeline(snap.activity, item.id)
           .slice(-6)
           .map(one => {
             const when = one.at.slice(5, 16).replace('T', ' ')
             const who = <Text color={one.author === USER ? 'magenta' : 'cyan'}>{one.author}</Text>
-            return one.type === 'comment'
+            return isMessage(one)
               ? { key: `act-${one.id}`, rows: 1 + tall(one.body, 2), node: (
                   <Box key={`act-${one.id}`} flexDirection="column">
                     <Text>
                       {who}
+                      {one.type === 'handoff' && <Text color="yellow"> handoff</Text>}
                       <Text dimColor> {when}</Text>
                     </Text>
                     <Text>  {one.body}</Text>

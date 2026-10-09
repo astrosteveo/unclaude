@@ -190,8 +190,8 @@ SELECT assignee FROM items WHERE id=${q(id)};`
 export const renew = (actor: string) =>
   `UPDATE items SET lease_at=${NOW} WHERE assignee=${q(actor)} AND status='in_progress' AND kind='task';`
 
-export const comment = (actor: string, id: string, body: string) =>
-  `BEGIN IMMEDIATE;\n${activity(id, actor, 'comment', body)}\nCOMMIT;`
+export const comment = (actor: string, id: string, body: string, type: 'comment' | 'handoff' = 'comment') =>
+  `BEGIN IMMEDIATE;\n${activity(id, actor, type, body)}\nCOMMIT;`
 
 export function remove(ids: string[]): string {
   const list = ids.map(q).join(', ')
