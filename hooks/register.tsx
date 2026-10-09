@@ -653,6 +653,8 @@ export const register: Register = on => {
     const items = snap.items
     const width = (e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 100
     const isWide = width >= 90
+    // Inline the pane gets about a third of the screen, so an open card there spends as few rows as it can.
+    const isCompact = e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'inline'
     const choose = (id: string | null) => () => void open($, id)
     const badge = (item: Item) => {
       const count = unread(snap, item.id, USER).length
@@ -760,8 +762,9 @@ export const register: Register = on => {
     const sections: Row[] = []
     const section = (key: string, heading: string, rows: Row[]) => {
       if (rows.length === 0) return
-      sections.push({ key: `head-${key}`, rows: 2, node: (
-        <Box key={`head-${key}`} marginTop={1}>
+      const gap = isCompact && sections.length === 0 ? 0 : 1
+      sections.push({ key: `head-${key}`, rows: 1 + gap, node: (
+        <Box key={`head-${key}`} marginTop={gap}>
           <Text bold dimColor>{heading}</Text>
         </Box>
       ) })
@@ -854,7 +857,10 @@ export const register: Register = on => {
     // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
     // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
-    const fixed = 1 + 2 + tall(item?.title ?? '', item ? item.kind.length + item.id.length + 2 : 0) + 2 + (inner < 56 ? 1 : 0) + 1 + 1 + 1
+    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
+    const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 : 0)
+    // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
+    const fixed = (isCompact ? 0 : 1) + 2 + titleRows + 2 + (inner < 56 ? 1 : 0) + (isCompact ? 0 : 1) + 1 + 1
     const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
     const total = sections.reduce((sum, row) => sum + row.rows, 0)
     const isScrolling = space < total
@@ -888,6 +894,7 @@ export const register: Register = on => {
             {item.kind} {item.id}
           </Text>{' '}
           <Text bold>{item.title}</Text>
+          {isCompact && <Text dimColor>  {meta}</Text>}
         </Text>
         {/* The bar sits right under the title on every card, so its buttons never move with the content. */}
         <Box key="bar" flexDirection="column">
@@ -918,12 +925,14 @@ export const register: Register = on => {
             <Button key="close" label="Close" hotkey="x" onPress={() => void closeDetail($, item.id)} />
           </Box>
         </Box>
-        <Text>
-          <Text dimColor>assignee </Text>
-          <Text color="cyan">{item.assignee ?? 'none'}</Text>
-          {item.due && <Text dimColor>  due {item.due}</Text>}
-          {where && <Text dimColor>  in {where}</Text>}
-        </Text>
+        {!isCompact && (
+          <Text>
+            <Text dimColor>assignee </Text>
+            <Text color="cyan">{item.assignee ?? 'none'}</Text>
+            {item.due && <Text dimColor>  due {item.due}</Text>}
+            {where && <Text dimColor>  in {where}</Text>}
+          </Text>
+        )}
         {body}
       </Box>
     )
@@ -940,7 +949,8 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {header}
+        {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
+        {!(isCompact && panel) && header}
         {offer}
         {trouble ? (
           <Text color="red">{trouble}</Text>

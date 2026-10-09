@@ -390,3 +390,26 @@ test('a project without a roadmap gets no database, no sqlite3 and no git until 
   expect(ran.some(argv => argv[0] === 'mkdir')).toBe(true)
   expect(ran.some(argv => argv[0] === 'sqlite3')).toBe(true)
 })
+
+test('inline, an open card folds the info line into its title and borrows the tabs\' row', async ($, on) => {
+  const snap = { items, activity: [], seen: {} }
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const placement of ['inline', 'dock'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: 80, placement, scroll: { offset: 0, bodyRows: 13 } } as never,
+    })
+    await ui.press({ key: 'card-T2' })
+    const isInline = placement === 'inline'
+    expect(await ui.find({ key: 'tab-board' }) === undefined).toBe(isInline)
+    expect(await ui.find({ type: 'Text', text: /^assignee claude/ }) === undefined).toBe(isInline)
+    expect((await ui.find({ key: 'detail' }))?.text?.includes('@claude')).toBe(isInline)
+    await ui.press({ key: 'close' })
+    expect(await ui.find({ key: 'tab-board' })).toBeDefined()
+    await ui.unmount()
+  }
+})
