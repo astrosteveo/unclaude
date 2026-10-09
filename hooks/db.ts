@@ -206,6 +206,12 @@ export function remove(ids: string[]): string {
   return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nDELETE FROM labels WHERE item_id IN (${list});\nDELETE FROM relations WHERE a IN (${list}) OR b IN (${list});\nCOMMIT;`
 }
 
+/** Scripts built here, run as one transaction: each one's own BEGIN and COMMIT dropped. Empty ones are skipped. */
+export function atomic(scripts: string[]): string {
+  const bodies = scripts.filter(Boolean).map(one => one.replace(/^BEGIN IMMEDIATE;\n/, '').replace(/\nCOMMIT;$/, ''))
+  return bodies.length ? `BEGIN IMMEDIATE;\n${bodies.join('\n')}\nCOMMIT;` : ''
+}
+
 /** Marks everything on an item as seen by `reader`, up to its newest activity. */
 export const markSeen = (reader: string, id: string) =>
   `INSERT INTO reads(reader, item_id, seen) VALUES (${q(reader)}, ${q(id)},

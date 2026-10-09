@@ -132,6 +132,21 @@ test('a released task goes back to todo, where next offers it to the next agent'
   assert.deepEqual([item('T1').status, item('T1').assignee], ['blocked', null])
 })
 
+test('atomic runs several scripts as one transaction: all of them land, or none', () => {
+  sql(db.insert('claude', { kind: 'task', title: 't', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'u', parent: null }))
+  const t1 = item('T1')
+  const both = db.atomic([db.change('claude', t1, { title: 'renamed' }).script, '', db.setBlockers('claude', t1, ['T2']).script])
+  assert.equal(both.match(/BEGIN/g).length, 1)
+  sql(both)
+  assert.deepEqual([item('T1').title, item('T1').blocked_by], ['renamed', ['T2']])
+  // A statement that fails part way leaves what came before it unwritten.
+  const broken = db.atomic([db.change('claude', item('T1'), { title: 'again' }).script, 'BEGIN IMMEDIATE;\nINSERT INTO nowhere VALUES (1);\nCOMMIT;'])
+  assert.throws(() => sql(broken))
+  assert.equal(item('T1').title, 'renamed')
+  assert.equal(db.atomic(['', '']), '')
+})
+
 test('quotes, newlines and dot-command lines round-trip as plain text', () => {
   const nasty = `it's "quoted"\n.tables\n.shell echo pwned\n'); DROP TABLE items; --\nend`
   sql(db.insert('claude', { kind: 'task', title: nasty, parent: null, description: nasty }))

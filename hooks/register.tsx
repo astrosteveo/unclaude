@@ -434,32 +434,17 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         type: a.type || undefined,
         parent,
       })
-      if (script) await sql($, script)
-      if (a.checklist !== undefined) {
-        const set = db.setChecklist(actor, it, texts(a.checklist))
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
-      if (blockers !== undefined) {
-        const links = db.setBlockers(actor, it, blockers)
-        if (links.script) await sql($, links.script)
-        notes.push(...links.notes)
-      }
-      if (a.labels !== undefined) {
-        const set = db.setLabels(actor, it, idList(a.labels))
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
-      if (related !== undefined) {
-        const set = db.setRelations(actor, it, 'relates', related)
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
-      if (original !== undefined) {
-        const set = db.setRelations(actor, it, 'duplicates', original)
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
+      // One script, one transaction: the update lands whole or not at all.
+      const parts = [
+        a.checklist === undefined ? undefined : db.setChecklist(actor, it, texts(a.checklist)),
+        blockers === undefined ? undefined : db.setBlockers(actor, it, blockers),
+        a.labels === undefined ? undefined : db.setLabels(actor, it, idList(a.labels)),
+        related === undefined ? undefined : db.setRelations(actor, it, 'relates', related),
+        original === undefined ? undefined : db.setRelations(actor, it, 'duplicates', original),
+      ].filter(part => part !== undefined)
+      const all = db.atomic([script, ...parts.map(part => part.script)])
+      if (all) await sql($, all)
+      notes.push(...parts.flatMap(part => part.notes))
       if (isToReview) {
         notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
         // The review point is where its pull request opens: one per unit of work handed over.

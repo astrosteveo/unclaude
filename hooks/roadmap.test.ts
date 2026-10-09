@@ -647,6 +647,23 @@ test('a failing add or update writes nothing, so a retry has nothing to duplicat
   await denied({ action: 'update', id: 'T1', title: 'renamed', parent: 'T1' }, /own parent|cannot sit under/)
 })
 
+test('an update of several fields is one sqlite3 run, in one transaction', async ($, on) => {
+  const some = [item('T1'), item('T2')]
+  const writes: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    if (stdin.includes('BEGIN')) writes.push(stdin)
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const reply = await $.tool.call({
+    tool: 'mcp__roadmap__roadmap', action: 'update', id: 'T1', title: 'renamed', checklist: ['a', 'b'], blocked_by: ['T2'], labels: ['ui'], relates_to: ['T2'],
+  } as never)
+  expect(String(reply.result)).toContain('title → renamed; checklist set (2 items); blocked by T2; labels: ui; relates to T2')
+  expect(writes.length).toBe(1)
+  expect(writes[0]!.match(/BEGIN/g)?.length).toBe(1)
+})
+
 test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {
   const activity: Activity[] = [
     { id: 1, item_id: 'T1', author: 'claude', type: 'comment', body: 'started on the parser', at: '2026-10-09T10:00:00Z' },
