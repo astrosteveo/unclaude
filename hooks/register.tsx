@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Item, Kind, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
@@ -18,6 +18,10 @@ const WORK = new Set(['Edit', 'Write', 'NotebookEdit', 'Bash'])
 const snapshot = atom({ plugin: 'roadmap', key: 'snapshot' } as const, emptySnapshot())
 const view = atom({ plugin: 'roadmap', key: 'view' } as const, 'board' as View)
 const selected = atom({ plugin: 'roadmap', key: 'selected' } as const, null as string | null)
+// How many rows the open card's sections are scrolled under its fixed title and bar.
+const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
+// The furthest the open card can scroll, as last drawn.
+let scrollMax = 0
 // Commits and pull requests that name tasks, refreshed in the background (see `refreshRefs`).
 const refs = atom({ plugin: 'roadmap', key: 'refs' } as const, { commits: [], prs: [] } as Refs)
 // When git and gh were last asked; gh goes over the network, so it is asked far less often.
@@ -340,6 +344,27 @@ async function userAct($: EngineInterface, a: Input) {
   await refresh($)
 }
 
+/** Breaks text into lines of at most `width` cells at spaces, keeping its own line breaks. */
+export function wrap(text: string, width: number): string[] {
+  const out: string[] = []
+  for (const para of text.split('\n')) {
+    let line = ''
+    for (const word of para.split(/ +/)) {
+      if (line && line.length + 1 + word.length > width) {
+        out.push(line)
+        line = ''
+      }
+      line = line ? `${line} ${word}` : word
+      while (line.length > width) {
+        out.push(line.slice(0, width))
+        line = line.slice(width)
+      }
+    }
+    out.push(line)
+  }
+  return out
+}
+
 const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', done: 'd' }
 
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
@@ -354,6 +379,7 @@ async function closeDetail($: EngineInterface, id: string) {
 /** Opens an item in the detail panel, marking what is on it as read. */
 async function open($: EngineInterface, id: string | null) {
   await update($, selected, () => id)
+  await update($, scrolled, () => 0)
   if (id === null) return
   // The card that held the ring is gone once the panel stands in for the board: hand the ring to the
   // panel, on the first unticked checklist entry when there is one.
@@ -544,6 +570,13 @@ export const register: Register = on => {
     )
   })
 
+  // While a card is open its title and bar hold still and only the sections under them scroll.
+  on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    if ((await read($, selected)) === null) return next(e)
+    await update($, scrolled, at => Math.max(0, Math.min(scrollMax, at + e.by)))
+    return {}
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button } = els
@@ -656,6 +689,134 @@ export const register: Register = on => {
     const item = find(items, pick ?? undefined)
     const status = item && statusOf(items, item)
     const where = item && path(items, item)
+    // The card's sections as rows, so they can scroll under the fixed title and bar.
+    type Row = { key: string; node: RenderChildren; rows: number }
+    const inner = width - 4
+    const tall = (text: string, indent = 0) => Math.max(1, Math.ceil((text.length + indent) / Math.max(1, inner)))
+    const sections: Row[] = []
+    const section = (key: string, heading: string, rows: Row[]) => {
+      if (rows.length === 0) return
+      sections.push({ key: `head-${key}`, rows: 2, node: (
+        <Box key={`head-${key}`} marginTop={1}>
+          <Text bold dimColor>{heading}</Text>
+        </Box>
+      ) })
+      sections.push(...rows)
+    }
+    if (item) {
+      section('description', 'Description', item.description
+        ? wrap(item.description, inner - 2).map((line, i) => ({ key: `desc-${i}`, rows: 1, node: <Text key={`desc-${i}`}>  {line}</Text> }))
+        : [])
+      const checks = item.checklist ?? []
+      section('criteria', `Acceptance criteria  ${checks.filter(c => c.done).length}/${checks.length}`, checks.map(c => ({
+        key: `check-${c.n}`, rows: wrap(c.text, inner - 2).length, node: (
+          <Button key={`check-${c.n}`} plain
+            onPress={() => void userAct($, { action: 'check', id: item.id, items: [c.n], done: !c.done })}>
+            <Text color={c.done ? 'green' : undefined}>{c.done ? '☑' : '☐'}</Text>{' '}
+            <Text dimColor={c.done}>{wrap(c.text, inner - 2).join('\n  ')}</Text>
+          </Button>
+        ),
+      })))
+      section('deps', 'Dependencies', [
+        ...(item.blocked_by ?? []).map(id => {
+          const before = find(items, id)
+          const st = before ? statusOf(items, before) : 'todo'
+          return { key: `waits-${id}`, rows: tall(`waits on ${id} ${before?.title ?? ''}`, 2), node: (
+            <Text key={`waits-${id}`}>
+              <Text dimColor>waits on </Text>
+              <Text color={COLOR[st]}>{GLYPH[st]}</Text> {id} {before?.title ?? '(removed)'}
+            </Text>
+          ) }
+        }),
+        ...items
+          .filter(one => (one.blocked_by ?? []).includes(item.id))
+          .map(one => ({ key: `blocks-${one.id}`, rows: tall(`blocks ${one.id} ${one.title}`), node: (
+            <Text key={`blocks-${one.id}`}>
+              <Text dimColor>blocks </Text>
+              {one.id} {one.title}
+            </Text>
+          ) })),
+      ])
+      const linked = refsFor(items, known, item)
+      section('links', 'Links', [
+        ...linked.prs.slice(0, 3).map(pr => ({ key: `pr-${pr.number}`, rows: tall(`PR #${pr.number} [${pr.state}] ${pr.title}`), node: (
+          <Text key={`pr-${pr.number}`}>
+            <Text dimColor>PR </Text>#{pr.number}{' '}
+            <Text color={pr.state === 'merged' ? 'magenta' : pr.state === 'open' ? 'green' : undefined}>[{pr.state}]</Text> {pr.title}
+          </Text>
+        ) })),
+        ...linked.commits.slice(0, 4).map(c => ({ key: `commit-${c.hash}`, rows: tall(`commit ${c.hash} ${c.subject}`), node: (
+          <Text key={`commit-${c.hash}`}>
+            <Text dimColor>commit </Text>
+            <Text color="yellow">{c.hash}</Text> {c.subject}
+          </Text>
+        ) })),
+        ...(linked.commits.length > 4
+          ? [{ key: 'commits-more', rows: 1, node: <Text key="commits-more" dimColor>…{linked.commits.length - 4} more commits</Text> }]
+          : []),
+      ])
+      section('activity', 'Activity', [
+        ...(Input
+          ? [{ key: 'comment', rows: 1, node: (
+              <Input key="comment" label="Comment" placeholder="A note for Claude; Enter posts it"
+                onSubmit={(value: string) => void (value.trim() && userAct($, { action: 'comment', id: item.id, body: value }))} />
+            ) }]
+          : []),
+        // Comments read as messages, author over body; what the tracker did reads as one dim line.
+        ...timeline(snap.activity, item.id)
+          .slice(-6)
+          .map(one => {
+            const when = one.at.slice(5, 16).replace('T', ' ')
+            const who = <Text color={one.author === USER ? 'magenta' : 'cyan'}>{one.author}</Text>
+            return one.type === 'comment'
+              ? { key: `act-${one.id}`, rows: 1 + tall(one.body, 2), node: (
+                  <Box key={`act-${one.id}`} flexDirection="column">
+                    <Text>
+                      {who}
+                      <Text dimColor> {when}</Text>
+                    </Text>
+                    <Text>  {one.body}</Text>
+                  </Box>
+                ) }
+              : { key: `act-${one.id}`, rows: tall(`${when} ${one.author} ${one.body}`), node: (
+                  <Text key={`act-${one.id}`} dimColor>
+                    {when} {one.author} {one.body}
+                  </Text>
+                ) }
+          }),
+      ])
+    }
+    // On the terminal the window is ours: what fits under the fixed rows, with a mark for what is above or below.
+    // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
+    // footer, and a row for each scroll mark.
+    const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
+    const fixed = 1 + 2 + tall(item?.title ?? '', item ? item.kind.length + item.id.length + 2 : 0) + 2 + (inner < 56 ? 1 : 0) + 1 + 1 + 2
+    const room = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
+    const total = sections.reduce((sum, row) => sum + row.rows, 0)
+    let first = 0
+    if (room < total) {
+      // Scroll in whole rows of the list: skip rows until the scrolled-to line is reached.
+      const want = Math.min(await read($, scrolled), total - room)
+      for (let skipped = 0; first < sections.length && skipped + sections[first]!.rows <= want; first++) skipped += sections[first]!.rows
+      scrollMax = total - room
+    } else scrollMax = 0
+    let used = 0
+    const shown = sections.slice(first).filter(row => (used += row.rows) <= room)
+    // A heading whose first row didn't fit waits for it below.
+    while (shown.length > 0 && shown[shown.length - 1]!.key.startsWith('head-') && first + shown.length < sections.length) shown.pop()
+    const above = sections.slice(0, first).reduce((sum, row) => sum + row.rows, 0)
+    const below = total - above - shown.reduce((sum, row) => sum + row.rows, 0)
+    const body = [
+      above > 0 ? <Text key="more-above" dimColor>↑ {above} more {above === 1 ? 'line' : 'lines'} above · scroll up</Text> : null,
+      ...shown.map(row => row.node),
+      below > 0 ? <Text key="more-below" dimColor>↓ {below} more {below === 1 ? 'line' : 'lines'} below · scroll down</Text> : null,
+    ]
+    // An inline pane is as tall as its tree: hold a scrolling card at one height so the frame doesn't jump.
+    if (room < total) {
+      const drawn = shown.reduce((sum, row) => sum + row.rows, 0) + (above > 0 ? 1 : 0) + (below > 0 ? 1 : 0)
+      if (drawn < room + 2) body.push(<Box key="pad" height={room + 2 - drawn} />)
+    }
+
     const panel = item && status && (
       <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}>
         <Text>
@@ -699,65 +860,7 @@ export const register: Register = on => {
           {item.due && <Text dimColor>  due {item.due}</Text>}
           {where && <Text dimColor>  in {where}</Text>}
         </Text>
-        {item.description && <Text>{item.description}</Text>}
-        {(item.checklist ?? []).map(c => (
-          <Button key={`check-${c.n}`} plain
-            onPress={() => void userAct($, { action: 'check', id: item.id, items: [c.n], done: !c.done })}>
-            <Text color={c.done ? 'green' : undefined}>{c.done ? '☑' : '☐'}</Text>{' '}
-            <Text dimColor={c.done}>{c.text}</Text>
-          </Button>
-        ))}
-        {(item.blocked_by ?? []).map(id => {
-          const before = find(items, id)
-          const st = before ? statusOf(items, before) : 'todo'
-          return (
-            <Text key={`waits-${id}`}>
-              <Text dimColor>waits on </Text>
-              <Text color={COLOR[st]}>{GLYPH[st]}</Text> {id} {before?.title ?? '(removed)'}
-            </Text>
-          )
-        })}
-        {(() => {
-          const linked = refsFor(items, known, item)
-          return [
-            ...linked.prs.slice(0, 3).map(pr => (
-              <Text key={`pr-${pr.number}`}>
-                <Text dimColor>PR </Text>#{pr.number}{' '}
-                <Text color={pr.state === 'merged' ? 'magenta' : pr.state === 'open' ? 'green' : undefined}>[{pr.state}]</Text> {pr.title}
-              </Text>
-            )),
-            ...linked.commits.slice(0, 4).map(c => (
-              <Text key={`commit-${c.hash}`}>
-                <Text dimColor>commit </Text>
-                <Text color="yellow">{c.hash}</Text> {c.subject}
-              </Text>
-            )),
-            linked.commits.length > 4 ? (
-              <Text key="commits-more" dimColor>
-                …{linked.commits.length - 4} more commits
-              </Text>
-            ) : null,
-          ]
-        })()}
-        {items
-          .filter(one => (one.blocked_by ?? []).includes(item.id))
-          .map(one => (
-            <Text key={`blocks-${one.id}`}>
-              <Text dimColor>blocks </Text>
-              {one.id} {one.title}
-            </Text>
-          ))}
-        {Input && <Input key="comment" label="Comment" placeholder="A note for Claude; Enter posts it"
-          onSubmit={(value: string) => void (value.trim() && userAct($, { action: 'comment', id: item.id, body: value }))} />}
-        {timeline(snap.activity, item.id)
-          .slice(-6)
-          .map(one => (
-            <Text key={`act-${one.id}`}>
-              <Text dimColor>{one.at.slice(5, 16).replace('T', ' ')} </Text>
-              <Text color={one.author === USER ? 'magenta' : 'cyan'}>{one.author}</Text>
-              <Text dimColor={one.type !== 'comment'}> {one.body}</Text>
-            </Text>
-          ))}
+        {body}
       </Box>
     )
 

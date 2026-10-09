@@ -246,3 +246,53 @@ test('the detail bar sits right under the title on every card, short or long, ta
   expect(at).toEqual([1, 1, 1])
   await ui.unmount()
 })
+
+test('a card reads as labelled sections, and a tall one scrolls under its fixed title and bar', async ($, on) => {
+  const long = item('T6', {
+    description: 'A long description that wraps. '.repeat(12),
+    checklist: [1, 2, 3, 4, 5, 6].map(n => ({ n, text: `criterion ${n}`, done: n < 3 })),
+    blocked_by: ['T5'],
+  })
+  const activity = [
+    { id: 1, item_id: 'T6', author: 'claude', type: 'event', body: 'created task', at: '2026-10-09T10:00:00Z' },
+    { id: 2, item_id: 'T6', author: 'user', type: 'comment', body: 'please keep it short', at: '2026-10-09T10:05:00Z' },
+  ]
+  const snap = { items: [...items, long], activity, seen: {} }
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const props = (bodyRows: number) =>
+    ({ title: 'Roadmap', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows } }) as never
+  const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props: props(200) })
+  await ui.press({ key: 'card-T6' })
+
+  // Room for everything: every section shows, in order, with no scroll marks.
+  const heads = ['head-description', 'head-criteria', 'head-deps', 'head-activity']
+  const detail = await ui.find({ key: 'detail' })
+  const order = (detail?.children ?? []).map(c => (c as { props?: { key?: string } })?.props?.key).filter(k => heads.includes(k!))
+  expect(order).toEqual(heads)
+  expect(await ui.find({ key: 'head-links' })).toBeUndefined()
+  expect((await ui.find({ key: 'head-criteria' }))?.text).toContain('2/6')
+  expect(await ui.find({ type: 'Text', text: /more lines? below/ })).toBeUndefined()
+  // A comment is a message, author over body; an event stays one dim line.
+  expect((await ui.find({ key: 'act-2' }))?.type).toBe('Box')
+  expect((await ui.find({ type: 'Text', text: /claude created task/ }))?.props.dimColor).toBe(true)
+
+  // A short pane: the title and bar stay, the sections window and scroll.
+  await ui.redraw(props(20))
+  expect(await ui.find({ type: 'Text', text: /more lines? below/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /more lines? above/ })).toBeUndefined()
+  expect(await ui.find({ key: 'head-activity' })).toBeUndefined()
+  await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 999, by: 999, bodyRows: 20, contentRows: 20, origin: { kind: 'person' } })
+  await ui.redraw(props(20))
+  expect(await ui.find({ type: 'Text', text: /more lines? above/ })).toBeDefined()
+  expect(await ui.find({ key: 'head-activity' })).toBeDefined()
+  expect(await ui.find({ key: 'set-todo' })).toBeDefined()
+  expect(await ui.find({ key: 'hand' })).toBeDefined()
+  // Reopening a card starts it at the top.
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T6' })
+  expect(await ui.find({ type: 'Text', text: /more lines? above/ })).toBeUndefined()
+  await ui.unmount()
+})
