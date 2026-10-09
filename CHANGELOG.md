@@ -27,6 +27,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Fixed
 
+- A task let go while under way (`release`, or Unassign on the board) goes back to todo, so `next` and the backlog offer it to the next agent. Before, it stayed in progress with nobody on it and no agent was offered it again. Blocked and review tasks keep their status.
 - A project that never uses the roadmap is left alone: no `.claude/roadmap.db` is created until the first write, and git and gh aren't run there. Before, a user-scope install made an empty database in every folder Claude Code opened.
 
 ### Changed

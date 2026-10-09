@@ -24,6 +24,7 @@ registerHooks({
   },
 })
 const db = await import('../hooks/db.ts')
+const { letGo, nextUp } = await import('../hooks/model.ts')
 
 let dir
 beforeEach(() => {
@@ -115,6 +116,20 @@ test('claim starts a task already handed to the claimer (T7 regression)', () => 
   // Claiming again changes nothing and logs nothing.
   sql(db.claim('claude', 'T1', false))
   assert.equal(log('T1').length, 2)
+})
+
+test('a released task goes back to todo, where next offers it to the next agent', () => {
+  sql(db.insert('claude', { kind: 'task', title: 't', parent: null }))
+  sql(db.claim('explorer', 'T1', false))
+  sql(db.change('explorer', item('T1'), letGo(item('T1'))).script)
+  assert.deepEqual([item('T1').status, item('T1').assignee], ['todo', null])
+  assert.deepEqual(log('T1').slice(2), ['explorer: unassigned explorer', 'explorer: status in_progress → todo'])
+  assert.deepEqual(nextUp(load().items, 'claude').map(one => one.id), ['T1'])
+  // Blocked work keeps its status: it still waits on something.
+  sql(db.claim('claude', 'T1', false))
+  sql(db.change('claude', item('T1'), { status: 'blocked' }).script)
+  sql(db.change('claude', item('T1'), letGo(item('T1'))).script)
+  assert.deepEqual([item('T1').status, item('T1').assignee], ['blocked', null])
 })
 
 test('quotes, newlines and dot-command lines round-trip as plain text', () => {

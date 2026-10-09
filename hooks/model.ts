@@ -238,6 +238,13 @@ export function progress(items: Item[], item: Item): { done: number; total: numb
   return { done: tasks.filter(task => task.status === 'done').length, total: tasks.length }
 }
 
+/**
+ * What letting go of an item changes: nobody holds it, and a task that was under way goes back to todo,
+ * where `next` and the backlog offer it to the next taker. Blocked and review keep their status.
+ */
+export const letGo = (item: Item): { assignee: null; status?: Status } =>
+  item.kind === 'task' && item.status === 'in_progress' ? { assignee: null, status: 'todo' } : { assignee: null }
+
 /** Whether `who` is an agent: anyone holding work who isn't the person at the board. */
 export const isAgent = (who: string | null | undefined) => Boolean(who) && who !== USER
 

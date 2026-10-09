@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -595,6 +595,31 @@ test('heartbeat: every tracker call renews the caller\'s leases; other tools at 
   await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
   await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
   expect(renews()).toBe(3)
+})
+
+test('release and Unassign put a task under way back to todo, so next and the backlog offer it again', async ($, on) => {
+  const held = item('T1', { status: 'in_progress', assignee: 'claude' })
+  const released = { ...held, ...letGo(held) }
+  expect(released).toMatchObject({ status: 'todo', assignee: null })
+  expect(nextUp([released], 'explore:a').map(one => one.id)).toEqual(['T1'])
+  expect(backlog([released]).map(one => one.id)).toEqual(['T1'])
+  expect(letGo(item('T2', { status: 'review', assignee: 'claude' }))).toEqual({ assignee: null })
+  expect(letGo(item('E1', { status: 'in_progress', assignee: 'claude' }))).toEqual({ assignee: null })
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: [held], activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  await call({ action: 'release', id: 'T1' })
+  expect(scripts.some(one => one.includes("status='todo'") && one.includes('assignee=NULL'))).toBe(true)
+  scripts.length = 0
+  // The board's Unassign is an update clearing the assignee.
+  await call({ action: 'update', id: 'T1', assignee: '' })
+  expect(scripts.some(one => one.includes("status='todo'") && one.includes('assignee=NULL'))).toBe(true)
+  scripts.length = 0
+  // A status given with it wins.
+  await call({ action: 'update', id: 'T1', assignee: '', status: 'blocked' })
+  expect(scripts.some(one => one.includes("status='blocked'"))).toBe(true)
 })
 
 test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {

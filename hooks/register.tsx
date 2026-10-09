@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, brief, handedScope, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, brief, handedScope, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -420,6 +420,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         description: a.description === undefined ? undefined : a.description || null,
         due: a.due === undefined ? undefined : a.due || null,
         assignee: a.assignee === undefined ? undefined : a.assignee || null,
+        // Unassigned without a status of its own (the board's Unassign), a task under way goes back to todo.
+        ...(a.assignee === '' && a.status === undefined && it.assignee ? { status: letGo(it).status } : {}),
         priority: a.priority || undefined,
         type: a.type || undefined,
         parent: a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id),
@@ -487,7 +489,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const it = need()
       // The note goes in first, so the timeline reads: what was left, then who let go.
       if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'))
-      const { script } = db.change(actor, it, { assignee: null })
+      const { script } = db.change(actor, it, letGo(it))
       if (script) await sql($, script)
       return `${it.id} released${a.body?.trim() ? ', with your handoff note' : ''}.`
     }
