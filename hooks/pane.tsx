@@ -29,6 +29,8 @@ export type PaneState = {
   isFiltering: boolean
   /** The new-item form, while it is open. */
   draft: Draft | null
+  /** Whether the open card shows its fields for editing. */
+  isEditing: boolean
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -52,6 +54,7 @@ export type PaneActions = {
   /** Opens the new-item form (under `parent` when given), changes its choices, or closes it (null). */
   setDraft: (draft: Draft | null) => void
   create: (draft: Draft, title: string) => void
+  setEditing: (isOn: boolean) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -89,7 +92,7 @@ export function drawPane(
   const { Box, Text, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing } = state
   const query = parseQuery(filter)
   // What the filter lets through: everything without one; with one, what matches and, in the tree, what holds it.
   const isShown = (item: Item) => !query || matches(snap, item, query)
@@ -266,8 +269,55 @@ export function drawPane(
     ) })
     sections.push(...rows)
   }
+  if (item && isEditing) {
+    // Each field saves on its own, on Enter; what isn't submitted stays as it was.
+    const save = (fields: Record<string, unknown>) => act.userAct({ action: 'update', id: item.id, ...fields })
+    // Labels in a column of their own, so a long value is cut short rather than squeezing its label.
+    const field = (key: string, label: string, value: string, onSubmit: (v: string) => void, placeholder = '') => ({
+      key, rows: 1, node: Input ? (
+        <Box key={`${key}-row`} flexDirection="row">
+          <Box width={13} flexShrink={0}>
+            <Text dimColor>{label}</Text>
+          </Box>
+          <Input key={key} value={value} placeholder={placeholder} submitLabel="save" onSubmit={(v: string) => onSubmit(v.trim())} />
+        </Box>
+      ) : <Text key={key}>{label}: {value}</Text>,
+    })
+    const choice = (key: string, label: string, value: string, options: { value: string; label?: string }[], onSelect: (v: string) => void) => ({
+      key, rows: 1, node: Select ? (
+        <Box key={`${key}-row`} flexDirection="row">
+          <Box width={13} flexShrink={0}>
+            <Text dimColor>{label}</Text>
+          </Box>
+          <Select key={key} value={value} options={options} onSelect={onSelect} />
+        </Box>
+      ) : <Text key={key}>{label}: {value}</Text>,
+    })
+    const isLong = (item.description ?? '').includes('\n')
+    const own = new Set(subtree(items, item.id))
+    section('edit', 'Edit  (Enter saves a field)', [
+      field('edit-title', 'Title', item.title, v => v && save({ title: v })),
+      isLong
+        ? { key: 'edit-desc-long', rows: 1, node: <Text key="edit-desc-long" dimColor>Description runs several lines: ask Claude to change it.</Text> }
+        : field('edit-desc', 'Description', item.description ?? '', v => save({ description: v }), 'one line; empty clears it'),
+      field('edit-due', 'Due', item.due ?? '', v => save({ due: v }), 'YYYY-MM-DD; empty clears it'),
+      ...(item.kind === 'task'
+        ? [
+            field('edit-labels', 'Labels', item.labels.join(', '), v => save({ labels: v ? v.split(',') : [] }), 'ui, auth'),
+            choice('edit-priority', 'Priority', item.priority, PRIORITIES.map(one => ({ value: one })), v => save({ priority: v })),
+            choice('edit-type', 'Type', item.type, TYPES.map(one => ({ value: one })), v => save({ type: v })),
+          ]
+        : []),
+      ...(item.kind === 'milestone'
+        ? []
+        : [choice('edit-parent', 'Under', item.parent ?? '', [
+            { value: '', label: '(top level)' },
+            ...homesFor(items, item.kind).filter(one => !own.has(one.id)).map(one => ({ value: one.id, label: `${one.id} ${one.title}`.slice(0, 40) })),
+          ], v => save({ parent: v }))]),
+    ])
+  }
   if (item) {
-    section('description', 'Description', item.description
+    if (!isEditing) section('description', 'Description', item.description
       ? wrap(item.description, inner - 2).map((line, i) => ({ key: `desc-${i}`, rows: 1, node: <Text key={`desc-${i}`}>  {line}</Text> }))
       : [])
     const checks = item.checklist ?? []
@@ -389,12 +439,12 @@ export function drawPane(
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), 'Hand to Claude', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), 'Hand to Claude', ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
-    ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', 'm/u assign', 'x close']
+    ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', isEditing ? 'e done editing' : 'e edit', 'm/u assign', 'x close']
     : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
   )
     .filter(Boolean)
@@ -477,6 +527,10 @@ export function drawPane(
           )}
           <Button key="hand" label="Hand to Claude" hotkey="h" onPress={() => act.handToClaude(item)} />
           {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
+          {(Input || Select) && (
+            <Button key="edit" label={isEditing ? 'Done editing' : 'Edit'} hotkey="e" variant={isEditing ? 'primary' : 'secondary'}
+              onPress={() => act.setEditing(!isEditing)} />
+          )}
           <Button key="mine" label="Assign me" hotkey="m" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: USER })} />
           <Button key="unassign" label="Unassign" hotkey="u" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: '' })} />
           <Button key="close" label="Close" hotkey="x" onPress={() => act.closeDetail(item.id)} />

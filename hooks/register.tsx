@@ -28,6 +28,8 @@ const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
 const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
 // The new-item form's choices while it is open.
 const draft = atom({ plugin: 'roadmap', key: 'draft' } as const, null as Draft | null)
+// Whether the open card shows its fields for editing.
+const editing = atom({ plugin: 'roadmap', key: 'editing' } as const, false)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -306,6 +308,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
   if (a.status && !STATUSES.includes(a.status)) fail(`status must be one of ${STATUSES.join(', ')}`)
   if (a.priority && !PRIORITIES.includes(a.priority)) fail(`priority must be one of ${PRIORITIES.join(', ')}`)
   if (a.type && !TYPES.includes(a.type)) fail(`type must be one of ${TYPES.join(', ')}`)
+  if (a.due && !/^\d{4}-\d{2}-\d{2}$/.test(a.due)) fail('due must be a date, YYYY-MM-DD')
 
   switch (a.action) {
     case 'show':
@@ -557,6 +560,7 @@ const CARD_ROWS = 40
 /** Closes the detail panel and hands the ring back to the card or row it was opened from. */
 async function closeDetail($: EngineInterface, id: string) {
   await update($, selected, () => null)
+  await update($, editing, () => false)
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   await focusOn($, (await read($, view)) === 'board' ? `card-${id}` : `row-${id}`)
 }
@@ -566,6 +570,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, selected, () => id)
   await update($, scrolled, () => 0)
   await update($, requesting, () => false)
+  await update($, editing, () => false)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -838,6 +843,7 @@ export const register: Register = on => {
       filter: await read($, filter),
       isFiltering: await read($, filtering),
       draft: await read($, draft),
+      isEditing: await read($, editing),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
@@ -854,6 +860,8 @@ export const register: Register = on => {
       setFilter: text => void update($, filter, () => text).then(() => update($, filtering, () => false)),
       setDraft: next => void update($, draft, () => next).then(() => (next ? focusOn($, 'new-title') : undefined)),
       create: (choice, title) => void create($, choice, title),
+      // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
+      setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),

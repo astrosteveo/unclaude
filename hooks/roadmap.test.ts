@@ -912,3 +912,48 @@ test('new item from the board: n opens the form, choices narrow the parents, Ent
   expect(await ui.find({ key: 'hand' })).toBeDefined()
   await ui.unmount()
 })
+
+test('edit a card: e shows its fields; each saves on its own through update', async ($, on) => {
+  const some = [
+    item('M1'), item('E1', { parent: 'M1' }), item('E2', { parent: 'M1' }),
+    item('T1', { parent: 'E1', title: 'Old title', description: 'one line', labels: ['ui'] }),
+    item('T2', { description: 'first\nsecond' }),
+  ]
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  const wrote = (...needles: string[]) => scripts.some(one => needles.every(n => one.includes(n)))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ key: 'edit-title' })).toBeUndefined()
+  await ui.press({ key: 'edit' })
+  expect((await ui.find({ key: 'edit-title' }))?.props.value).toBe('Old title')
+  await ui.input({ key: 'edit-title', text: 'New title' } as never)
+  expect(wrote("title='New title'", "WHERE id='T1'")).toBe(true)
+  await ui.input({ key: 'edit-labels', text: 'ui, Auth Flow' } as never)
+  expect(wrote("INSERT INTO labels(item_id, label) VALUES ('T1', 'auth-flow')")).toBe(true)
+  await ui.select({ key: 'edit-priority', value: 'p0' } as never)
+  expect(wrote("priority='p0'")).toBe(true)
+  await ui.select({ key: 'edit-parent', value: 'E2' } as never)
+  expect(wrote("parent='E2'")).toBe(true)
+  await ui.input({ key: 'edit-desc', text: '' } as never)
+  expect(wrote('description=NULL')).toBe(true)
+  const before = scripts.length
+  await ui.input({ key: 'edit-due', text: 'next week' } as never)
+  expect(scripts.slice(before).some(one => one.includes('due='))).toBe(false)
+  await ui.press({ key: 'edit' })
+  expect(await ui.find({ key: 'edit-title' })).toBeUndefined()
+  // A description of several lines isn't flattened by a one-line field.
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  await ui.press({ key: 'edit' })
+  expect(await ui.find({ key: 'edit-desc' })).toBeUndefined()
+  await ui.unmount()
+})
