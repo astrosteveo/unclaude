@@ -2141,6 +2141,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   let branch = 'main'
   let behind = '0'
   let deleteFails = false
+  let stableFails = false
   let onOrigin = true
   on('process.run', ($, e) => {
     const line = e.argv.join(' ')
@@ -2152,7 +2153,8 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
         : line.startsWith('gh pr create') ? 'https://github.com/o/r/pull/30\n' : line.startsWith('gh pr list --head') ? mergedPr
         : line.startsWith('gh release create') ? 'https://github.com/o/r/releases/tag/v0.5.0\n'
         : line.startsWith('git ls-remote --heads origin') && onOrigin ? 'abc123\trefs/heads/release-v0.5.0\n' : ''
-      const exitCode = line.startsWith('git rev-parse -q --verify') || (deleteFails && /^git (branch -D|push origin --delete)/.test(line)) ? 1 : 0
+      const exitCode = line.startsWith('git rev-parse -q --verify') || (deleteFails && /^git (branch -D|push origin --delete)/.test(line)) ||
+        (stableFails && line.endsWith(':refs/heads/stable')) ? 1 : 0
       return { value: { ...fakeSqlite('', null), stdout, exitCode } }
     }
     return { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }
@@ -2195,9 +2197,13 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(ran.some(one => one.startsWith('git tag'))).toBe(false)
   ran.length = 0
   expect(await ship({ version: '0.5.0', approved: true })).toBe(
-    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. Deleted release-v0.5.0.")
-  // Its release branch goes, here and on origin, once the release is out.
-  expect(ran.slice(-3)).toEqual(['git branch -D release-v0.5.0', 'git ls-remote --heads origin release-v0.5.0', 'git push origin --delete release-v0.5.0'])
+    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now serves 0.5.0. Deleted release-v0.5.0.")
+  // stable, what installs get, moves to the release, and only here; then the release branch goes, here and on origin.
+  expect(ran.slice(-4)).toEqual([
+    'git push origin abc123:refs/heads/stable',
+    'git branch -D release-v0.5.0', 'git ls-remote --heads origin release-v0.5.0', 'git push origin --delete release-v0.5.0',
+  ])
+  expect(ran.filter(one => one.includes('refs/heads/stable'))).toHaveLength(1)
   // One GitHub already deleted on the merge isn't asked for again.
   onOrigin = false
   ran.length = 0
@@ -2206,8 +2212,13 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   onOrigin = true
   // A branch that won't go never fails the release.
   deleteFails = true
-  expect(await ship({ version: '0.5.0', approved: true })).toBe("Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0.")
+  expect(await ship({ version: '0.5.0', approved: true })).toBe(
+    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now serves 0.5.0.")
   deleteFails = false
+  // A stable that can't fast-forward is left where it is, and said so; the release itself stands.
+  stableFails = true
+  expect(await ship({ version: '0.5.0', approved: true })).toContain('stable was not moved')
+  stableFails = false
   expect(ran).toContain('git tag -a v0.5.0 -m v0.5.0 abc123')
   expect(ran).toContain('git push origin v0.5.0')
   expect(ran).toContain('gh release create v0.5.0 --title v0.5.0 --verify-tag --notes ### Added\n\n- Undo.')
