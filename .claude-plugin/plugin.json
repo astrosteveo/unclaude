@@ -1,0 +1,7 @@
+{
+  "name": "roadmap",
+  "version": "0.1.0",
+  "description": "Project roadmap tracking: milestones > epics > tasks, kept in .claude/roadmap.json, editable by Claude and shown in a pane",
+  "author": { "name": "astrosteveo" },
+  "types": "./types/index.d.ts"
+}

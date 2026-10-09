@@ -1,0 +1,210 @@
+import { expect, test } from 'claude-code/testing'
+
+import type { Activity, Item } from '../types'
+import { q, VERSION } from './db'
+import { agentName, brief, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+
+/** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
+const fakeSqlite = (stdin: string | undefined, snap: unknown) => ({
+  exitCode: 0,
+  stdout: stdin?.trim() === 'PRAGMA user_version;' ? String(VERSION) : JSON.stringify(snap),
+  stderr: '',
+  isStdoutTruncated: false,
+  isStderrTruncated: false,
+})
+
+const item = (id: string, over: Partial<Item> = {}): Item => ({
+  id,
+  kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task',
+  title: `${id} title`,
+  status: 'todo',
+  parent: null,
+  description: null,
+  assignee: null,
+  due: null,
+  blocked_by: [],
+  checklist: [],
+  created_at: '2026-10-09T00:00:00Z',
+  updated_at: '2026-10-09T00:00:00Z',
+  ...over,
+})
+
+const items = [
+  item('M1', { due: '2026-11-15' }),
+  item('E1', { parent: 'M1' }),
+  item('T1', { parent: 'E1', status: 'done' }),
+  item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude' }),
+  item('T3', { parent: 'E1', status: 'blocked' }),
+  item('T4', { parent: 'M1' }),
+  item('T5'),
+]
+
+test('status rolls up from tasks, blocked first', async () => {
+  expect(statusOf(items, items[0]!)).toBe('blocked')
+  expect(outline(items).split('\n')[0]).toBe('M1 ✗ blocked M1 title  (1/4 tasks, due 2026-11-15)')
+})
+
+test('nesting rules and subtrees', async () => {
+  expect(() => checkParent(items, 'epic', 'T1')).toThrow('cannot sit under a task')
+  expect(() => checkParent(items, 'task', 'E1', 'E1')).toThrow('its own parent')
+  expect(checkParent(items, 'task', 'e1')).toBe('E1')
+  expect(subtree(items, 'M1')).toEqual(['M1', 'E1', 'T4', 'T1', 'T2', 'T3'])
+})
+
+test('next puts your own work first, then free tasks by inherited due date', async () => {
+  expect(nextUp(items, 'claude').map(task => task.id)).toEqual(['T2', 'T4', 'T5'])
+})
+
+test('brief names your work and the user\'s changes', async () => {
+  const news: Activity[] = [{ id: 9, item_id: 'T3', author: 'user', type: 'comment', body: 'vendor replied', at: '' }]
+  const text = brief({ items, activity: news, seen: {} }, 'claude', news)!
+  expect(text).toContain('Assigned to you (claude):\n- T2')
+  expect(text).toContain('Blocked:\n- T3')
+  expect(text).toContain('- T3: vendor replied')
+  expect(brief({ items: [], activity: [], seen: {} }, 'claude', [])).toBeUndefined()
+})
+
+test('SQL literals cannot break out or start a dot-command', async () => {
+  expect(q("it's")).toBe("'it''s'")
+  expect(q('a\n.shell rm -rf /')).toBe("'a'||char(10)||'.shell rm -rf /'")
+  expect(q(null)).toBe('NULL')
+})
+
+test('a missing sqlite3 is named, with how to install it', async ($, on) => {
+  on('process.run', () => ({ deny: 'spawn sqlite3 ENOENT' }))
+  const ran = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
+  expect(ran.deny).toContain('sqlite3 is not installed or not on PATH')
+  expect(ran.deny).toContain('pacman -S sqlite')
+})
+
+test('a prompt goes in as typed when the roadmap cannot be read', async ($, on) => {
+  on('process.run', () => ({ deny: 'spawn sqlite3 ENOENT' }))
+  let seen: readonly string[] | undefined = ['unset']
+  on('prompt.submit', ($, e) => {
+    seen = e.context
+    return { text: e.text, origin: e.origin }
+  })
+  const sent = await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+  expect(sent.text).toBe('hello')
+  expect(seen).toBeUndefined()
+})
+
+test('subagents get stable, readable names', async () => {
+  expect(agentName('Explore', 'Find auth handlers in src/')).toBe('explore:find-auth-handlers-in-src')
+  expect(agentName('general-purpose', 'Refactor the very long module name that goes on and on')).toBe('general-purpose:refactor-the-very-long-module')
+  expect(agentName('roadmap:planner', '')).toBe('roadmap-planner')
+  expect(agentName('teammate', 'whatever', 'reviewer@core-team')).toBe('reviewer')
+})
+
+test('unread counts the comments others left since the reader last looked', async () => {
+  const at = (id: number, author: string, type: Activity['type']): Activity => ({ id, item_id: 'T2', author, type, body: '', at: '' })
+  const activity = [at(1, 'claude', 'create'), at(2, 'claude', 'comment'), at(3, 'user', 'comment'), at(4, 'claude', 'status')]
+  expect(unread({ items, activity, seen: {} }, 'T2', 'user').map(one => one.id)).toEqual([2])
+  expect(unread({ items, activity, seen: { T2: 2 } }, 'T2', 'user')).toEqual([])
+})
+
+test('the board draws on terminal and desktop, and a card opens and closes from the keyboard', async ($, on) => {
+  const snap = {
+    items,
+    activity: [{ id: 7, item_id: 'T2', author: 'claude', type: 'comment', body: 'note', at: '2026-10-09T10:00:00Z' }],
+    seen: {},
+  }
+  // sqlite3 answers the schema version when asked, the snapshot otherwise; writes are ignored.
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    for (const bodyColumns of [120, 60]) {
+      const ui = await $.ui.mount({
+        plugin: 'roadmap', surface, component: 'Pane', requestId: 'roadmap',
+        props: { title: 'Roadmap', isFocused: true, bodyColumns, placement: 'dock' } as never,
+      })
+      expect(await ui.find({ key: 'col-todo-head' })).toBeDefined()
+      expect((await ui.find({ key: 'card-T2' }))?.text).toContain('● 1')
+      expect((await ui.find({ text: /t p b d jump to a column/ }))).toBeDefined()
+      await ui.press({ key: 'card-T2' })
+      expect(await ui.find({ key: 'hand' })).toBeDefined()
+      // The detail view stands in for the board, so it is never pushed off screen by a long column.
+      expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
+      expect((await ui.find({ text: /1–4 status/ }))).toBeDefined()
+      await ui.press({ key: 'close' })
+      expect(await ui.find({ key: 'hand' })).toBeUndefined()
+      expect(await ui.find({ key: 'card-T2' })).toBeDefined()
+      await ui.press({ key: 'tab-tree' })
+      expect(await ui.find({ key: 'row-M1' })).toBeDefined()
+      await ui.press({ key: 'tab-board' })
+      await ui.unmount()
+    }
+  }
+})
+
+test('dependencies: blockers must be other tasks, with no cycles; done blockers stop counting', async () => {
+  const deps = [
+    item('T1', { status: 'done' }),
+    item('T2', { blocked_by: ['T1'] }),
+    item('T3', { blocked_by: ['T2'] }),
+    item('T4', { blocked_by: ['T3'], assignee: 'claude' }),
+    item('T5', { assignee: 'claude', status: 'in_progress' }),
+    item('E1'),
+  ]
+  expect(checkBlockers(deps, 'T5', ['t2', 'T3', 'T2'])).toEqual(['T2', 'T3'])
+  expect(() => checkBlockers(deps, 'T2', ['T4'])).toThrow('cycle')
+  expect(() => checkBlockers(deps, 'T2', ['T2'])).toThrow('cannot block itself')
+  expect(() => checkBlockers(deps, 'T2', ['E1'])).toThrow('Only tasks block tasks')
+  expect(waitingOn(deps, deps[1]!)).toEqual([])
+  expect(waitingOn(deps, deps[2]!).map(one => one.id)).toEqual(['T2'])
+  expect(outline(deps)).toContain('T3 ○ todo T3 title  (waiting on T2)')
+  // T2's blocker is done, so it is free; T3 waits; your own waiting T4 comes after your T5.
+  expect(nextUp(deps, 'claude').map(one => one.id)).toEqual(['T5', 'T4', 'T2'])
+})
+
+test('a checklist shows in the outline and the detail', async () => {
+  const list = [item('T1', { checklist: [{ n: 1, text: 'tests pass', done: true }, { n: 2, text: 'docs', done: false }] })]
+  expect(outline(list)).toBe('T1 ○ todo T1 title  (1/2 checked)')
+  expect(detail({ items: list, activity: [], seen: {} }, list[0]!)).toContain('Checklist:\n  [x] 1. tests pass\n  [ ] 2. docs')
+})
+
+test("the band shows the agents' current task, and pressing it opens that task on the board", async ($, on) => {
+  const working = [
+    ...items.filter(one => one.id !== 'T2'),
+    item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude', checklist: [{ n: 1, text: 'x', done: true }, { n: 2, text: 'y', done: false }] }),
+  ]
+  const snap = { items: working, activity: [], seen: {} }
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  const opened: string[] = []
+  on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  opened.length = 0
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const band = await $.ui.mount({
+      plugin: 'roadmap', surface, component: 'AbovePrompt',
+      props: { hasSurvey: false, bodyColumns: 100, maxRows: 3 } as never,
+    })
+    const current = await band.find({ key: 'current' })
+    expect(current?.text).toContain('T2 T2 title @claude ☑1/2 · M1 1/4')
+    await band.press({ key: 'current' })
+    expect(opened).toEqual(['roadmap'])
+    opened.length = 0
+    await band.unmount()
+  }
+})
+
+test('commits and pull requests are linked to the tasks they name, and roll up to epics', async () => {
+  expect(idsIn('T12: links; fixes t3 and [T12], not ST4 or T1x')).toEqual(['T12', 'T3'])
+  const log =
+    'abc1234\x1fAda\x1f2026-10-09\x1fT2: claim fix\n\nAlso touches T4.\n\x1e\n' +
+    'def5678\x1fAda\x1f2026-10-08\x1fchore: no task here\n\x1e\n'
+  const commits = parseGitLog(log)
+  expect(commits).toEqual([{ hash: 'abc1234', author: 'Ada', date: '2026-10-09', subject: 'T2: claim fix', ids: ['T2', 'T4'] }])
+  const prs = parsePrs(JSON.stringify([
+    { number: 7, title: 'Board polish', headRefName: 't3-board', state: 'MERGED', url: 'https://x/7' },
+    { number: 8, title: 'Docs', headRefName: 'docs', state: 'OPEN', url: 'https://x/8' },
+  ]))
+  expect(prs.map(pr => [pr.number, pr.state, pr.ids])).toEqual([[7, 'merged', ['T3']]])
+  const e1 = refsFor(items, { commits, prs }, items[1]!)
+  expect([e1.commits.length, e1.prs.length]).toEqual([1, 1])
+  expect(refsText(e1)).toBe('Pull requests:\n  #7 [merged] Board polish  https://x/7\nCommits:\n  abc1234 2026-10-09 Ada: T2: claim fix')
+  expect(refsFor(items, { commits, prs }, items[6]!)).toEqual({ commits: [], prs: [] })
+})
