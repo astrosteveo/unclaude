@@ -378,6 +378,25 @@ export function outline(items: Item[], root: string | null = null): string {
 }
 
 /**
+ * The work under a milestone or epic, as an agent starts it: each open task with its description and
+ * checklist beneath its line, finished ones a line each. One show then holds the whole unit.
+ */
+export function workOutline(items: Item[], root: string): string {
+  return rows(items, root)
+    .map(({ item, depth }) => {
+      const pad = '  '.repeat(depth)
+      const head = pad + line(items, item)
+      if (item.kind !== 'task' || item.status === 'done') return head
+      const more = [
+        ...(item.description?.trim() ? item.description.trim().split('\n').map(text => `${pad}    ${text}`) : []),
+        ...item.checklist.map(c => `${pad}    [${c.done ? 'x' : ' '}] ${c.n}. ${c.text}`),
+      ]
+      return [head, ...more].join('\n')
+    })
+    .join('\n')
+}
+
+/**
  * Comments others left on an item since `reader` last opened it. Status and assignment changes are not
  * counted: the board already shows them by where the card sits and whose name is on it.
  */
@@ -423,7 +442,7 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
   if (links.duplicateOf.length) parts.push('Duplicate of:\n' + named(links.duplicateOf).map(one => `  ${line(snap.items, one)}`).join('\n'))
   if (links.duplicatedBy.length) parts.push('Duplicated by:\n' + named(links.duplicatedBy).map(one => `  ${line(snap.items, one)}`).join('\n'))
   if (links.relates.length) parts.push('Related:\n' + named(links.relates).map(one => `  ${line(snap.items, one)}`).join('\n'))
-  const under = outline(snap.items, item.id)
+  const under = item.kind === 'task' ? '' : workOutline(snap.items, item.id)
   if (under) parts.push(under)
   const log = timeline(snap.activity, item.id).slice(-limit)
   if (log.length) parts.push('Activity:\n' + log.map(one => `  ${one.at.slice(0, 16).replace('T', ' ')} ${one.author}: ${one.body}`).join('\n'))

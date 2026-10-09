@@ -328,6 +328,21 @@ test('a checklist shows in the outline and the detail', async () => {
   expect(detail({ items: list, activity: [], seen: {} }, list[0]!)).toContain('Checklist:\n  [x] 1. tests pass\n  [ ] 2. docs')
 })
 
+test('show on an epic carries each open task whole, and a done one as a line', async () => {
+  const unit = [
+    item('E1'),
+    item('T1', { parent: 'E1', status: 'done', description: 'gone', checklist: [{ n: 1, text: 'old', done: true }] }),
+    item('T2', { parent: 'E1', description: 'Add slugify.', checklist: [{ n: 1, text: 'lowercases', done: false }] }),
+    item('T3', { parent: 'E1', blocked_by: ['T2'], checklist: [{ n: 1, text: 'cli', done: false }] }),
+  ]
+  const text = detail({ items: unit, activity: [], seen: {} }, unit[0]!)
+  expect(text).toContain(
+    'T1 ● done T1 title  (1/1 checked)\nT2 ○ todo T2 title  (0/1 checked)\n    Add slugify.\n    [ ] 1. lowercases\n' +
+      'T3 ○ todo T3 title  (0/1 checked, waiting on T2)\n    [ ] 1. cli',
+  )
+  expect(text).not.toContain('gone')
+})
+
 test("the band shows the agents' current task, and pressing it opens that task on the board", async ($, on) => {
   const working = [
     ...items.filter(one => one.id !== 'T2'),
