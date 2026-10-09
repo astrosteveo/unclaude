@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS checks(item_id TEXT NOT NULL, n INTEGER NOT NULL, tex
   done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (item_id, n));
 CREATE TABLE IF NOT EXISTS reads(reader TEXT NOT NULL, item_id TEXT NOT NULL, seen INTEGER NOT NULL,
   PRIMARY KEY (reader, item_id));`,
+  // v2: Jira-style fields, claim leases, labels, and links other than blocked-by. ALTER TABLE is not
+  // idempotent, so a session that loses the race to migrate fails here and finds the version current.
+  `ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'p2';
+ALTER TABLE items ADD COLUMN type TEXT NOT NULL DEFAULT 'feature';
+ALTER TABLE items ADD COLUMN lease_at TEXT;
+CREATE TABLE IF NOT EXISTS labels(item_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY (item_id, label));
+CREATE TABLE IF NOT EXISTS relations(a TEXT NOT NULL, b TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY (a, b, type));`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -75,7 +82,9 @@ const activity = (id: string, author: string, type: string, body: string) =>
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
         'parent', parent, 'description', description, 'assignee', assignee, 'due', due,
-        'created_at', created_at, 'updated_at', updated_at,
+        'priority', priority, 'type', type, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
+        'labels', json((SELECT json_group_array(label) FROM (SELECT label FROM labels WHERE item_id=items.id ORDER BY label))),
+        'relations', json((SELECT json_group_array(json_object('type', type, 'id', b)) FROM relations WHERE a=items.id)),
         'blocked_by', json((SELECT json_group_array(blocker) FROM links WHERE blocked=items.id)),
         'checklist', json((SELECT json_group_array(json_object('n', n, 'text', text, 'done', done))
           FROM checks WHERE item_id=items.id)))) FROM items),
@@ -88,6 +97,8 @@ export function parseLoad(out: string): Snapshot {
   // sqlite3 hands back `done` as 0/1, and json_group_array keeps no order of its own.
   const items = data.items.map(item => ({
     ...item,
+    labels: item.labels ?? [],
+    relations: item.relations ?? [],
     checklist: (item.checklist ?? []).map(c => ({ ...c, done: Boolean(c.done) })).sort((a, b) => a.n - b.n),
   }))
   return { items, activity: data.activity, seen: data.seen ?? {} }
@@ -171,7 +182,7 @@ export const comment = (actor: string, id: string, body: string) =>
 
 export function remove(ids: string[]): string {
   const list = ids.map(q).join(', ')
-  return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nCOMMIT;`
+  return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nDELETE FROM labels WHERE item_id IN (${list});\nDELETE FROM relations WHERE a IN (${list}) OR b IN (${list});\nCOMMIT;`
 }
 
 /** Marks everything on an item as seen by `reader`, up to its newest activity. */

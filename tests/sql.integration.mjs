@@ -217,6 +217,37 @@ test('a database from a newer build is refused, and an unusable version is named
 })
 
 test('two sessions migrating at once both come out at the current version', async () => {
-  await Promise.all([rawAsync(db.migrate(0)), rawAsync(db.migrate(0)), rawAsync(db.migrate(0))])
+  // As ensureSchema: a session that loses the race may fail on a non-idempotent step, and then finds the
+  // version current. One must win, and none may leave the database half-migrated.
+  const ran = await Promise.allSettled([rawAsync(db.migrate(0)), rawAsync(db.migrate(0)), rawAsync(db.migrate(0))])
+  assert.ok(ran.some(one => one.status === 'fulfilled'))
   assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
+})
+
+test('a v1 database migrates to v2 with its data kept and the new fields defaulted', () => {
+  raw(`BEGIN IMMEDIATE;\n${db.MIGRATIONS[0]}\nPRAGMA user_version=1;\nCOMMIT;`)
+  assert.equal(raw(db.READ_VERSION), '1')
+  raw(db.insert('claude', { kind: 'task', title: 'kept', parent: null, assignee: 'claude' }))
+  raw(db.migrate(1))
+  assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
+  isMigrated = true
+  const t = item('T1')
+  assert.equal(t.title, 'kept')
+  assert.equal(t.assignee, 'claude')
+  assert.equal(t.priority, 'p2')
+  assert.equal(t.type, 'feature')
+  assert.equal(t.lease_at, null)
+  assert.deepEqual(t.labels, [])
+  assert.deepEqual(t.relations, [])
+})
+
+test('labels and relations load with their item and go with it on removal', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: null }))
+  sql("INSERT INTO labels VALUES ('T1','ui'),('T1','api'); INSERT INTO relations VALUES ('T1','T2','relates'),('T2','T1','duplicates');")
+  assert.deepEqual(item('T1').labels, ['api', 'ui'])
+  assert.deepEqual(item('T1').relations, [{ type: 'relates', id: 'T2' }])
+  sql(db.remove(['T1']))
+  assert.equal(sql('SELECT count(*) FROM labels;'), '0')
+  assert.equal(sql('SELECT count(*) FROM relations;'), '0')
 })
