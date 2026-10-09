@@ -319,7 +319,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (a.id) {
         const it = need()
         const linked = refsText(refsFor(snap.items, await refreshRefs($, true), it))
-        return detail(snap, it) + (linked ? `\n${linked}` : '')
+        return detail(await withHistory($, snap, it.id), it) + (linked ? `\n${linked}` : '')
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {
@@ -339,7 +339,9 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         text: a.text || undefined,
       }
       if (query.under && !find(snap.items, query.under)) fail(`No item ${query.under}`)
-      const found = rows(snap.items).map(row => row.item).filter(one => matches(snap, one, query))
+      // Text is looked for in everything ever written on an item, not only the snapshot's recent part.
+      const said = query.text ? (JSON.parse(await sql($, db.said)) as Record<string, string>) : undefined
+      const found = rows(snap.items).map(row => row.item).filter(one => matches(snap, one, query, said))
       if (found.length === 0) return 'Nothing matches.'
       const cap = 40
       return [
@@ -469,7 +471,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
       if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
       // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
-      const after = await refresh($)
+      const after = await withHistory($, await refresh($), it.id)
       // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
       const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
       const linked = refsText(refsFor(after.items, known, it))
@@ -556,6 +558,12 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     }
   }
   return fail(`Unknown action ${a.action}`)
+}
+
+/** The snapshot with `id`'s whole timeline in place of the recent part it carries. */
+async function withHistory($: EngineInterface, snap: Snapshot, id: string): Promise<Snapshot> {
+  const all = JSON.parse(await sql($, db.history(id))) as Snapshot['activity']
+  return { ...snap, activity: [...snap.activity.filter(one => one.item_id !== id), ...all] }
 }
 
 /** A change the person makes from the pane: written as `user`, then redrawn. */

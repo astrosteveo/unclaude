@@ -132,8 +132,12 @@ export function parseQuery(text: string): Query | undefined {
   return Object.keys(q).length ? q : undefined
 }
 
-/** Whether `item` is what `query` looks for. Status is the rolled-up one, as the board shows it. */
-export function matches(snap: Snapshot, item: Item, query: Query): boolean {
+/**
+ * Whether `item` is what `query` looks for. Status is the rolled-up one, as the board shows it. Text is
+ * looked for in what was written on the item: `said` (every message, by item id) when given, else the
+ * snapshot's recent timeline.
+ */
+export function matches(snap: Snapshot, item: Item, query: Query, said?: Record<string, string>): boolean {
   if (query.kind && item.kind !== query.kind) return false
   if (query.status?.length && !query.status.includes(statusOf(snap.items, item))) return false
   if (query.assignee?.length && !query.assignee.some(who => (who === 'none' ? !item.assignee : item.assignee?.toLowerCase() === who.toLowerCase())))
@@ -147,8 +151,8 @@ export function matches(snap: Snapshot, item: Item, query: Query): boolean {
   }
   if (query.text?.trim()) {
     const words = query.text.toLowerCase().split(/\s+/).filter(Boolean)
-    const said = snap.activity.filter(one => one.item_id === item.id && isMessage(one)).map(one => one.body)
-    const hay = [item.id, item.title, item.description ?? '', ...said].join('\n').toLowerCase()
+    const written = said ? [said[item.id] ?? ''] : snap.activity.filter(one => one.item_id === item.id && isMessage(one)).map(one => one.body)
+    const hay = [item.id, item.title, item.description ?? '', ...written].join('\n').toLowerCase()
     if (!words.every(word => hay.includes(word))) return false
   }
   return true

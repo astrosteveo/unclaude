@@ -2,24 +2,38 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-import type { Activity, Item } from '../types'
+import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
-/** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
   on('fs.stat', () => ({ deny: 'ENOENT' }) as never)
   on('process.run', ($, e) => (ran.push([...e.argv]), { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }))
 }
 
+/** What sqlite3 prints for a script, for tests that stand in for it: the version, an item's timeline, what was said, or the snapshot. */
 const fakeSqlite = (stdin: string | undefined, snap: unknown) => ({
   exitCode: 0,
-  stdout: stdin?.trim() === 'PRAGMA user_version;' ? String(VERSION) : JSON.stringify(snap),
+  stdout: stdin?.trim() === 'PRAGMA user_version;' ? String(VERSION) : JSON.stringify(fakeAnswer(stdin ?? '', snap as Snapshot)),
   stderr: '',
   isStdoutTruncated: false,
   isStderrTruncated: false,
 })
+
+const fakeAnswer = (stdin: string, snap: Snapshot) => {
+  if (!snap) return snap
+  const activity = snap.activity ?? []
+  const one = /FROM \(SELECT \* FROM activity WHERE item_id='([^']*)'/.exec(stdin)?.[1]
+  if (one !== undefined) return activity.filter(entry => entry.item_id === one).sort((a, b) => a.id - b.id)
+  if (stdin.includes("type IN ('comment', 'handoff')")) {
+    const said: Record<string, string> = {}
+    for (const entry of [...activity].sort((a, b) => a.id - b.id))
+      if (entry.type === 'comment' || entry.type === 'handoff') said[entry.item_id] = said[entry.item_id] ? `${said[entry.item_id]}\n${entry.body}` : entry.body
+    return said
+  }
+  return snap
+}
 
 const item = (id: string, over: Partial<Item> = {}): Item => ({
   id,
@@ -662,6 +676,31 @@ test('an update of several fields is one sqlite3 run, in one transaction', async
   expect(String(reply.result)).toContain('title → renamed; checklist set (2 items); blocked by T2; labels: ui; relates to T2')
   expect(writes.length).toBe(1)
   expect(writes[0]!.match(/BEGIN/g)?.length).toBe(1)
+})
+
+test('show and find read the whole timeline, not only what the snapshot carries', async ($, on) => {
+  const some = [item('T1'), item('T2')]
+  const old: Activity[] = [
+    { id: 1, item_id: 'T1', author: 'explore:a', type: 'handoff', body: 'stopped at the zebra parser', at: '2026-10-01T10:00:00Z' },
+    { id: 2, item_id: 'T1', author: 'claude', type: 'comment', body: 'an old finding about zebras', at: '2026-10-01T11:00:00Z' },
+  ]
+  const recent: Activity[] = [{ id: 3, item_id: 'T1', author: 'claude', type: 'comment', body: 'latest', at: '2026-10-09T10:00:00Z' }]
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    // The snapshot holds only the recent part; history and said answer from the whole of it.
+    const isWhole = stdin.includes("FROM (SELECT * FROM activity WHERE item_id=") || stdin.includes("type IN ('comment', 'handoff')")
+    return { value: fakeSqlite(stdin, { items: some, activity: isWhole ? [...old, ...recent] : recent, seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  const shown = await call({ action: 'show', id: 'T1' })
+  expect(shown).toContain('Handoff from explore:a')
+  expect(shown).toContain('an old finding about zebras')
+  expect(await call({ action: 'find', text: 'zebras' })).toContain('1 match:\nT1')
 })
 
 test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {

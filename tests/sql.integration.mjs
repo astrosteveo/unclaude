@@ -147,6 +147,27 @@ test('atomic runs several scripts as one transaction: all of them land, or none'
   assert.equal(db.atomic(['', '']), '')
 })
 
+test("the snapshot carries each item's recent timeline and latest handoff; history and said read all of it", () => {
+  sql(db.insert('claude', { kind: 'task', title: 'busy', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'quiet', parent: null }))
+  sql(db.comment('claude', 'T1', 'an old finding about zebras'))
+  sql(db.comment('claude', 'T1', 'left off at the parser', 'handoff'))
+  for (let i = 0; i < db.RECENT + 5; i++) sql(db.comment('claude', 'T1', `note ${i}`))
+  const loaded = load().activity
+  const busy = loaded.filter(one => one.item_id === 'T1')
+  // The newest RECENT, and the handoff note though it is older.
+  assert.equal(busy.length, db.RECENT + 1)
+  assert.ok(busy.some(one => one.type === 'handoff'))
+  assert.ok(!busy.some(one => one.body.includes('zebras')))
+  assert.equal(loaded.filter(one => one.item_id === 'T2').length, 1)
+  const all = JSON.parse(sql(db.history('T1')))
+  assert.equal(all.length, db.RECENT + 8)
+  assert.deepEqual(all.map(one => one.id), [...all.map(one => one.id)].sort((a, b) => a - b))
+  const said = JSON.parse(sql(db.said))
+  assert.ok(said.T1.includes('zebras') && said.T1.includes('left off at the parser'))
+  assert.equal(said.T2, undefined)
+})
+
 test('quotes, newlines and dot-command lines round-trip as plain text', () => {
   const nasty = `it's "quoted"\n.tables\n.shell echo pwned\n'); DROP TABLE items; --\nend`
   sql(db.insert('claude', { kind: 'task', title: nasty, parent: null, description: nasty }))
