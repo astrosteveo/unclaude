@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, brief, handedScope, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, brief, handedScope, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -79,11 +79,9 @@ async function refreshRefs($: EngineInterface, isForced = false) {
   return { commits, prs }
 }
 
-
 export const MISSING_SQLITE =
   'sqlite3 is not installed or not on PATH, and the roadmap is stored with it. Install it ' +
   '(Arch: pacman -S sqlite; Debian/Ubuntu: apt install sqlite3; Fedora: dnf install sqlite; macOS: brew install sqlite), then run /roadmap again.'
-
 
 // The main loop's view of the roadmap: the newest activity it has been told about, and whether it
 // has done work since it last touched the roadmap. Module state: a reload starts both over.
@@ -100,8 +98,8 @@ async function actorFor($: EngineInterface, agentId: string | undefined, as: str
   const known = agentNames.get(agentId)
   if (known) return known
   const info = (await $.agent.list().catch(() => [])).find(one => one.id === agentId)
-  if (!info) return `agent-${agentId.slice(0, 8)}`
-  const name = agentName(info.type, info.description, info.teammateId)
+  // Kept either way: an agent's name holds for its whole run, and the list isn't asked on every tool call.
+  const name = info ? agentName(info.type, info.description, info.teammateId) : `agent-${agentId.slice(0, 8)}`
   agentNames.set(agentId, name)
   return name
 }
@@ -183,7 +181,6 @@ async function refresh($: EngineInterface): Promise<Snapshot> {
   }
 }
 
-/** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 /** The person's answers to the .gitignore offer, by project root, kept across sessions. */
 async function ignoreAnswers($: EngineInterface): Promise<Record<string, IgnoreAnswer>> {
   return ((await $.store.get('gitignore')) ?? {}) as Record<string, IgnoreAnswer>
@@ -225,6 +222,7 @@ async function dismissIgnore($: EngineInterface) {
   await update($, ignoreOffer, () => false)
 }
 
+/** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
     [db.DB, `${db.DB}-wal`].map(file => $.fs.stat(file).then(s => `${s.size}:${s.mtimeMs}`, () => '-')),
@@ -319,7 +317,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (a.id) {
         const it = need()
         const linked = refsText(refsFor(snap.items, await refreshRefs($, true), it))
-        return detail(snap, it) + (linked ? `\n${linked}` : '')
+        return detail(await withHistory($, snap, it.id), it) + (linked ? `\n${linked}` : '')
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {
@@ -339,7 +337,9 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         text: a.text || undefined,
       }
       if (query.under && !find(snap.items, query.under)) fail(`No item ${query.under}`)
-      const found = rows(snap.items).map(row => row.item).filter(one => matches(snap, one, query))
+      // Text is looked for in everything ever written on an item, not only the snapshot's recent part.
+      const said = query.text ? (JSON.parse(await sql($, db.said)) as Record<string, string>) : undefined
+      const found = rows(snap.items).map(row => row.item).filter(one => matches(snap, one, query, said))
       if (found.length === 0) return 'Nothing matches.'
       const cap = 40
       return [
@@ -366,12 +366,19 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (!a.kind || !KINDS.includes(a.kind)) fail(`kind must be one of ${KINDS.join(', ')}`)
       if (!a.title?.trim()) fail('title is required')
       if (a.blocked_by !== undefined && a.kind !== 'task') fail('Only tasks wait on other tasks')
-      // Checked before the insert, against a placeholder id no existing task can wait on.
+      // All checked before the insert (links against a placeholder id no existing item has), so a call
+      // that fails leaves nothing behind for a retry to duplicate.
       const blockers = a.blocked_by === undefined ? [] : checkBlockers(snap.items, '\u0000new', idList(a.blocked_by))
+      const checklist = a.checklist === undefined ? [] : texts(a.checklist)
+      if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
+      const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
+      const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
+      const tags = a.labels === undefined ? [] : idList(a.labels)
+      const parent = checkParent(snap.items, a.kind!, a.parent)
       const id = await sql($, db.insert(actor, {
         kind: a.kind!,
         title: a.title!.trim(),
-        parent: checkParent(snap.items, a.kind!, a.parent),
+        parent,
         description: a.description,
         due: a.due,
         status: a.status,
@@ -379,11 +386,6 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         priority: a.priority || undefined,
         type: a.type || undefined,
       }))
-      const checklist = a.checklist === undefined ? [] : texts(a.checklist)
-      if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
-      const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
-      const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
-      const tags = a.labels === undefined ? [] : idList(a.labels)
       if (blockers.length || checklist.length || related.length || original.length || tags.length) {
         const created = find((await refresh($)).items, id) as Item
         if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
@@ -414,43 +416,35 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const left = progress(snap.items, it)
       if (isToReview && it.kind !== 'task' && left.done < left.total)
         fail(`${it.id} closes when its tasks are done; finish those (they close as you go when ${it.id} is assigned to you)`)
+      // Every argument checked before the first write, so a call that fails changes nothing.
+      if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks wait on other tasks')
+      const parent = a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id)
+      const blockers = a.blocked_by === undefined ? undefined : checkBlockers(snap.items, it.id, idList(a.blocked_by))
+      const related = a.relates_to === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.relates_to))
+      const original = a.duplicates === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.duplicates))
       const { script, notes } = db.change(actor, it, {
         title: a.title?.trim() || undefined,
         status: isToReview ? 'review' : a.status,
         description: a.description === undefined ? undefined : a.description || null,
         due: a.due === undefined ? undefined : a.due || null,
         assignee: a.assignee === undefined ? undefined : a.assignee || null,
+        // Unassigned without a status of its own (the board's Unassign), a task under way goes back to todo.
+        ...(a.assignee === '' && a.status === undefined && it.assignee ? { status: letGo(it).status } : {}),
         priority: a.priority || undefined,
         type: a.type || undefined,
-        parent: a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id),
+        parent,
       })
-      if (script) await sql($, script)
-      if (a.checklist !== undefined) {
-        const set = db.setChecklist(actor, it, texts(a.checklist))
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
-      if (a.blocked_by !== undefined) {
-        if (it.kind !== 'task') fail('Only tasks wait on other tasks')
-        const links = db.setBlockers(actor, it, checkBlockers(snap.items, it.id, idList(a.blocked_by)))
-        if (links.script) await sql($, links.script)
-        notes.push(...links.notes)
-      }
-      if (a.labels !== undefined) {
-        const set = db.setLabels(actor, it, idList(a.labels))
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
-      if (a.relates_to !== undefined) {
-        const set = db.setRelations(actor, it, 'relates', checkLinks(snap.items, it.id, idList(a.relates_to)))
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
-      if (a.duplicates !== undefined) {
-        const set = db.setRelations(actor, it, 'duplicates', checkLinks(snap.items, it.id, idList(a.duplicates)))
-        if (set.script) await sql($, set.script)
-        notes.push(...set.notes)
-      }
+      // One script, one transaction: the update lands whole or not at all.
+      const parts = [
+        a.checklist === undefined ? undefined : db.setChecklist(actor, it, texts(a.checklist)),
+        blockers === undefined ? undefined : db.setBlockers(actor, it, blockers),
+        a.labels === undefined ? undefined : db.setLabels(actor, it, idList(a.labels)),
+        related === undefined ? undefined : db.setRelations(actor, it, 'relates', related),
+        original === undefined ? undefined : db.setRelations(actor, it, 'duplicates', original),
+      ].filter(part => part !== undefined)
+      const all = db.atomic([script, ...parts.map(part => part.script)])
+      if (all) await sql($, all)
+      notes.push(...parts.flatMap(part => part.notes))
       if (isToReview) {
         notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
         // The review point is where its pull request opens: one per unit of work handed over.
@@ -475,7 +469,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
       if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
       // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
-      const after = await refresh($)
+      const after = await withHistory($, await refresh($), it.id)
       // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
       const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
       const linked = refsText(refsFor(after.items, known, it))
@@ -487,7 +481,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const it = need()
       // The note goes in first, so the timeline reads: what was left, then who let go.
       if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'))
-      const { script } = db.change(actor, it, { assignee: null })
+      const { script } = db.change(actor, it, letGo(it))
       if (script) await sql($, script)
       return `${it.id} released${a.body?.trim() ? ', with your handoff note' : ''}.`
     }
@@ -564,6 +558,12 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
   return fail(`Unknown action ${a.action}`)
 }
 
+/** The snapshot with `id`'s whole timeline in place of the recent part it carries. */
+async function withHistory($: EngineInterface, snap: Snapshot, id: string): Promise<Snapshot> {
+  const all = JSON.parse(await sql($, db.history(id))) as Snapshot['activity']
+  return { ...snap, activity: [...snap.activity.filter(one => one.item_id !== id), ...all] }
+}
+
 /** A change the person makes from the pane: written as `user`, then redrawn. */
 async function userAct($: EngineInterface, a: Input) {
   try {
@@ -576,13 +576,11 @@ async function userAct($: EngineInterface, a: Input) {
   await refresh($)
 }
 
-
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
 // The inline height an open card asks for: more than most cards need; the layout caps it.
 const CARD_ROWS = 40
-
 
 /** Closes the detail panel and hands the ring back to the card or row it was opened from. */
 async function closeDetail($: EngineInterface, id: string) {
@@ -778,7 +776,7 @@ export const register: Register = on => {
     const actor = await actorFor($, agentId === undefined ? undefined : String(agentId), a.as)
     try {
       // The person's name is theirs: what they do happens on the board, not through an agent's call.
-      if (actor === USER) fail(`"${USER}" is the person at the board; act as yourself`)
+      if (actor.toLowerCase() === USER) fail(`"${USER}" is the person at the board; act as yourself`)
       // Any call to the tracker is a sign of life for the caller's claims.
       await heartbeat($, actor, true).catch(() => undefined)
       const reply = await act($, actor, a, agentId !== undefined)

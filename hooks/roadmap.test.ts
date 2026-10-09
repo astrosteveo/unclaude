@@ -2,24 +2,38 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { On } from 'claude-code'
 
-import type { Activity, Item } from '../types'
+import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
-/** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
   on('fs.stat', () => ({ deny: 'ENOENT' }) as never)
   on('process.run', ($, e) => (ran.push([...e.argv]), { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }))
 }
 
+/** What sqlite3 prints for a script, for tests that stand in for it: the version, an item's timeline, what was said, or the snapshot. */
 const fakeSqlite = (stdin: string | undefined, snap: unknown) => ({
   exitCode: 0,
-  stdout: stdin?.trim() === 'PRAGMA user_version;' ? String(VERSION) : JSON.stringify(snap),
+  stdout: stdin?.trim() === 'PRAGMA user_version;' ? String(VERSION) : JSON.stringify(fakeAnswer(stdin ?? '', snap as Snapshot)),
   stderr: '',
   isStdoutTruncated: false,
   isStderrTruncated: false,
 })
+
+const fakeAnswer = (stdin: string, snap: Snapshot) => {
+  if (!snap) return snap
+  const activity = snap.activity ?? []
+  const one = /FROM \(SELECT \* FROM activity WHERE item_id='([^']*)'/.exec(stdin)?.[1]
+  if (one !== undefined) return activity.filter(entry => entry.item_id === one).sort((a, b) => a.id - b.id)
+  if (stdin.includes("type IN ('comment', 'handoff')")) {
+    const said: Record<string, string> = {}
+    for (const entry of [...activity].sort((a, b) => a.id - b.id))
+      if (entry.type === 'comment' || entry.type === 'handoff') said[entry.item_id] = said[entry.item_id] ? `${said[entry.item_id]}\n${entry.body}` : entry.body
+    return said
+  }
+  return snap
+}
 
 const item = (id: string, over: Partial<Item> = {}): Item => ({
   id,
@@ -55,6 +69,29 @@ const items = [
 test('status rolls up from tasks, blocked first', async () => {
   expect(statusOf(items, items[0]!)).toBe('blocked')
   expect(outline(items).split('\n')[0]).toBe('M1 ✗ blocked M1 title  (1/4 tasks, due 2026-11-15)')
+})
+
+test('rollups scale: a two-thousand-item roadmap draws its outline and brief quickly, and a new list rolls up afresh', async () => {
+  const big: Item[] = []
+  for (let m = 1; m <= 20; m++) {
+    big.push(item(`M${m}`, { assignee: 'claude' }))
+    for (let e = 1; e <= 10; e++) {
+      const epic = `E${(m - 1) * 10 + e}`
+      big.push(item(epic, { parent: `M${m}`, assignee: 'claude' }))
+      for (let t = 1; t <= 10; t++) big.push(item(`T${((m - 1) * 10 + e - 1) * 10 + t}`, { parent: epic, status: t % 3 ? 'done' : 'todo' }))
+    }
+  }
+  const started = performance.now()
+  big.forEach(one => statusOf(big, one))
+  outline(big)
+  brief({ items: big, activity: [], seen: {} }, 'claude', [])
+  // About 10ms with the index; about 250ms when each roll-up walked the whole list again.
+  expect(performance.now() - started).toBeLessThan(100)
+  expect(statusOf(big, find(big, 'E1')!)).toBe('in_progress')
+  // The next snapshot is a new list: its roll-ups are its own. (E1 sits in M1, handed over whole, so it closes.)
+  const next = big.map(one => (one.parent === 'E1' ? { ...one, status: 'done' as const } : one))
+  expect(statusOf(next, find(next, 'E1')!)).toBe('done')
+  expect(statusOf(big, find(big, 'E1')!)).toBe('in_progress')
 })
 
 test('nesting rules and subtrees', async () => {
@@ -505,6 +542,8 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   expect(wrote("status='done'")).toBe(false)
   expect((await call({ action: 'update', id: 'T1', status: 'done', approved: true, agentId: 'a1' })).deny).toContain('Only the user approves')
   expect((await call({ action: 'update', id: 'T1', status: 'done', as: 'user' })).deny).toContain('act as yourself')
+  expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: 'User' })).deny).toContain('act as yourself')
+  expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: ' USER ' })).deny).toContain('act as yourself')
   expect((await call({ action: 'update', id: 'T1', status: 'in_progress', approved: true })).deny).toContain('approved goes with status: done')
   const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true })
   expect(String(approved.result)).toContain('approved by the user')
@@ -595,6 +634,111 @@ test('heartbeat: every tracker call renews the caller\'s leases; other tools at 
   await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
   await $.tool.call({ tool: 'Read', file_path: 'x' } as never)
   expect(renews()).toBe(3)
+})
+
+test('release and Unassign put a task under way back to todo, so next and the backlog offer it again', async ($, on) => {
+  const held = item('T1', { status: 'in_progress', assignee: 'claude' })
+  const released = { ...held, ...letGo(held) }
+  expect(released).toMatchObject({ status: 'todo', assignee: null })
+  expect(nextUp([released], 'explore:a').map(one => one.id)).toEqual(['T1'])
+  expect(backlog([released]).map(one => one.id)).toEqual(['T1'])
+  expect(letGo(item('T2', { status: 'review', assignee: 'claude' }))).toEqual({ assignee: null })
+  expect(letGo(item('E1', { status: 'in_progress', assignee: 'claude' }))).toEqual({ assignee: null })
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: [held], activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  await call({ action: 'release', id: 'T1' })
+  expect(scripts.some(one => one.includes("status='todo'") && one.includes('assignee=NULL'))).toBe(true)
+  scripts.length = 0
+  // The board's Unassign is an update clearing the assignee.
+  await call({ action: 'update', id: 'T1', assignee: '' })
+  expect(scripts.some(one => one.includes("status='todo'") && one.includes('assignee=NULL'))).toBe(true)
+  scripts.length = 0
+  // A status given with it wins.
+  await call({ action: 'update', id: 'T1', assignee: '', status: 'blocked' })
+  expect(scripts.some(one => one.includes("status='blocked'"))).toBe(true)
+})
+
+test('a failing add or update writes nothing, so a retry has nothing to duplicate', async ($, on) => {
+  const some = [item('E1'), item('T1', { parent: 'E1' })]
+  const writes: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    if (stdin.includes('BEGIN')) writes.push(stdin)
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const denied = async (input: Record<string, unknown>, why: RegExp) => {
+    expect(String((await call(input)).deny)).toMatch(why)
+    expect(writes).toEqual([])
+  }
+  await denied({ action: 'add', kind: 'task', title: 'x', relates_to: ['T99'] }, /No item T99/)
+  await denied({ action: 'add', kind: 'task', title: 'x', duplicates: 'T99' }, /No item T99/)
+  await denied({ action: 'add', kind: 'epic', title: 'x', checklist: ['done means'] }, /Only tasks carry a checklist/)
+  await denied({ action: 'add', kind: 'task', title: 'x', parent: 'T1' }, /cannot sit under/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', blocked_by: ['T99'] }, /No item T99/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', relates_to: ['T1'] }, /cannot link to itself/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', duplicates: 'T99' }, /No item T99/)
+  await denied({ action: 'update', id: 'E1', title: 'renamed', blocked_by: ['T1'] }, /Only tasks wait/)
+  await denied({ action: 'update', id: 'T1', title: 'renamed', parent: 'T1' }, /own parent|cannot sit under/)
+})
+
+test('an update of several fields is one sqlite3 run, in one transaction', async ($, on) => {
+  const some = [item('T1'), item('T2')]
+  const writes: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    if (stdin.includes('BEGIN')) writes.push(stdin)
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const reply = await $.tool.call({
+    tool: 'mcp__roadmap__roadmap', action: 'update', id: 'T1', title: 'renamed', checklist: ['a', 'b'], blocked_by: ['T2'], labels: ['ui'], relates_to: ['T2'],
+  } as never)
+  expect(String(reply.result)).toContain('title → renamed; checklist set (2 items); blocked by T2; labels: ui; relates to T2')
+  expect(writes.length).toBe(1)
+  expect(writes[0]!.match(/BEGIN/g)?.length).toBe(1)
+})
+
+test('show and find read the whole timeline, not only what the snapshot carries', async ($, on) => {
+  const some = [item('T1'), item('T2')]
+  const old: Activity[] = [
+    { id: 1, item_id: 'T1', author: 'explore:a', type: 'handoff', body: 'stopped at the zebra parser', at: '2026-10-01T10:00:00Z' },
+    { id: 2, item_id: 'T1', author: 'claude', type: 'comment', body: 'an old finding about zebras', at: '2026-10-01T11:00:00Z' },
+  ]
+  const recent: Activity[] = [{ id: 3, item_id: 'T1', author: 'claude', type: 'comment', body: 'latest', at: '2026-10-09T10:00:00Z' }]
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    // The snapshot holds only the recent part; history and said answer from the whole of it.
+    const isWhole = stdin.includes("FROM (SELECT * FROM activity WHERE item_id=") || stdin.includes("type IN ('comment', 'handoff')")
+    return { value: fakeSqlite(stdin, { items: some, activity: isWhole ? [...old, ...recent] : recent, seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  const shown = await call({ action: 'show', id: 'T1' })
+  expect(shown).toContain('Handoff from explore:a')
+  expect(shown).toContain('an old finding about zebras')
+  expect(await call({ action: 'find', text: 'zebras' })).toContain('1 match:\nT1')
+})
+
+test('a subagent the agent list does not know is named once, and the list is asked once', async ($, on) => {
+  const scripts: string[] = []
+  let asked = 0
+  on('agent.list', () => (asked++, { value: [] }) as never)
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: [item('T1')], activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: 0 }) as never)
+  for (const body of ['one', 'two', 'three'])
+    await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'comment', id: 'T1', body, agentId: 'f00dfeed12345678' } as never)
+  expect(asked).toBe(1)
+  expect(scripts.filter(one => one.includes("'agent-f00dfeed'") && one.includes("'comment'")).length).toBe(3)
 })
 
 test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {

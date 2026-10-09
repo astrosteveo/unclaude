@@ -24,6 +24,7 @@ registerHooks({
   },
 })
 const db = await import('../hooks/db.ts')
+const { letGo, nextUp } = await import('../hooks/model.ts')
 
 let dir
 beforeEach(() => {
@@ -115,6 +116,56 @@ test('claim starts a task already handed to the claimer (T7 regression)', () => 
   // Claiming again changes nothing and logs nothing.
   sql(db.claim('claude', 'T1', false))
   assert.equal(log('T1').length, 2)
+})
+
+test('a released task goes back to todo, where next offers it to the next agent', () => {
+  sql(db.insert('claude', { kind: 'task', title: 't', parent: null }))
+  sql(db.claim('explorer', 'T1', false))
+  sql(db.change('explorer', item('T1'), letGo(item('T1'))).script)
+  assert.deepEqual([item('T1').status, item('T1').assignee], ['todo', null])
+  assert.deepEqual(log('T1').slice(2), ['explorer: unassigned explorer', 'explorer: status in_progress → todo'])
+  assert.deepEqual(nextUp(load().items, 'claude').map(one => one.id), ['T1'])
+  // Blocked work keeps its status: it still waits on something.
+  sql(db.claim('claude', 'T1', false))
+  sql(db.change('claude', item('T1'), { status: 'blocked' }).script)
+  sql(db.change('claude', item('T1'), letGo(item('T1'))).script)
+  assert.deepEqual([item('T1').status, item('T1').assignee], ['blocked', null])
+})
+
+test('atomic runs several scripts as one transaction: all of them land, or none', () => {
+  sql(db.insert('claude', { kind: 'task', title: 't', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'u', parent: null }))
+  const t1 = item('T1')
+  const both = db.atomic([db.change('claude', t1, { title: 'renamed' }).script, '', db.setBlockers('claude', t1, ['T2']).script])
+  assert.equal(both.match(/BEGIN/g).length, 1)
+  sql(both)
+  assert.deepEqual([item('T1').title, item('T1').blocked_by], ['renamed', ['T2']])
+  // A statement that fails part way leaves what came before it unwritten.
+  const broken = db.atomic([db.change('claude', item('T1'), { title: 'again' }).script, 'BEGIN IMMEDIATE;\nINSERT INTO nowhere VALUES (1);\nCOMMIT;'])
+  assert.throws(() => sql(broken))
+  assert.equal(item('T1').title, 'renamed')
+  assert.equal(db.atomic(['', '']), '')
+})
+
+test("the snapshot carries each item's recent timeline and latest handoff; history and said read all of it", () => {
+  sql(db.insert('claude', { kind: 'task', title: 'busy', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'quiet', parent: null }))
+  sql(db.comment('claude', 'T1', 'an old finding about zebras'))
+  sql(db.comment('claude', 'T1', 'left off at the parser', 'handoff'))
+  for (let i = 0; i < db.RECENT + 5; i++) sql(db.comment('claude', 'T1', `note ${i}`))
+  const loaded = load().activity
+  const busy = loaded.filter(one => one.item_id === 'T1')
+  // The newest RECENT, and the handoff note though it is older.
+  assert.equal(busy.length, db.RECENT + 1)
+  assert.ok(busy.some(one => one.type === 'handoff'))
+  assert.ok(!busy.some(one => one.body.includes('zebras')))
+  assert.equal(loaded.filter(one => one.item_id === 'T2').length, 1)
+  const all = JSON.parse(sql(db.history('T1')))
+  assert.equal(all.length, db.RECENT + 8)
+  assert.deepEqual(all.map(one => one.id), [...all.map(one => one.id)].sort((a, b) => a - b))
+  const said = JSON.parse(sql(db.said))
+  assert.ok(said.T1.includes('zebras') && said.T1.includes('left off at the parser'))
+  assert.equal(said.T2, undefined)
 })
 
 test('quotes, newlines and dot-command lines round-trip as plain text', () => {

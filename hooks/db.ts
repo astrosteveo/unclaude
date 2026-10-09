@@ -86,6 +86,12 @@ export const answer = (stdout: string) => stdout.trim().split('\n').at(-1) ?? ''
 const activity = (id: string, author: string, type: string, body: string) =>
   `INSERT INTO activity(item_id, author, type, body) VALUES (${q(id)}, ${q(author)}, ${q(type)}, ${q(body)});`
 
+/**
+ * How much of each item's timeline the snapshot carries: enough for a card and a brief. Its latest
+ * handoff note always comes along; the whole of it is read for one item with `history`.
+ */
+export const RECENT = 20
+
 /** Loads the roadmap, with what `reader` has seen of each item. */
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
@@ -97,8 +103,20 @@ export const load = (reader: string) => `SELECT json_object(
         'checklist', json((SELECT json_group_array(json_object('n', n, 'text', text, 'done', done))
           FROM checks WHERE item_id=items.id)))) FROM items),
       'activity', (SELECT json_group_array(json_object('id', id, 'item_id', item_id, 'author', author,
-        'type', type, 'body', body, 'at', at)) FROM (SELECT * FROM activity ORDER BY id DESC LIMIT 500)),
+        'type', type, 'body', body, 'at', at)) FROM (SELECT * FROM (
+          SELECT *, ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY id DESC) AS nth FROM activity)
+        WHERE nth <= ${RECENT} OR id IN (SELECT MAX(id) FROM activity WHERE type='handoff' GROUP BY item_id)
+        ORDER BY id DESC)),
       'seen', (SELECT json_group_object(item_id, seen) FROM reads WHERE reader=${q(reader)}));`
+
+/** An item's whole timeline, oldest first, as a JSON list. */
+export const history = (id: string) =>
+  `SELECT json_group_array(json_object('id', id, 'item_id', item_id, 'author', author, 'type', type, 'body', body, 'at', at))
+  FROM (SELECT * FROM activity WHERE item_id=${q(id)} ORDER BY id);`
+
+/** Everything written on each item (comments and handoff notes), one text per item id, as a JSON object. */
+export const said = `SELECT json_group_object(item_id, body) FROM (SELECT item_id, group_concat(body, char(10)) AS body
+  FROM (SELECT * FROM activity WHERE type IN ('comment', 'handoff') ORDER BY id) GROUP BY item_id);`
 
 export function parseLoad(out: string): Snapshot {
   const data = JSON.parse(out) as Snapshot
@@ -204,6 +222,12 @@ export const comment = (actor: string, id: string, body: string, type: 'comment'
 export function remove(ids: string[]): string {
   const list = ids.map(q).join(', ')
   return `BEGIN IMMEDIATE;\nDELETE FROM items WHERE id IN (${list});\nDELETE FROM activity WHERE item_id IN (${list});\nDELETE FROM reads WHERE item_id IN (${list});\nDELETE FROM links WHERE blocker IN (${list}) OR blocked IN (${list});\nDELETE FROM checks WHERE item_id IN (${list});\nDELETE FROM labels WHERE item_id IN (${list});\nDELETE FROM relations WHERE a IN (${list}) OR b IN (${list});\nCOMMIT;`
+}
+
+/** Scripts built here, run as one transaction: each one's own BEGIN and COMMIT dropped. Empty ones are skipped. */
+export function atomic(scripts: string[]): string {
+  const bodies = scripts.filter(Boolean).map(one => one.replace(/^BEGIN IMMEDIATE;\n/, '').replace(/\nCOMMIT;$/, ''))
+  return bodies.length ? `BEGIN IMMEDIATE;\n${bodies.join('\n')}\nCOMMIT;` : ''
 }
 
 /** Marks everything on an item as seen by `reader`, up to its newest activity. */
