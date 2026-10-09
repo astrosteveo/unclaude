@@ -957,3 +957,37 @@ test('edit a card: e shows its fields; each saves on its own through update', as
   expect(await ui.find({ key: 'edit-desc' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('edit a card\'s checklist and blockers: reword, drop, add, and set what it waits on', async ($, on) => {
+  const some = [
+    item('T1', { checklist: [{ n: 1, text: 'parses', done: true }, { n: 2, text: 'errs', done: false }, { n: 3, text: 'docs', done: true }] }),
+    item('T2'), item('T3', { blocked_by: ['T1'] }),
+  ]
+  const scripts: string[] = []
+  let toast = ''
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', ($, e) => ((toast = String((e as { text?: string }).text ?? JSON.stringify(e))), { value: undefined }) as never)
+  const wrote = (...needles: string[]) => scripts.some(one => needles.every(n => one.includes(n)))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'edit' })
+  await ui.input({ key: 'edit-check-2', text: 'errors are named' } as never)
+  expect(wrote("VALUES ('T1', 1, 'parses', 1)", "VALUES ('T1', 2, 'errors are named', 0)", "VALUES ('T1', 3, 'docs', 1)")).toBe(true)
+  await ui.input({ key: 'edit-check-1', text: '' } as never)
+  expect(wrote("VALUES ('T1', 1, 'errs', 0)", "VALUES ('T1', 2, 'docs', 1)")).toBe(true)
+  await ui.input({ key: 'edit-check-new', text: 'tested' } as never)
+  expect(wrote("VALUES ('T1', 4, 'tested', 0)")).toBe(true)
+  await ui.input({ key: 'edit-blockers', text: 'T2' } as never)
+  expect(wrote("INSERT OR IGNORE INTO links(blocker, blocked) VALUES ('T2', 'T1')")).toBe(true)
+  // T3 already waits on T1: T1 waiting on T3 would be a cycle, and says so.
+  await ui.input({ key: 'edit-blockers', text: 'T3' } as never)
+  expect(toast).toContain('cycle')
+  await ui.unmount()
+})

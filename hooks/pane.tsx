@@ -276,7 +276,7 @@ export function drawPane(
     const field = (key: string, label: string, value: string, onSubmit: (v: string) => void, placeholder = '') => ({
       key, rows: 1, node: Input ? (
         <Box key={`${key}-row`} flexDirection="row">
-          <Box width={13} flexShrink={0}>
+          <Box width={15} flexShrink={0}>
             <Text dimColor>{label}</Text>
           </Box>
           <Input key={key} value={value} placeholder={placeholder} submitLabel="save" onSubmit={(v: string) => onSubmit(v.trim())} />
@@ -286,7 +286,7 @@ export function drawPane(
     const choice = (key: string, label: string, value: string, options: { value: string; label?: string }[], onSelect: (v: string) => void) => ({
       key, rows: 1, node: Select ? (
         <Box key={`${key}-row`} flexDirection="row">
-          <Box width={13} flexShrink={0}>
+          <Box width={15} flexShrink={0}>
             <Text dimColor>{label}</Text>
           </Box>
           <Select key={key} value={value} options={options} onSelect={onSelect} />
@@ -306,6 +306,13 @@ export function drawPane(
             field('edit-labels', 'Labels', item.labels.join(', '), v => save({ labels: v ? v.split(',') : [] }), 'ui, auth'),
             choice('edit-priority', 'Priority', item.priority, PRIORITIES.map(one => ({ value: one })), v => save({ priority: v })),
             choice('edit-type', 'Type', item.type, TYPES.map(one => ({ value: one })), v => save({ type: v })),
+            // The checklist as written: reword an entry in place, empty it to drop it, or add one at the end.
+            // An entry left as it was keeps its tick.
+            ...item.checklist.map(c => field(`edit-check-${c.n}`, `Criterion ${c.n}`, c.text, v => save({
+              checklist: v ? item.checklist.map(one => (one.n === c.n ? v : one.text)) : item.checklist.filter(one => one.n !== c.n).map(one => one.text),
+            }), 'empty drops it')),
+            field('edit-check-new', 'Add criterion', '', v => v && save({ checklist: [...item.checklist.map(one => one.text), v] }), 'what done means'),
+            field('edit-blockers', 'Blocked by', item.blocked_by.join(', '), v => save({ blocked_by: v ? v.split(',') : [] }), 'T3, T5; empty clears'),
           ]
         : []),
       ...(item.kind === 'milestone'
