@@ -536,6 +536,48 @@ export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): 
   return `The user approved ${what} on the board; it is done. No pull request was merged with it. Say in a line or two what is next on the roadmap.`
 }
 
+/** The agent type a task run in parallel goes to, and the most such agents working at once. */
+export const WORKER_TYPE = 'general-purpose'
+export const WORKERS_MAX = 4
+
+/** What a parallel task's agent is spawned as: its task, by id and title. */
+export const workerTask = (task: Item) => `${task.id} ${task.title}`
+
+/** The name a parallel task's agent goes by on the board, as its own calls will be named. */
+export const workerName = (task: Item) => agentName(WORKER_TYPE, workerTask(task))
+
+/** The first turn of a parallel task's agent, which starts in the worktree made for it, on its branch. */
+export function workerPrompt(task: Item, branch: string, dir: string): string {
+  return [
+    `You are working roadmap task ${task.id}: ${task.title}. The user handed out several tasks to run at once, each to its own agent in its own git worktree.`,
+    `Your worktree is ${dir}, already on branch ${branch}, made from the main line. Work only there; other agents work in the other worktrees.`,
+    `1. Claim the task with the roadmap tool (claim ${task.id}); it is assigned to you, and the claim starts it. Read what it asks (show ${task.id}).`,
+    '2. Do the work. Tick its checklist as each criterion is met (check), and comment on decisions and findings.',
+    `3. Commit as "${task.id}: ...". If the repository has a remote, push the branch and open its pull request (pr ${task.id} gives the title and body; base it on the main line).`,
+    `4. Set ${task.id} done with its release note (note, section). It goes to the user's review.`,
+    `If you cannot finish, release ${task.id} with a handoff note saying where you got to. Don't remove the worktree.`,
+  ].join('\n')
+}
+
+/** A parallel task's prompt, recognised as the main loop's Agent call passes it on: the task and its worktree. */
+export function workerOf(prompt: string): { id: string; dir: string } | undefined {
+  const found = /^You are working roadmap task (\w+):[\s\S]*?\nYour worktree is (.+?), already on branch /.exec(prompt)
+  return found ? { id: found[1]!, dir: found[2]! } : undefined
+}
+
+/**
+ * The turn asking the main loop to start parallel tasks: agents a plugin spawns can't call the plugin's
+ * own tool, so the main loop's Agent tool starts them, each prompt passed on as written.
+ */
+export function workersNote(work: { task: Item; prompt: string }[]): string {
+  return [
+    `The user handed out roadmap tasks to run at once from the board: ${work.map(one => one.task.id).join(', ')}. Start each now as its own background agent: ` +
+      `one Agent call per task, all in this one message, subagent_type "${WORKER_TYPE}", run_in_background true, the description given, and the prompt exactly as written ` +
+      '(its worktree and branch are made). Then say in a line which started; their progress shows on the board.',
+    ...work.map(one => `--- ${one.task.id}\ndescription: ${workerTask(one.task)}\nprompt:\n${one.prompt}`),
+  ].join('\n\n')
+}
+
 /** The prompt Ask Claude puts in the box for the person to finish: which item, by id and title. */
 export const askAbout = (item: Item) => `About roadmap ${item.kind} ${item.id} (${item.title}): `
 

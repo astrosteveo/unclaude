@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, askAbout, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, askAbout, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -39,6 +39,9 @@ const noting = atom({ plugin: 'roadmap', key: 'noting' } as const, null as strin
 // The item whose card waits on a yes before merging its stack of PRs, and the run's progress while one goes.
 const stacking = atom({ plugin: 'roadmap', key: 'stacking' } as const, null as string | null)
 const stackRun = atom({ plugin: 'roadmap', key: 'stackRun' } as const, '')
+// Backlog rows picked to run in parallel, and the tasks waiting on a yes before they are handed out.
+const picked = atom({ plugin: 'roadmap', key: 'picked' } as const, [] as string[])
+const parallelAsk = atom({ plugin: 'roadmap', key: 'parallelAsk' } as const, null as string[] | null)
 // Whether a comment on an agent's card starts a turn at once; the person's setting, kept across sessions.
 const commentTurns = atom({ plugin: 'roadmap', key: 'commentTurns' } as const, false)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
@@ -315,6 +318,8 @@ async function poll($: EngineInterface) {
   }
   // Without a roadmap there is nothing to link commits to, so git and gh aren't asked.
   if (stamps[0] === '-') return
+  // Parallel tasks whose blockers are now done start.
+  await startQueued($).catch(() => undefined)
   // A backup that fails (no home, a full disk) never stops the board.
   await backup($).catch(() => undefined)
   if (!isIgnoreChecked) await checkIgnore($)
@@ -880,6 +885,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, merging, () => null)
   await update($, noting, () => null)
   await update($, stacking, () => null)
+  await update($, parallelAsk, () => null)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -1017,6 +1023,98 @@ async function mergeStack($: EngineInterface, stack: Pr[]) {
   await refreshRefs($, true).catch(() => undefined)
   $.ui.toast(`roadmap: merged ${stackText(stack)} into ${base}`)
   await $.prompt.submit({ text: stackNote(stack, merged, base) }).catch(() => undefined)
+}
+
+/**
+ * Tasks handed out to run in parallel that have not started: each waits for what blocks it to be done,
+ * and for a free place among WORKERS_MAX. Kept per project across sessions; read once per load.
+ */
+let queue: string[] | undefined
+
+async function readQueue($: EngineInterface): Promise<string[]> {
+  if (!queue) queue = (((await $.store.get('parallel').catch(() => undefined)) ?? {}) as Record<string, string[]>)[await root($)] ?? []
+  return queue
+}
+
+async function saveQueue($: EngineInterface, next: string[]) {
+  queue = next
+  const all = ((await $.store.get('parallel').catch(() => undefined)) ?? {}) as Record<string, string[]>
+  await $.store.set('parallel', { ...all, [await root($)]: next }).catch(() => undefined)
+}
+
+/**
+ * Hands `ids` out to run at once, from the person's press: each todo task nobody holds is assigned to the
+ * agent that will work it (so the board shows whose it is), queued, and started when it can be.
+ */
+async function runParallel($: EngineInterface, ids: string[]) {
+  await update($, parallelAsk, () => null)
+  await update($, picked, () => [])
+  try {
+    const snap = await refresh($)
+    const tasks = ids.map(id => find(snap.items, id)).filter((one): one is Item => one?.kind === 'task' && one.status === 'todo' && !one.assignee)
+    if (tasks.length === 0) fail('none of those is a todo task nobody holds')
+    await act($, USER, { action: 'batch', ops: tasks.map(task => ({ action: 'update', id: task.id, assignee: workerName(task) })) })
+    await saveQueue($, [...(await readQueue($)).filter(id => !tasks.some(task => task.id === id)), ...tasks.map(task => task.id)])
+    await refresh($)
+    const started = await startQueued($)
+    const waiting = tasks.filter(task => !started.includes(task.id)).map(task => task.id)
+    $.ui.toast(`roadmap: started ${started.join(', ') || 'none yet'}${waiting.length ? `; ${waiting.join(', ')} ${waiting.length === 1 ? 'starts when what it waits' : 'start when what they wait'} on is done` : ''}`)
+  } catch (err) {
+    $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  await refresh($)
+}
+
+/**
+ * Starts the queued tasks that can start now: nothing unfinished blocks them, and a worker is free.
+ * Their worktrees are made here; the main loop is asked to start their agents. Answers their ids.
+ */
+async function startQueued($: EngineInterface): Promise<string[]> {
+  const list = await readQueue($)
+  if (list.length === 0) return []
+  const snap = await read($, snapshot)
+  let busy = snap.items.filter(one => one.kind === 'task' && one.status === 'in_progress' && one.assignee?.startsWith(`${WORKER_TYPE}:`)).length
+  const left: string[] = []
+  const work: { task: Item; prompt: string }[] = []
+  for (const id of list) {
+    const task = find(snap.items, id)
+    // Taken, removed or started by someone else meanwhile: no longer the queue's.
+    if (!task || task.status !== 'todo' || task.assignee !== workerName(task)) continue
+    if (waitingOn(snap.items, task).length || busy >= WORKERS_MAX) {
+      left.push(id)
+      continue
+    }
+    const prompt = await worktreeFor($, task)
+    if (prompt) (work.push({ task, prompt }), busy++)
+  }
+  // Out of the queue once the main loop has been asked; asked from where it can't be, they stay for the next look.
+  const isAsked = work.length > 0 && (await $.prompt.submit({ text: workersNote(work) }).then(() => true, () => false))
+  const next = isAsked || work.length === 0 ? left : [...left, ...work.map(one => one.task.id)]
+  if (next.length !== list.length) await saveQueue($, next)
+  return isAsked ? work.map(one => one.task.id) : []
+}
+
+/**
+ * Makes a task's worktree, on its own branch from the main line, and answers its agent's prompt; or,
+ * when the worktree can't be made, says so and gives the task back.
+ */
+async function worktreeFor($: EngineInterface, task: Item): Promise<string | undefined> {
+  const branch = branchFor(task)
+  const dir = await inProject($, `.claude/worktrees/${branch}`)
+  if (!(await $.fs.exists(dir).catch(() => false))) {
+    const head = await runAt($, ['git', 'rev-parse', '--abbrev-ref', 'origin/HEAD']).catch(() => undefined)
+    const base = head?.exitCode === 0 && head.stdout.trim() ? head.stdout.trim() : 'HEAD'
+    let made = await runAt($, ['git', 'worktree', 'add', '-b', branch, dir, base]).catch(() => undefined)
+    // The branch is there already (a run before this one): the worktree takes it as it is.
+    if (made?.exitCode !== 0) made = await runAt($, ['git', 'worktree', 'add', dir, branch]).catch(() => undefined)
+    if (made?.exitCode !== 0) {
+      $.ui.toast(`roadmap: could not make a worktree for ${task.id}: ${made?.stderr.trim() || 'is this a git repository?'}`)
+      await act($, USER, { action: 'update', id: task.id, assignee: '' }).catch(() => undefined)
+      return undefined
+    }
+  }
+  await act($, USER, { action: 'comment', id: task.id, body: `Handed to ${workerName(task)}, in worktree .claude/worktrees/${branch} on branch ${branch}.` }).catch(() => undefined)
+  return workerPrompt(task, branch, dir)
 }
 
 /** Sends a task back from review with what needs changing, and puts its agent back on it. */
@@ -1198,8 +1296,12 @@ export const register: Register = on => {
   )
 
   on('agent.spawn', async ($, e, next) => {
-    const started = await next(e)
-    if (started.agentId) agentNames.set(started.agentId, agentName(e.subagentType, e.description, started.teammateId))
+    // A task handed out to run in parallel: its agent runs in the task's worktree, named for the task.
+    const worker = workerOf(e.prompt)
+    const task = worker && find((await read($, snapshot)).items, worker.id)
+    const started = await next(worker && task ? { ...e, cwd: worker.dir } : e)
+    if (started.agentId)
+      agentNames.set(started.agentId, task ? workerName(task) : agentName(e.subagentType, e.description, started.teammateId))
     return started
   }).catch(($, e, next) => next(e)) // Naming only: never stands in the way of a spawn.
 
@@ -1213,6 +1315,13 @@ export const register: Register = on => {
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // Bookkeeping only: never stands in the way of a tool.
+
+  // A turn's end (a worker's included) is when a task waiting on another may be free to start.
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    void refresh($).then(() => startQueued($)).catch(() => undefined)
+    return done
+  }).catch(($, e, next) => next(e)) // Bookkeeping only: never stands in the way of a turn.
 
   // The session brief: on the first prompt, and again whenever the person changed the roadmap;
   // a nudge when work happened while a task of Claude's sat untouched.
@@ -1262,6 +1371,30 @@ export const register: Register = on => {
     if (e.props.hasSurvey || !task) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
+    const room = ((e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 80) - 1
+    // Several agents at once (tasks run in parallel): each one's task and checklist, side by side, as many as fit.
+    if (working.length > 1) {
+      const ticksOf = (one: Item) => (one.checklist.length ? ` ☑${one.checklist.filter(c => c.done).length}/${one.checklist.length}` : '')
+      const head = `◐ ${working.length} agents: `
+      let used = head.length
+      const shown = working.filter(one => {
+        const width = `${one.id}${ticksOf(one)} · `.length
+        return (used += width) <= room - 8
+      })
+      return (
+        <Box flexDirection="row">
+          <Text color={COLOR.in_progress}>◐</Text>
+          <Text dimColor> {working.length} agents:</Text>
+          {shown.map((one, i) => (
+            <Button key={`agent-${one.id}`} plain onPress={() => void showItem($, one.id)}>
+              {i ? <Text dimColor> ·</Text> : null} <Text>{one.id}</Text>
+              <Text dimColor>{ticksOf(one)}</Text>
+            </Button>
+          ))}
+          {shown.length < working.length && <Text dimColor> +{working.length - shown.length} more</Text>}
+        </Box>
+      )
+    }
     const milestone = (() => {
       let at: Item | undefined = task
       while (at && at.kind !== 'milestone') at = find(snap.items, at.parent ?? undefined)
@@ -1271,7 +1404,6 @@ export const register: Register = on => {
     const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
     const more = working.length > 1 ? ` +${working.length - 1} more` : ''
     const where = milestone ? ` · ${milestone.id} ${progress(snap.items, milestone).done}/${progress(snap.items, milestone).total}` : ''
-    const room = ((e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 80) - 1
     const fixed = `◐ ${task.id}  @${task.assignee}${ticks}${where}${more}`.length
     const title = task.title.length + fixed > room ? task.title.slice(0, Math.max(8, room - fixed - 1)) + '…' : task.title
 
@@ -1313,6 +1445,8 @@ export const register: Register = on => {
       handing: await read($, handing),
       merging: await read($, merging),
       stacking: await read($, stacking),
+      picked: await read($, picked),
+      parallelAsk: await read($, parallelAsk),
       stackRun: await read($, stackRun),
       commentTurns: await read($, commentTurns),
       noting: await read($, noting),
@@ -1341,6 +1475,9 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
+      setPicked: ids => void update($, picked, () => ids),
+      askParallel: ids => void update($, parallelAsk, () => ids).then(() => focusOn($, ids ? 'parallel-cancel' : pick ? 'close' : 'tab-backlog')),
+      runParallel: ids => void runParallel($, ids),
       askStack: id => void update($, stacking, () => id).then(() => focusOn($, id ? 'stack-cancel' : 'close')),
       mergeStack: stack => void mergeStack($, stack),
       comment: (item, body) => void postComment($, item, body),

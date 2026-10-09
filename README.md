@@ -34,7 +34,8 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 - **Undo** with `z` (or Undo in the header): it takes back your last change on the board (a status, a field, a tick, a comment, a new item, a removal), and pressing it again goes further back. Every change in a card's Activity has its own `↶ undo`, Claude's too, and an undo has a `↷ redo`. An undo is refused when something changed the same thing since, so later work is never lost. Merges can't be undone.
 - **Priority and type:** each task has a priority (`p0` urgent to `p3` can wait, `p2` by default) and a type (feature, bug or chore). Cards show them when they differ from the defaults, with `p0` in red and `p1` in yellow.
 - **Labels and links:** tasks can carry labels (`#ui`, `#auth`), relate to other items (shown on both), or be marked a duplicate of another, which closes them. They show in the card's Links section.
-- **The band** above the prompt shows what an agent is working on. Press it to open that task.
+- **Run tasks at once:** tick rows in the Backlog (☐) and press *Run N at once…*, or press *Run its tasks at once…* on an epic or milestone. Each task gets its own git worktree (`.claude/worktrees/<branch>`), on its own branch named for the task, made from the main line, and its own agent, started by Claude. Agents claim their tasks, commit, open their PRs and set them done with release notes, side by side. A task waiting on another starts by itself once that one is done (approved). Up to four run at once; the rest wait their turn.
+- **The band** above the prompt shows what an agent is working on (with several at once, each one's task and checklist). Press it to open that task.
 
 What Claude does with it:
 

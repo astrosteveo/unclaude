@@ -1944,3 +1944,78 @@ test('merge a stack from its bottom card: in order, each after its checks pass o
   await again.unmount()
   expect(stackFrom({ commits: [], prs: parsePrs(ghList) }, parsePrs(ghList)[1]!).map(one => one.number)).toEqual([12])
 })
+
+test('run tasks at once: picked backlog rows each get an agent, a worktree and a branch; a blocked one starts when its blocker is done', async ($, on) => {
+  const some = [
+    item('E1', { title: 'Group' }), item('T1', { parent: 'E1', title: 'Alpha', checklist: [{ n: 1, text: 'a', done: true }, { n: 2, text: 'b', done: false }] }),
+    item('T2', { parent: 'E1', title: 'Beta' }), item('T3', { parent: 'E1', title: 'Gamma', blocked_by: ['T1'] }),
+  ]
+  const ran: string[] = []
+  const spawned: { prompt: string; description: string; cwd?: string }[] = []
+  const submitted: string[] = []
+  const stored: Record<string, unknown> = {}
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    if (e.argv[0] === 'git') {
+      ran.push(e.argv.join(' '))
+      return { value: { ...fakeSqlite('', null), stdout: e.argv[1] === 'rev-parse' ? 'origin/main\n' : '' } }
+    }
+    if (e.argv[0] === 'gh') return { value: { ...fakeSqlite('', null), stdout: '[]' } }
+    // Assignments land, so the next read sees whose each task is.
+    for (const [, who, id] of [...stdin.matchAll(/UPDATE items SET assignee='([^']*)'.*? WHERE id='(T\d)'/g)])
+      some.splice(some.findIndex(one => one.id === id), 1, { ...find(some, id!)!, assignee: who! })
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.exists', () => ({ value: false }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.get', ($, e) => ({ value: stored[e.key] }) as never)
+  on('store.set', ($, e) => ((stored[e.key] = e.value), { value: undefined }) as never)
+  on('agent.spawn', ($, e) => (spawned.push({ prompt: e.prompt, description: e.description, cwd: e.cwd }), { model: 'x', agentId: `a${spawned.length}` }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
+  on('turn.complete', () => ({ text: '' }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'tab-backlog' })
+  for (const id of ['T1', 'T2', 'T3']) await ui.press({ key: `pick-${id}` })
+  await ui.press({ key: 'run-picked' })
+  expect(await ui.find({ type: 'Text', text: /Run T1, T2, T3 at once, each by its own agent in its own worktree\? T3 starts when what it waits on is done\./ })).toBeDefined()
+  await ui.press({ key: 'parallel-yes' })
+  // T1 and T2 start now, each in a worktree on its own branch from the main line; T3 waits on T1.
+  expect(ran.filter(one => one.startsWith('git worktree'))).toEqual([
+    'git worktree add -b t1-alpha /work/project/.claude/worktrees/t1-alpha origin/main',
+    'git worktree add -b t2-beta /work/project/.claude/worktrees/t2-beta origin/main',
+  ])
+  // Agents a plugin spawns can't call its tool, so the main loop is asked to start them, one turn for both.
+  expect(submitted.length).toBe(1)
+  expect(submitted[0]).toContain('roadmap tasks to run at once from the board: T1, T2. Start each now as its own background agent')
+  expect(submitted[0]).toContain('--- T1\ndescription: T1 Alpha\nprompt:\nYou are working roadmap task T1: Alpha.')
+  expect(submitted[0]).toContain('Your worktree is /work/project/.claude/worktrees/t2-beta, already on branch t2-beta')
+  // The main loop's Agent call for one is put in its worktree, and named for its task.
+  const prompt = submitted[0]!.split('--- T1\ndescription: T1 Alpha\nprompt:\n')[1]!.split('\n\n--- T2')[0]!
+  await $.agent.spawn({ prompt, description: 'T1 Alpha', subagentType: 'general-purpose' } as never)
+  expect(spawned.map(one => one.cwd)).toEqual(['/work/project/.claude/worktrees/t1-alpha'])
+  // Each is assigned to its agent by name, T3 too, so the board shows whose each will be.
+  expect(some.filter(one => one.kind === 'task').map(one => one.assignee)).toEqual(['general-purpose:t1-alpha', 'general-purpose:t2-beta', 'general-purpose:t3-gamma'])
+  expect(stored.parallel).toEqual({ '/work/project': ['T3'] })
+  // The band shows each agent's task and checklist once they are under way.
+  some.splice(1, 2, { ...some[1]!, status: 'in_progress' }, { ...some[2]!, status: 'in_progress' })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const band = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'AbovePrompt', requestId: 'band', props: { bodyColumns: 100 } as never })
+  expect((await band.find({ key: 'agent-T1' }))?.text).toContain('T1 ☑1/2')
+  expect(await band.find({ key: 'agent-T2' })).toBeDefined()
+  await band.unmount()
+  // T1 done: when a turn ends (T1's agent's last), T3 starts.
+  some.splice(1, 1, { ...some[1]!, status: 'done' })
+  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't', agentId: 'a1' } as never)
+  for (let i = 0; i < 100 && !submitted.at(-1)!.includes('T3'); i++) await ui.redraw()
+  expect(submitted.at(-1)).toContain('from the board: T3. Start each now')
+  expect(stored.parallel).toEqual({ '/work/project': [] })
+  await ui.unmount()
+})

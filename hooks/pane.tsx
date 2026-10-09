@@ -68,6 +68,10 @@ export type PaneState = {
   stacking: string | null
   /** What a stack being merged is doing now; empty when none is. */
   stackRun: string
+  /** Backlog rows picked to run in parallel. */
+  picked: string[]
+  /** The tasks waiting on a yes before they are handed out to run in parallel. */
+  parallelAsk: string[] | null
   /** Whether a comment on an agent's card starts a turn at once. */
   commentTurns: boolean
   /** The task whose card asks for its release note, having just been set done. */
@@ -108,6 +112,12 @@ export type PaneActions = {
   askStack: (id: string | null) => void
   /** Merges a stack of PRs, bottom first. */
   mergeStack: (stack: Pr[]) => void
+  /** Sets which backlog rows are picked to run in parallel. */
+  setPicked: (ids: string[]) => void
+  /** Asks to confirm handing tasks out to run in parallel (null drops the question). */
+  askParallel: (ids: string[] | null) => void
+  /** Hands tasks out to run in parallel, each to its own agent in its own worktree. */
+  runParallel: (ids: string[]) => void
   /** Posts the person's comment on an item (starting a turn when set to). */
   comment: (item: Item, body: string) => void
   /** Puts a prompt about an item in the prompt box. */
@@ -153,7 +163,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -184,7 +194,7 @@ export function drawPane(
   }
 
   const card = (item: Item, room: number) => {
-    const who = item.assignee ? ` @${item.assignee}` : ''
+    const fullWho = item.assignee ? ` @${item.assignee}` : ''
     const stale = isStale(item, now) ? ' ⌛stale' : ''
     const news = badge(item)
     const waits = waitingOn(items, item).map(one => one.id)
@@ -197,7 +207,11 @@ export function drawPane(
     // Work in review shows the pull request an Approve would merge.
     const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
     const prTag = pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : ''
-    const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
+    const marked = item.id.length + stale.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
+    // A readable title comes first: a long name (a parallel task's agent) is cut short to make room for it.
+    const whoRoom = Math.max(8, room - marked - 12)
+    const who = fullWho.length > whoRoom ? `${fullWho.slice(0, whoRoom - 1)}…` : fullWho
+    const extra = marked + who.length
     const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
     return (
       <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
@@ -326,18 +340,43 @@ export function drawPane(
     </Box>
   )
 
+  // Handing several out at once takes a yes, naming them and what waits.
+  const confirmParallel = (ids: string[], key: string) => {
+    const waits = ids.filter(id => { const one = find(items, id); return one && waitingOn(items, one).length > 0 })
+    return (
+      <Box key={key} flexDirection="row" columnGap={1} flexWrap="wrap">
+        <Text color="yellow">
+          Run {ids.join(', ')} at once, each by its own agent in its own worktree?{waits.length ? ` ${waits.join(', ')} ${waits.length === 1 ? 'starts' : 'start'} when what ${waits.length === 1 ? 'it waits' : 'they wait'} on is done.` : ''}
+        </Text>
+        <Button key="parallel-yes" label="Yes, start them" onPress={() => act.runParallel(ids)} />
+        <Button key="parallel-cancel" label="Cancel" onPress={() => act.askParallel(null)} />
+      </Box>
+    )
+  }
+
   // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
   const triageAll = backlog(items).filter(isShown)
   const triage = isDocked ? triageAll.slice(0, Math.max(1, Math.floor((topRows - 1) / 2))) : triageAll
   const backlogView = (
     <Box flexDirection="column">
       {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
+      {/* Picked rows run at once: each its own agent, worktree and branch. */}
+      {picked.length > 0 && (parallelAsk && !pick ? confirmParallel(parallelAsk, 'parallel-confirm') : (
+        <Box key="picked-row" flexDirection="row" columnGap={1}>
+          <Button key="run-picked" label={`Run ${picked.length} at once…`} variant="primary" onPress={() => act.askParallel(picked)} />
+          <Button key="unpick" label="Clear picks" onPress={() => act.setPicked([])} />
+        </Box>
+      ))}
       {triage.length < triageAll.length && <Text key="backlog-more" dimColor>…{triageAll.length - triage.length} more (close the card to see them all)</Text>}
       {triage.map(task => {
         const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
         const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
         const row = (
           <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
+            <Button key={`pick-${task.id}`} plain
+              onPress={() => act.setPicked(picked.includes(task.id) ? picked.filter(id => id !== task.id) : [...picked, task.id])}>
+              <Text color={picked.includes(task.id) ? 'green' : undefined}>{picked.includes(task.id) ? '☑' : '☐'}</Text>
+            </Button>
             {Select ? (
               <Select key={`prio-${task.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={task.priority}
                 onSelect={(value: string) => act.userAct({ action: 'update', id: task.id, priority: value })} />
@@ -596,6 +635,10 @@ export function drawPane(
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
   // Work in review waits on the person, not on Claude: its card approves it or asks for changes instead.
   const isHandable = status !== 'done' && status !== 'review'
+  // A milestone's or epic's tasks that could run at once: todo, and nobody's yet.
+  const openUnder = item && item.kind !== 'task'
+    ? subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task' && one.status === 'todo' && !one.assignee).map(one => one.id)
+    : []
   // The pull request the item under review ships in, which Approve can merge.
   const reviewPr = isReview && item ? openPrOf(known, item) : undefined
   // The card's pull request, held under the bar with the buttons that act on it; and the one it is stacked on.
@@ -611,7 +654,8 @@ export function drawPane(
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 :
+        parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
@@ -691,7 +735,9 @@ export function drawPane(
             </Text>
           </Box>
         )}
-        {stacking === item.id && isStack ? (
+        {parallelAsk && item.kind !== 'task' ? (
+          confirmParallel(parallelAsk, 'parallel-confirm')
+        ) : stacking === item.id && isStack ? (
           <Box key="stack-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
             <Text color="yellow">
               Merge {stack.map(pr => `#${pr.number}`).join(', then ')} into {stack[0]!.base || 'main'}, each once its checks pass there?
@@ -744,6 +790,7 @@ export function drawPane(
           {isHandable && <Button key="hand" label="Hand to Claude" onPress={() => act.askHand(item.id)} />}
           <Button key="ask" label="Ask Claude" onPress={() => act.askClaude(item)} />
           {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
+          {openUnder.length > 1 && <Button key="run-parallel" label="Run its tasks at once…" onPress={() => act.askParallel(openUnder)} />}
           {(Input || Select) && (
             <Button key="edit" label={isEditing ? 'Done editing' : 'Edit'} hotkey="e" variant={isEditing ? 'primary' : 'secondary'}
               onPress={() => act.setEditing(!isEditing)} />
