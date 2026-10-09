@@ -60,6 +60,30 @@ const DONE_MAX = 8
 // Rows of the pane that aren't the board's: the header, the footer and a spare.
 const BOARD_CHROME = 5
 
+// The cells of the header's progress bar.
+const PROGRESS_BAR = 8
+
+/** A bar of `cells` cells, filled for `done` of `total`: the filled part and the rest. */
+export function progressBar(done: number, total: number, cells: number): { done: string; left: string } {
+  const filled = total > 0 ? Math.round((done / total) * cells) : 0
+  return { done: '█'.repeat(filled), left: '░'.repeat(cells - filled) }
+}
+
+/** The first of `hints` that fit in `rows` rows of `width`, each whole and joined by " · ". */
+export function fitHints(hints: string[], width: number, rows: number): string[] {
+  for (let n = hints.length; n > 1; n--) {
+    let lines = 1
+    let used = 0
+    for (const [i, hint] of hints.slice(0, n).entries()) {
+      const w = hint.length + (i < n - 1 ? 2 : 0)
+      if (used > 0 && used + 1 + w > width) (lines++, (used = w))
+      else used += (used > 0 ? 1 : 0) + w
+    }
+    if (lines <= rows) return hints.slice(0, n)
+  }
+  return hints.slice(0, 1)
+}
+
 // The space between board columns side by side.
 const COLUMN_GAP = 2
 
@@ -388,32 +412,50 @@ export function drawPane(
   const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
   const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done').length
   const taskCount = items.filter(i => i.kind === 'task').length
+  // The header: the views as tabs with the progress and unread count beside them, then the actions. They
+  // share a row where the pane is wide enough; else the actions take a second row of their own.
+  const bar = progressBar(doneCount, taskCount, PROGRESS_BAR)
   const header = (
-    // Wraps rather than squeezing its counts into columns when the filter and buttons crowd it.
-    <Box flexDirection="row" columnGap={1} flexWrap="wrap">
-      {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
-      {VIEWS.map(([one, label]) => (
-        <Button key={`tab-${one}`} label={label} variant={mode === one ? 'primary' : 'secondary'}
-          hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)} />
-      ))}
-      <Text dimColor>
-        {doneCount}/{taskCount} tasks done
-      </Text>
-      {unreadTotal > 0 && (
-        <Text color="magenta" bold>
-          ● {unreadTotal} unread
+    <Box flexDirection="row" columnGap={3} flexWrap="wrap">
+      <Box key="views" flexDirection="row" columnGap={2}>
+        <Box key="tabs" flexDirection="row" columnGap={1}>
+          {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
+          {VIEWS.map(([one, label]) => (
+            <Button key={`tab-${one}`} plain variant={mode === one ? 'primary' : 'secondary'}
+              hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)}>
+              {mode === one ? (
+                <Text inverse bold>
+                  {` ${label} `}
+                </Text>
+              ) : (
+                <Text dimColor>{` ${label} `}</Text>
+              )}
+            </Button>
+          ))}
+        </Box>
+        <Text key="progress">
+          <Text color="green">{bar.done}</Text>
+          <Text dimColor>{bar.left}</Text> <Text dimColor>{doneCount}/{taskCount} done</Text>
         </Text>
-      )}
-      {unreadTotal > 0 && <Button key="mark-read" label="Mark all read" onPress={() => act.markAllRead()} />}
-      {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
-        onPress={() => act.setFiltering(true)} />}
-      {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
-      {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
-      {stackRun && <Text color="yellow">Merging a stack: {stackRun}</Text>}
-      {/* With a card open, n adds under it (on the card's bar) instead. */}
-      {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
+        {unreadTotal > 0 && (
+          <Text color="magenta" bold>
+            ● {unreadTotal} unread
+          </Text>
+        )}
+        {stackRun ? <Text color="yellow">Merging a stack: {stackRun}</Text> : null}
+      </Box>
+      <Box key="actions" flexDirection="row" columnGap={1}>
+        {unreadTotal > 0 && <Button key="mark-read" label="Mark all read" onPress={() => act.markAllRead()} />}
+        {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
+          onPress={() => act.setFiltering(true)} />}
+        {filter && !isFiltering ? <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} /> : null}
+        {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
+        {/* With a card open, n adds under it (on the card's bar) instead. */}
+        {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
+      </Box>
     </Box>
   )
+
   const filterRow = isFiltering && Input && (
     <Box key="filter-row" flexDirection="row" columnGap={1}>
       <Input key="filter-input" label="Filter" value={filter} autoFocus submitLabel="apply"
@@ -428,7 +470,8 @@ export function drawPane(
   const columns = Object.fromEntries(STATUSES.map(status =>
     [status, [...(status === 'review' ? scopes : []), ...tasks.filter(task => task.status === status)]])) as Record<Status, Item[]>
   // Side by side, an empty column takes its heading's width and the columns with cards share the rest.
-  const headOf = (status: Status) => `${GLYPH[status]} ${LABEL[status]} ${columns[status].length}`
+  // A heading is drawn with its jump key: "t: ○ Todo 0".
+  const headOf = (status: Status) => `${HOTKEY[status]}: ${GLYPH[status]} ${LABEL[status]} ${columns[status].length}`
   const widths = columnWidths(
     Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length])) as Record<Status, number>,
     width, COLUMN_GAP)
@@ -846,12 +889,12 @@ export function drawPane(
   // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
   // The bar's two rows of buttons, as they wrap at this width ("[ label ]", one column apart).
   // How many rows pieces of these widths take, laid one column apart and wrapped at `room`.
-  const flowRows = (widths: number[], room: number) => {
+  const flowRows = (widths: number[], room: number, gap = 1) => {
     let lines = 1
     let used = 0
     for (const w of widths) {
-      if (used > 0 && used + 1 + w > room) (lines++, (used = w))
-      else used += (used > 0 ? 1 : 0) + w
+      if (used > 0 && used + gap + w > room) (lines++, (used = w))
+      else used += (used > 0 ? gap : 0) + w
     }
     return lines
   }
@@ -859,14 +902,17 @@ export function drawPane(
   const buttonRows = (labels: string[]) => flowRows(labels.map(label => label.length + 4), inner)
   // The header as it wraps over the whole pane, when it shows above an open card.
   const headerRows = flowRows([
-    ...VIEWS.map(([, label]) => label.length + 4),
-    `${doneCount}/${taskCount} tasks done`.length,
-    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length, 'Mark all read'.length + 4] : []),
-    ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
-    ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
-    ...(canUndo ? ['Undo'.length + 4] : []),
-    ...(stackRun ? [`Merging a stack: ${stackRun}`.length] : []),
-  ], width)
+    VIEWS.reduce((sum, [one, label]) => sum + label.length + 2 + (one === nextView ? 3 : 0), 0) + (VIEWS.length - 1) +
+      2 + PROGRESS_BAR + ` ${doneCount}/${taskCount} done`.length +
+      (unreadTotal > 0 ? 2 + `● ${unreadTotal} unread`.length : 0) + (stackRun ? 2 + `Merging a stack: ${stackRun}`.length : 0),
+    [
+      ...(unreadTotal > 0 ? ['Mark all read'.length + 4] : []),
+      ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
+      ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
+      ...(canUndo ? ['Undo'.length + 4] : []),
+      ...(!draft && !pick ? ['New'.length + 4] : []),
+    ].reduce((sum, one, i) => sum + one + (i ? 1 : 0), 0),
+  ].filter(one => one > 0), width, 3)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
@@ -894,16 +940,16 @@ export function drawPane(
       (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 :
         parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
-  const footer = (draft
+  // Key hints, most useful first: as many as fit in the rows the pane gives them (one wide, two narrow),
+  // each whole, the rest dropped from the end. Drawn in that order of usefulness, not of the keys.
+  const hints = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
-    ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', isEditing ? 'e done editing' : 'e edit', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', canUndo ? 'z undo' : '', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
-  )
-    .filter(Boolean)
-    .join(' · ')
-  // The footer is as wide as the pane, not the panel inside it.
-  const footerRows = Math.max(1, Math.ceil(footer.length / Math.max(1, width)))
+    ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', 'n new', 'f filter', canUndo ? 'z undo' : '']
+  ).filter(Boolean)
+  const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
+  const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
   const fixed = (isCompact ? 0 : headerRows) + (isDocked ? topRows : 0) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   const total = sections.reduce((sum, row) => sum + row.rows, 0)
@@ -1153,9 +1199,13 @@ export function drawPane(
           )
         )}
         {items.length > 0 && !trouble && (
-          <Text dimColor>
-            {footer}
-          </Text>
+          <Box key="hints" flexDirection="row" columnGap={1} flexWrap="wrap">
+            {footerHints.map((one, i) => (
+              <Text key={`hint-${i}`} dimColor>
+                {i < footerHints.length - 1 ? `${one} ·` : one}
+              </Text>
+            ))}
+          </Box>
         )}
       </Box>
       ),

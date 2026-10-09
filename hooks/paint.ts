@@ -46,10 +46,13 @@ const isInline = (node: Node) =>
 function textOf(node: Node): string {
   if (node === null || node === undefined || typeof node === 'boolean') return ''
   if (typeof node !== 'object') return String(node)
+  // A plain Button with a hotkey is drawn "k: label".
+  const key = node.type === 'Button' && node.props?.plain && node.props?.hotkey ? `${String(node.props.hotkey)}: ` : ''
   if (node.type === 'Button' && !(node.props?.plain && kids(node).length)) {
     const label = String(node.props?.label ?? '')
-    return node.props?.plain ? label : `[ ${label} ]`
+    return node.props?.plain ? key + label : `[ ${label} ]`
   }
+  if (key) return key + kids(node).map(textOf).join('')
   if (node.type === 'Input') return String(node.props?.value || node.props?.placeholder || '').padEnd(10)
   if (node.type === 'Select') {
     const options = (node.props?.options ?? []) as { label?: string; value?: string }[]

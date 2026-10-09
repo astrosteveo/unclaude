@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Activity, Item, Snapshot } from '../types'
 import { VERSION } from './db'
 import { paintPane } from './paint'
-import { columnWidths } from './pane'
+import { columnWidths, fitHints, progressBar } from './pane'
 
 // Layout at the sizes people use: every view, with and without a card docked under it, drawn at narrow
 // and wide widths and short and tall heights, then laid out by `paint` and checked for what doesn't fit.
@@ -132,12 +132,12 @@ test('wide board cards: one line where all fit, else a title line and a details 
   expect(problems).toEqual([])
   const heads = lines.find(line => line.includes('○ Todo 0'))!
   // Empty Todo, Blocked and Review keep to their headings; In progress and Done share the rest.
-  expect(heads.indexOf('◐ In progress')).toBeLessThan(12)
+  expect(heads.indexOf('◐ In progress')).toBeLessThan(20)
   expect(heads.indexOf('● Done') - heads.indexOf('◐ In progress')).toBeGreaterThan(40)
-  const at = heads.indexOf('◐ In progress')
-  const progress = lines.slice(lines.indexOf(heads) + 2).map(line => line.slice(at, heads.indexOf('✗ Blocked')).trim())
+  const at = heads.indexOf('p: ◐ In progress')
+  const progress = lines.slice(lines.indexOf(heads) + 2).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
   expect(progress.slice(0, 2)).toEqual(['T90 Short', 'T91 Tiny @claude'])
-  const done = lines.slice(lines.indexOf(heads) + 2, lines.indexOf(heads) + 6).map(line => line.slice(heads.indexOf('● Done')).trim())
+  const done = lines.slice(lines.indexOf(heads) + 2, lines.indexOf(heads) + 6).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
   expect(done[0]).toMatch(/^T\d+ Make the board/)
   expect(done[1]).not.toMatch(/^T\d+/)
   expect(done[2]).toMatch(/^T\d+ Make the board/)
@@ -163,7 +163,7 @@ test('narrow board: empty columns fold into one line, and every row puts its det
   const { lines, problems } = paintPane(await ui.drawn(), 84)
   expect(problems).toEqual([])
   // One line for the empty columns (Review holds a handed epic), each heading still a button with its jump key.
-  expect(lines.filter(line => /In progress 0/.test(line))).toEqual(['◐ In progress 0 · ✗ Blocked 0'])
+  expect(lines.filter(line => /In progress 0/.test(line))).toEqual(['p: ◐ In progress 0 · b: ✗ Blocked 0'])
   for (const status of ['in_progress', 'blocked']) expect((await ui.find({ key: `col-${status}-head` }))?.props.hotkey).toBeDefined()
   // Rows line up: each card's checklist sits in the same column, under Todo and Done alike.
   const ticks = lines.filter(line => /^[TE]\d+ /.test(line) && line.includes('☑')).map(line => line.indexOf('☑'))
@@ -202,6 +202,40 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
     expect(await ui.find({ type: 'Text', text: '· recent only' })).toBeDefined()
     await ui.press({ key: 'done-toggle' })
     expect((await doneCards()).length).toBe(3)
+    await ui.unmount()
+  }
+})
+
+test('the header: views as tabs, a progress bar, actions apart; one row wide, two at 84; hints whole, least useful dropped', async ($, on) => {
+  expect(progressBar(3, 4, 8)).toEqual({ done: '██████', left: '░░' })
+  expect(progressBar(0, 0, 8)).toEqual({ done: '', left: '░░░░░░░░' })
+  const hints = ['Enter opens', 'Tab/↑↓ move', 'v tree', 't p b r d jump to a column', 'n new', 'f filter']
+  expect(fitHints(hints, 200, 1)).toEqual(hints)
+  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v tree'])
+  expect(fitHints(hints, 40, 2)).toEqual(hints.slice(0, 5))
+
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const [width, rows] of [[84, 2], [140, 1]] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+    })
+    const { lines } = paintPane(await ui.drawn(), width)
+    const top = lines.findIndex(line => /Todo \d+/.test(line))
+    expect(top).toBe(rows)
+    expect(lines[0]).toMatch(/Board +v: +Tree +Backlog +Timeline +█+░* 30\/60 done +● 7 unread/)
+    expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
+    // The view showing is the tab drawn inverse.
+    expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
+    // Hints break between hints: every footer line starts a hint.
+    const footer = lines.slice(lines.findIndex(line => line.startsWith('Enter opens')))
+    expect(footer.length).toBeLessThanOrEqual(width >= 100 ? 1 : 2)
+    for (const line of footer) expect(hints.some(hint => line.startsWith(hint))).toBe(true)
     await ui.unmount()
   }
 })
