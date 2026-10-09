@@ -3,8 +3,8 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Item, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  find, GLYPH, isMessage, isStale, LABEL, linksOf, marks, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
-  waitingOn,
+  find, GLYPH, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  subtree, waitingOn,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -21,6 +21,10 @@ export type PaneState = {
   known: Refs
   isIgnoreOffered: boolean
   isRequesting: boolean
+  /** The board's filter as typed; empty for none. */
+  filter: string
+  /** Whether the filter's field is open. */
+  isFiltering: boolean
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -39,6 +43,8 @@ export type PaneActions = {
   requestChanges: (item: Item, what: string) => void
   setView: (mode: View) => void
   setRequesting: (isOn: boolean) => void
+  setFilter: (text: string) => void
+  setFiltering: (isOn: boolean) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -75,7 +81,10 @@ export function drawPane(
 ): { node: RenderElement; scrollMax: number } {
   const { Box, Text, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering } = state
+  const query = parseQuery(filter)
+  // What the filter lets through: everything without one; with one, what matches and, in the tree, what holds it.
+  const isShown = (item: Item) => !query || matches(snap, item, query)
   const items = snap.items
   const width = (e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 100
   // Five columns side by side need room for a readable title in each; narrower, they stack.
@@ -137,10 +146,20 @@ export function drawPane(
           ● {unreadTotal} unread
         </Text>
       )}
+      {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
+        onPress={() => act.setFiltering(true)} />}
+      {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
+    </Box>
+  )
+  const filterRow = isFiltering && Input && (
+    <Box key="filter-row" flexDirection="row" columnGap={1}>
+      <Input key="filter-input" label="Filter" value={filter} autoFocus submitLabel="apply"
+        placeholder="@claude #ui p0 bug review under:E3 words…" onSubmit={(value: string) => act.setFilter(value.trim())} />
+      <Button key="filter-cancel" label="Cancel" onPress={() => act.setFiltering(false)} />
     </Box>
   )
 
-  const tasks = items.filter(item => item.kind === 'task').sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+  const tasks = items.filter(item => item.kind === 'task' && isShown(item)).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   const colWidth = Math.floor((width - (STATUSES.length - 1)) / STATUSES.length)
   const board = (
     <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? 1 : 0}>
@@ -166,7 +185,7 @@ export function drawPane(
 
   const tree = (
     <Box flexDirection="column">
-      {rows(items).map(({ item, depth }) => {
+      {rows(items).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!))).map(({ item, depth }) => {
         const p = progress(items, item)
         const status = statusOf(items, item)
         return (
@@ -331,7 +350,7 @@ export function drawPane(
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (item
     ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', 'm/u assign', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', mode === 'board' ? 't p b r d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
   )
     .filter(Boolean)
     .join(' · ')
@@ -451,6 +470,8 @@ export function drawPane(
       <Box flexDirection="column">
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
         {!(isCompact && panel) && header}
+        {!panel && filterRow}
+        {!panel && query && !items.some(isShown) && <Text key="no-match" dimColor>Nothing matches the filter.</Text>}
         {offer}
         {trouble ? (
           <Text color="red">{trouble}</Text>

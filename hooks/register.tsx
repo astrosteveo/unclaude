@@ -23,6 +23,9 @@ const ignoreOffer = atom({ plugin: 'roadmap', key: 'ignoreOffer' } as const, fal
 let isIgnoreChecked = false
 // Whether the open card is asking what needs changing before sending it back from review.
 const requesting = atom({ plugin: 'roadmap', key: 'requesting' } as const, false)
+// The board's filter as typed, and whether its field is open.
+const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
+const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -806,6 +809,8 @@ export const register: Register = on => {
       known: await read($, refs),
       isIgnoreOffered: await read($, ignoreOffer),
       isRequesting: await read($, requesting),
+      filter: await read($, filter),
+      isFiltering: await read($, filtering),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
@@ -819,6 +824,8 @@ export const register: Register = on => {
       setView: mode => void update($, view, () => mode),
       setRequesting: isOn => void update($, requesting, () => isOn).then(() => (isOn ? focusOn($, 'changes') : undefined)),
       focus: key => void focusOn($, key),
+      setFilter: text => void update($, filter, () => text).then(() => update($, filtering, () => false)),
+      setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),
     }

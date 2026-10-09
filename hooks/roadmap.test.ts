@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkLinks, checkPlan, isStale, matches, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -724,4 +724,46 @@ test('find: every given filter must match, with text searched in titles, descrip
   expect(String((await call({ labels: ['#UI'] })).result)).toBe('1 match:\nT1 ◐ in_progress Login form  (p0, bug, #ui, @claude) [E1]')
   expect(String((await call({ text: 'nothing like this' })).result)).toBe('Nothing matches.')
   expect((await call({ under: 'E9' })).deny).toContain('No item E9')
+})
+
+test('board filter: a typed query narrows the board and the tree, shows in the header, and clears', async ($, on) => {
+  expect(parseQuery('@claude #UI p0 p1 bug review under:e3 login form')).toEqual({
+    assignee: ['claude'], labels: ['ui'], priority: ['p0', 'p1'], type: ['bug'], status: ['review'], under: 'E3', text: 'login form',
+  })
+  expect(parseQuery('  ')).toBeUndefined()
+  expect(parseQuery('wip @none')).toEqual({ status: ['in_progress'], assignee: ['none'] })
+
+  const some = [
+    item('M1'),
+    item('E1', { parent: 'M1' }),
+    item('T1', { parent: 'E1', title: 'Login form', labels: ['ui'] }),
+    item('T2', { parent: 'E1', title: 'Session store' }),
+    item('T3', { title: 'Docs', status: 'done' }),
+  ]
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: '#ui' } as never)
+  expect(await ui.find({ key: 'card-T1' })).toBeDefined()
+  expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
+  expect((await ui.find({ key: 'filter' }))?.text).toContain('Filter: #ui')
+  await ui.press({ key: 'tab-tree' })
+  expect(await ui.find({ key: 'row-M1' })).toBeDefined()
+  expect(await ui.find({ key: 'row-T1' })).toBeDefined()
+  expect(await ui.find({ key: 'row-T2' })).toBeUndefined()
+  expect(await ui.find({ key: 'row-T3' })).toBeUndefined()
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: 'nothing like it' } as never)
+  expect(await ui.find({ type: 'Text', text: /Nothing matches the filter/ })).toBeDefined()
+  await ui.press({ key: 'filter-clear' })
+  expect(await ui.find({ key: 'row-T2' })).toBeDefined()
+  expect(await ui.find({ key: 'filter-clear' })).toBeUndefined()
+  await ui.unmount()
 })

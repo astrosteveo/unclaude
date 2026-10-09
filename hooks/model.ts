@@ -102,6 +102,36 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
   return out
 }
 
+// Words a query reads as a status; the rest of the words are searched for.
+const STATUS_WORDS: Record<string, Status> = {
+  todo: 'todo', 'in-progress': 'in_progress', in_progress: 'in_progress', wip: 'in_progress', blocked: 'blocked', review: 'review', done: 'done',
+}
+
+/**
+ * A query as typed on the board: `@claude` (assignee; `@none` for unassigned), `#ui` (label), `p0`–`p3`,
+ * `bug`/`feature`/`chore`, a status word (`todo`, `wip`, `blocked`, `review`, `done`), `under:E3`, and
+ * any other words, which must all appear in the text. Repeats of a kind widen it: `p0 p1` is either.
+ * Undefined when there is nothing to look for.
+ */
+export function parseQuery(text: string): Query | undefined {
+  const q: Query = {}
+  const add = <K extends 'status' | 'assignee' | 'priority' | 'type' | 'labels'>(key: K, value: NonNullable<Query[K]>[number]) =>
+    ((q[key] as unknown[] | undefined) ??= []).push(value)
+  const words: string[] = []
+  for (const word of text.trim().split(/\s+/).filter(Boolean)) {
+    const low = word.toLowerCase()
+    if (low.startsWith('@') && low.length > 1) add('assignee', low.slice(1))
+    else if (low.startsWith('#') && low.length > 1) add('labels', low.slice(1))
+    else if (low.startsWith('under:') && low.length > 6) q.under = low.slice(6).toUpperCase()
+    else if ((PRIORITIES as string[]).includes(low)) add('priority', low as Priority)
+    else if ((TYPES as string[]).includes(low)) add('type', low as IssueType)
+    else if (STATUS_WORDS[low]) add('status', STATUS_WORDS[low]!)
+    else words.push(word)
+  }
+  if (words.length) q.text = words.join(' ')
+  return Object.keys(q).length ? q : undefined
+}
+
 /** Whether `item` is what `query` looks for. Status is the rolled-up one, as the board shows it. */
 export function matches(snap: Snapshot, item: Item, query: Query): boolean {
   if (query.kind && item.kind !== query.kind) return false

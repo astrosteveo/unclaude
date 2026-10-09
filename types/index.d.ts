@@ -106,6 +106,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean }
   }
 }
