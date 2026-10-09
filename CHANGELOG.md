@@ -6,6 +6,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Added
 
+- Batch calls. `batch` takes `ops`, a list of any actions, and runs them in order as one call with one answer, all or nothing: they are tried first on a copy of the roadmap, and their writes land in one transaction only if every op passed (and nobody wrote in between). An `add` op can carry a `ref` that later ops use in place of its id. `ids` on any action applies the same change to several items the same way.
 - An item's pull request is easy to see. A row in review shows its PR and checks (`PR #12 ✓`); the card holds a line under its buttons with the PR (a link to open it), its checks, and where it merges (`head → base`).
 - Approving an agent's work on the board tells it at once, in a turn of its own: that its pull request was merged, so it brings the checkout up to date (switches to main, pulls, deletes the merged branch, checks stacked PRs); or that the merge failed, with gh's reason, so it finds out why. Approving your own work stays quiet.
 - Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.

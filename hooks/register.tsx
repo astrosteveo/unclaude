@@ -127,9 +127,16 @@ async function heartbeat($: EngineInterface, actor: string, isForced = false) {
   if (await hasDb($)) await sql($, db.renew(actor))
 }
 
+/**
+ * Where a script runs: the project's database, or a batch's trial copy, which also keeps the writes made
+ * on it to replay on the database once the whole batch has passed (see `runBatch`).
+ */
+type Target = { path: string; writes?: string[] }
+const REAL: Target = { path: db.DB }
+
 /** Runs one script through sqlite3 and answers what its last statement printed. */
-async function run($: EngineInterface, script: string): Promise<string> {
-  const ran = await runAt($, db.ARGV, { stdin: script }).catch(async (err: unknown) => {
+async function run($: EngineInterface, script: string, t: Target = REAL): Promise<string> {
+  const ran = await runAt($, db.argvFor(t.path), { stdin: script }).catch(async (err: unknown) => {
     // A command that cannot start rejects; tell a missing sqlite3 apart from, say, a timeout.
     const isThere = await $.process.run(['sqlite3', '-version']).then(() => true, () => false)
     throw isThere ? err : new Error(MISSING_SQLITE)
@@ -159,20 +166,24 @@ async function ensureSchema($: EngineInterface) {
   isSchemaReady = true
 }
 
-async function sql($: EngineInterface, script: string): Promise<string> {
+async function sql($: EngineInterface, script: string, t: Target = REAL): Promise<string> {
   if (!hasDir) {
     // A folder that cannot be made shows up as sqlite3's own "unable to open database".
     await runAt($, ['mkdir', '-p', '.claude']).catch(() => undefined)
     hasDir = true
   }
   if (!isSchemaReady) await ensureSchema($)
-  return run($, script)
+  // Every write is a transaction of its own, begun so; reads are not kept.
+  if (t.writes && script.startsWith('BEGIN')) t.writes.push(script)
+  return run($, script, t)
 }
 
 /** Whether the project has a roadmap yet. Reads never make one: the database is created by the first write. */
 const hasDb = async ($: EngineInterface) => $.fs.stat(await inProject($, db.DB)).then(() => true, () => false)
 
-async function refresh($: EngineInterface): Promise<Snapshot> {
+async function refresh($: EngineInterface, t: Target = REAL): Promise<Snapshot> {
+  // A batch's trial copy is read for its own sake: the board goes on showing the database.
+  if (t !== REAL) return db.parseLoad(await sql($, db.load(USER), t))
   try {
     if (!(await hasDb($))) {
       // Dormant: a project that never used the roadmap gets no file, no folder and no sqlite3.
@@ -252,8 +263,11 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch'
   id?: string
+  ids?: string[] | string
+  ref?: string
+  ops?: Input[] | string
   kind?: Kind
   title?: string
   description?: string
@@ -315,8 +329,11 @@ const numbers = (value: unknown) => listOf(value, /,/).map(Number)
  * Carries out one roadmap action for `actor`. Agents don't close their own work: their `done` goes to
  * review, and only the person (on the board) or the main loop passing on their approval sets done.
  */
-async function act($: EngineInterface, actor: string, a: Input, isSubagent = false): Promise<string> {
-  const snap = await refresh($)
+async function act($: EngineInterface, actor: string, a: Input, isSubagent = false, t: Target = REAL): Promise<string> {
+  // The same change to several items is a batch of one op per item: all of them, or none.
+  if (a.ids !== undefined && a.action !== 'batch') return runBatch($, actor, [a], isSubagent)
+  if (a.action === 'batch') return runBatch($, actor, opsOf(a.ops), isSubagent)
+  const snap = await refresh($, t)
   const item = find(snap.items, a.id)
   const need = () => item ?? fail(a.id ? `No item ${a.id}` : 'id is required')
   if (a.status && !STATUSES.includes(a.status)) fail(`status must be one of ${STATUSES.join(', ')}`)
@@ -329,7 +346,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (a.id) {
         const it = need()
         const linked = refsText(refsFor(snap.items, await refreshRefs($, true), it))
-        return detail(await withHistory($, snap, it.id), it) + (linked ? `\n${linked}` : '')
+        return detail(await withHistory($, snap, it.id, t), it) + (linked ? `\n${linked}` : '')
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {
@@ -350,7 +367,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       }
       if (query.under && !find(snap.items, query.under)) fail(`No item ${query.under}`)
       // Text is looked for in everything ever written on an item, not only the snapshot's recent part.
-      const said = query.text ? (JSON.parse(await sql($, db.said)) as Record<string, string>) : undefined
+      const said = query.text ? (JSON.parse(await sql($, db.said, t)) as Record<string, string>) : undefined
       const found = rows(snap.items).map(row => row.item).filter(one => matches(snap, one, query, said))
       if (found.length === 0) return 'Nothing matches.'
       const cap = 40
@@ -397,14 +414,14 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         assignee: a.assignee,
         priority: a.priority || undefined,
         type: a.type || undefined,
-      }))
+      }), t)
       if (blockers.length || checklist.length || related.length || original.length || tags.length) {
-        const created = find((await refresh($)).items, id) as Item
-        if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
-        if (checklist.length) await sql($, db.setChecklist(actor, created, checklist).script)
-        if (tags.length) await sql($, db.setLabels(actor, created, tags).script)
-        if (related.length) await sql($, db.setRelations(actor, created, 'relates', related).script)
-        if (original.length) await sql($, db.setRelations(actor, created, 'duplicates', original).script)
+        const created = find((await refresh($, t)).items, id) as Item
+        if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script, t)
+        if (checklist.length) await sql($, db.setChecklist(actor, created, checklist).script, t)
+        if (tags.length) await sql($, db.setLabels(actor, created, tags).script, t)
+        if (related.length) await sql($, db.setRelations(actor, created, 'relates', related).script, t)
+        if (original.length) await sql($, db.setRelations(actor, created, 'duplicates', original).script, t)
       }
       return `Added ${id}: ${a.title!.trim()}${blockers.length ? `, blocked by ${blockers.join(', ')}` : ''}`
     }
@@ -455,7 +472,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         original === undefined ? undefined : db.setRelations(actor, it, 'duplicates', original),
       ].filter(part => part !== undefined)
       const all = db.atomic([script, ...parts.map(part => part.script)])
-      if (all) await sql($, all)
+      if (all) await sql($, all, t)
       notes.push(...parts.flatMap(part => part.notes))
       if (isToReview) {
         notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
@@ -477,11 +494,11 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const waiting = waitingOn(snap.items, it)
       if (waiting.length && !a.force)
         fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
-      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee))) || null
+      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee), t)) || null
       const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
       if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
       // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
-      const after = await withHistory($, await refresh($), it.id)
+      const after = await withHistory($, await refresh($, t), it.id, t)
       // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
       const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
       const linked = refsText(refsFor(after.items, known, it))
@@ -492,9 +509,9 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     case 'release': {
       const it = need()
       // The note goes in first, so the timeline reads: what was left, then who let go.
-      if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'))
+      if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'), t)
       const { script } = db.change(actor, it, letGo(it))
-      if (script) await sql($, script)
+      if (script) await sql($, script, t)
       return `${it.id} released${a.body?.trim() ? ', with your handoff note' : ''}.`
     }
     case 'check': {
@@ -505,14 +522,14 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (ns.length === 0 || unknown.length)
         fail(`items must name entries 1–${it.checklist.length}${unknown.length ? `; there is no ${unknown.join(', ')}` : ''}`)
       const { script, notes } = db.check(actor, it, ns, a.done !== false)
-      if (script) await sql($, script)
+      if (script) await sql($, script, t)
       const left = it.checklist.filter(c => !(ns.includes(c.n) ? a.done !== false : c.done)).length
       return `${it.id}: ${notes.length ? notes.join('; ') : 'nothing changed'}. ${left ? `${left} left to check.` : 'All checked.'}`
     }
     case 'comment': {
       const it = need()
       if (!a.body?.trim()) fail('body is required')
-      await sql($, db.comment(actor, it.id, a.body!.trim()))
+      await sql($, db.comment(actor, it.id, a.body!.trim()), t)
       return `Commented on ${it.id}.`
     }
     case 'plan': {
@@ -540,18 +557,18 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
           assignee: n.assignee,
           priority: n.priority,
           type: n.type,
-        }))
+        }), t)
         ids.set(one.ref, id)
       }
-      const after = (await refresh($)).items
+      const after = (await refresh($, t)).items
       for (const one of planned) {
         const created = find(after, ids.get(one.ref))!
         const blockers = [...one.blockerRefs.map(ref => ids.get(ref)!), ...one.blockerIds]
-        if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
-        if (one.node.checklist?.length) await sql($, db.setChecklist(actor, created, texts(one.node.checklist)).script)
-        if (one.node.labels?.length) await sql($, db.setLabels(actor, created, idList(one.node.labels)).script)
+        if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script, t)
+        if (one.node.checklist?.length) await sql($, db.setChecklist(actor, created, texts(one.node.checklist)).script, t)
+        if (one.node.labels?.length) await sql($, db.setLabels(actor, created, idList(one.node.labels)).script, t)
       }
-      const final = (await refresh($)).items
+      const final = (await refresh($, t)).items
       const roots = planned.filter(one => !one.parentRef).map(one => ids.get(one.ref)!)
       return [
         `Planned ${planned.length} item(s): ${planned.map(one => `${one.ref} → ${ids.get(one.ref)}`).join(', ')}`,
@@ -563,7 +580,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const ids = subtree(snap.items, it.id)
       if (ids.length > 1 && !a.cascade)
         fail(`${it.id} has ${ids.length - 1} item(s) under it; pass cascade: true to remove them too`)
-      await sql($, db.remove(ids))
+      await sql($, db.remove(ids), t)
       return `Removed ${ids.join(', ')}`
     }
   }
@@ -571,9 +588,83 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
 }
 
 /** The snapshot with `id`'s whole timeline in place of the recent part it carries. */
-async function withHistory($: EngineInterface, snap: Snapshot, id: string): Promise<Snapshot> {
-  const all = JSON.parse(await sql($, db.history(id))) as Snapshot['activity']
+async function withHistory($: EngineInterface, snap: Snapshot, id: string, t: Target = REAL): Promise<Snapshot> {
+  const all = JSON.parse(await sql($, db.history(id), t)) as Snapshot['activity']
   return { ...snap, activity: [...snap.activity.filter(one => one.item_id !== id), ...all] }
+}
+
+/** A batch's ops as sent: a list, or a list as JSON text. */
+function opsOf(value: unknown): Input[] {
+  let list = value
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list)
+    } catch {
+      fail('ops must be a list of { action, ... } (JSON)')
+    }
+  }
+  if (!Array.isArray(list) || list.length === 0) fail('ops is required: a list of { action, ... }')
+  return list as Input[]
+}
+
+// The fields that name items, which a batch reads a ref in: an item added earlier in the same batch.
+const NAMING = ['id', 'parent', 'duplicates', 'ids', 'blocked_by', 'relates_to'] as const
+
+/**
+ * Runs ops in order, all or nothing. They run first on a copy of the database, so each sees what the ones
+ * before it did and every check runs as it would; the writes they made are then replayed on the database
+ * in one transaction, which rolls back if anyone else wrote in between. An op that fails writes nothing.
+ */
+async function runBatch($: EngineInterface, actor: string, raw: Input[], isSubagent: boolean): Promise<string> {
+  // `ids` makes one op per item.
+  const ops = raw.flatMap(op =>
+    op.ids === undefined ? [op] : idList(op.ids).map(id => ({ ...op, ids: undefined, id })))
+  if (ops.length === 0) fail('ids names no items')
+  if (ops.some(op => op.action === 'batch' || op.ops !== undefined)) fail('a batch cannot hold another batch')
+  await sql($, db.STAMP) // the database, made and brought to this schema version if need be
+  const now = await $.clock.now().catch(() => 0)
+  const copy: Target = { path: `${db.DB}-batch-${now}-${Math.random().toString(36).slice(2, 8)}`, writes: [] }
+  // .backup copies what the database holds, the write-ahead log included, as one consistent read.
+  const backed = await runAt($, ['sqlite3', db.DB, `.backup '${copy.path}'`])
+  if (backed.exitCode !== 0) fail(`could not copy the roadmap to try the batch: ${backed.stderr.trim()}`)
+  const stamp = await sql($, db.STAMP, copy)
+  const answers: string[] = []
+  const refs = new Map<string, string>()
+  const named = (value: unknown) => (typeof value === 'string' ? refs.get(value.trim()) ?? value : value)
+  try {
+    for (const [i, raw] of ops.entries()) {
+      const fields: Record<string, unknown> = { ...raw }
+      for (const field of NAMING) {
+        const value = fields[field]
+        if (Array.isArray(value)) fields[field] = value.map(named)
+        else if (typeof value === 'string' && (field === 'blocked_by' || field === 'relates_to' || field === 'ids'))
+          fields[field] = idList(value).map(named)
+        else if (value !== undefined) fields[field] = named(value)
+      }
+      const op = fields as Input
+      try {
+        const answer = await act($, actor, op, isSubagent, copy)
+        answers.push(`${i + 1}. ${answer}`)
+        const added = /^Added (\w+)/.exec(answer)?.[1]
+        if (op.ref && added) refs.set(String(op.ref).trim(), added)
+      } catch (err) {
+        fail(`op ${i + 1} (${op.action}${op.id ? ` ${op.id}` : ''}): ${err instanceof Error ? err.message : String(err)}. Nothing in the batch was written.`)
+      }
+    }
+  } finally {
+    await runAt($, ['rm', '-f', copy.path, `${copy.path}-wal`, `${copy.path}-shm`]).catch(() => undefined)
+  }
+  if (copy.writes!.length) {
+    try {
+      await sql($, db.atomic([db.expectStamp(stamp), ...copy.writes!]))
+    } catch (err) {
+      const moved = (await sql($, db.STAMP).catch(() => stamp)) !== stamp
+      fail(moved
+        ? 'the roadmap changed while the batch was being checked; nothing in it was written. Send it again.'
+        : `the batch passed its checks but could not be written: ${err instanceof Error ? err.message : String(err)}. Nothing in it was written.`)
+    }
+  }
+  return answers.join('\n')
 }
 
 /** A change the person makes from the pane: written as `user`, then redrawn. */
@@ -733,13 +824,14 @@ export const register: Register = on => {
         'Branches and PRs: one per unit handed over (the epic or milestone, or a task given alone). When the unit goes to review, push its branch',
         'and open its PR (pr: id gives the branch, title and body). Name ids in commit messages, PR titles and branches ("T12: ...", "E9: ...");',
         'show lists the commits and PRs that name an item. Subagents are named from their type and task automatically.',
+        'Several changes at once: batch (ops), one call, all or nothing; or ids for the same change to several items.',
       ].join(' '),
       inputSchema: {
         type: 'object',
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch'],
             description: [
               'show: the whole tree, or one item (id) with its activity and linked commits and PRs.',
               'next: your open tasks, then unassigned ones by priority and due date.',
@@ -752,9 +844,17 @@ export const register: Register = on => {
               'claim: id; takes a task and starts it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks.',
               'release: id; body leaves a handoff note for whoever picks it up next.',
               'comment: id, body. check: id, items (checklist entry numbers). remove: id; cascade for children.',
+              'batch: ops, a list of these actions ({ action, ...fields }) run in order as one: every op is checked first and',
+              'nothing is written unless all pass. An add op may carry a ref that later ops use in place of its id.',
             ].join(' '),
           },
           id: { type: 'string', description: 'Item id, e.g. T12' },
+          ids: { type: 'array', items: { type: 'string' }, description: 'In place of id: the same change to each of these items, all or nothing' },
+          ops: {
+            type: 'array',
+            description: 'batch: the actions to run, in order, each { action, ...its fields }; one op may not be a batch',
+            items: { type: 'object', properties: { action: { type: 'string' }, ref: { type: 'string' } }, required: ['action'] },
+          },
           kind: { type: 'string', enum: KINDS },
           title: { type: 'string' },
           description: { type: 'string' },
