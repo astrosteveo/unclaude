@@ -79,11 +79,9 @@ async function refreshRefs($: EngineInterface, isForced = false) {
   return { commits, prs }
 }
 
-
 export const MISSING_SQLITE =
   'sqlite3 is not installed or not on PATH, and the roadmap is stored with it. Install it ' +
   '(Arch: pacman -S sqlite; Debian/Ubuntu: apt install sqlite3; Fedora: dnf install sqlite; macOS: brew install sqlite), then run /roadmap again.'
-
 
 // The main loop's view of the roadmap: the newest activity it has been told about, and whether it
 // has done work since it last touched the roadmap. Module state: a reload starts both over.
@@ -183,7 +181,6 @@ async function refresh($: EngineInterface): Promise<Snapshot> {
   }
 }
 
-/** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 /** The person's answers to the .gitignore offer, by project root, kept across sessions. */
 async function ignoreAnswers($: EngineInterface): Promise<Record<string, IgnoreAnswer>> {
   return ((await $.store.get('gitignore')) ?? {}) as Record<string, IgnoreAnswer>
@@ -225,6 +222,7 @@ async function dismissIgnore($: EngineInterface) {
   await update($, ignoreOffer, () => false)
 }
 
+/** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
     [db.DB, `${db.DB}-wal`].map(file => $.fs.stat(file).then(s => `${s.size}:${s.mtimeMs}`, () => '-')),
@@ -578,13 +576,11 @@ async function userAct($: EngineInterface, a: Input) {
   await refresh($)
 }
 
-
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
 // The inline height an open card asks for: more than most cards need; the layout caps it.
 const CARD_ROWS = 40
-
 
 /** Closes the detail panel and hands the ring back to the card or row it was opened from. */
 async function closeDetail($: EngineInterface, id: string) {

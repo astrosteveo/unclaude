@@ -22,7 +22,6 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - A Backlog tab for triage: todo tasks nobody holds, those without a milestone or epic first, then by priority, each with a priority picker and a `→ Claude` button. `v` now steps through Board, Tree and Backlog.
 - A board filter (`f`). It reads the same filters as `find`, typed as `@claude #ui p0 bug review under:E3 login`, and applies to the board, tree and backlog (in the tree, an item's parents stay shown). The header shows the active filter with a Clear button.
 - Labels (`labels`), related items (`relates_to`, shown on both items) and duplicates (`duplicates`, which closes the duplicate). The card lists them under Links, and `show` lists them in the detail.
-
 - In a git repository that doesn't ignore `.claude/roadmap.db`, the board offers to add it to `.gitignore` (press `g`). A toast mentions it once per project, and "Don't ask again" turns it off for that project. Nothing is written without the person's say-so.
 
 ### Fixed
@@ -37,10 +36,8 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Status roll-ups and item lookups are indexed once per snapshot, so a board of a couple of thousand items draws in milliseconds. Before, each roll-up walked the whole roadmap again.
 - An `update` that sets several things (fields, checklist, blockers, labels, links) is written as one transaction in one sqlite3 run: it lands whole or not at all.
 - Handing work to Claude takes a confirm step (on a card or a backlog row), and the `h`, `m` and `u` keys are gone, so a stray key or an extra Enter no longer hands off or reassigns a task. A card never opens with focus on Hand to Claude, and a finished item doesn't offer it.
-
 - The board has five columns, and needs 100 columns of width to lay them side by side (90 before); narrower, they stack.
 - Agents can no longer act under the name `user`, in any case (`User`, `USER`).
-
 - The card detail's status and action buttons sit in one bar right under the title, in the same place on every card. The current status is marked in the accent color, and epics and milestones show their rolled-up status in the same spot.
 - A card reads as labelled sections: Description, Acceptance criteria (with a checked count), Dependencies, Links and Activity. Empty sections are left out, and comments read as messages, set apart from the tracker's own events.
 - A card taller than the pane scrolls under its title and bar, with marks for what is above and below.
