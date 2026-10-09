@@ -147,3 +147,29 @@ test('wide board cards: one line where all fit, else a title line and a details 
   expect(JSON.stringify(open)).toContain('"inverse":true')
   await ui.unmount()
 })
+
+test('narrow board: empty columns fold into one line, and every row puts its details in the same slots', async ($, on) => {
+  const snap = bigRoadmap()
+  snap.items = snap.items.filter(one => one.kind !== 'task' || one.status === 'done' || one.status === 'todo')
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } as never,
+  })
+  const { lines, problems } = paintPane(await ui.drawn(), 84)
+  expect(problems).toEqual([])
+  // One line for the empty columns (Review holds a handed epic), each heading still a button with its jump key.
+  expect(lines.filter(line => /In progress 0/.test(line))).toEqual(['◐ In progress 0 · ✗ Blocked 0'])
+  for (const status of ['in_progress', 'blocked']) expect((await ui.find({ key: `col-${status}-head` }))?.props.hotkey).toBeDefined()
+  // Rows line up: each card's checklist sits in the same column, under Todo and Done alike.
+  const ticks = lines.filter(line => /^[TE]\d+ /.test(line) && line.includes('☑')).map(line => line.indexOf('☑'))
+  expect(ticks.length).toBeGreaterThan(5)
+  expect(new Set(ticks).size).toBe(1)
+  // One blank row between each of the four blocks (the folded line, Todo, Review, Done), none for the empty ones.
+  expect(lines.filter(line => line.trim() === '').length).toBe(3)
+  await ui.unmount()
+})

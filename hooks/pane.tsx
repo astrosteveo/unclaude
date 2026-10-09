@@ -41,8 +41,9 @@ export function columnCaps(heights: Record<Status, number[]>, budget: number, is
       caps[status] = total(heights[status]) <= budget - 1 ? heights[status].length : fit(heights[status], Math.max(0, budget - 2)).n
     return caps
   }
-  // Each column's heading, and a row kept for each non-empty one's "… more" in case it is cut.
-  let left = budget - STATUSES.length - STATUSES.filter(status => heights[status].length > 0).length
+  // Each non-empty column's heading and a row for its "… more" in case it is cut; the empty ones share a line.
+  const filled = STATUSES.filter(status => heights[status].length > 0).length
+  let left = budget - 2 * filled - (filled < STATUSES.length ? 1 : 0)
   for (const status of ['in_progress', 'review', 'blocked', 'todo', 'done'] as Status[]) {
     const { n, used } = fit(heights[status], Math.max(0, left))
     caps[status] = n
@@ -259,27 +260,65 @@ export function drawPane(
    * of a column so, `isSplit`, when any needs it, so they line up); else, in the stacked board, one line
    * with the title cut. Only the title and a long name are ever cut.
    */
-  const cardLayout = (item: Item, room: number, isStacked: boolean, isSplit = false) => {
-    const stale = isStale(item, now) ? ' ⌛stale' : ''
-    // Past when it was due, its own date or one above it.
-    const late = isLate(items, item, now) ? ' ⚠late' : ''
-    const news = badge(item)
-    const waits = waitingOn(items, item).map(one => one.id)
-    const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
+  // What a card says beside its title, each piece led by a space.
+  const piecesOf = (item: Item) => {
     const list = item.checklist ?? []
     const part = item.kind === 'task' ? undefined : progress(items, item)
-    const ticks = part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
     const tags = marks(item)
-    const tag = tags.length ? ` ${tags.join(' ')}` : ''
+    const waits = waitingOn(items, item).map(one => one.id)
     // Work in review shows the pull request an Approve would merge.
     const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
-    const prTag = pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : ''
-    const fullWho = item.assignee ? ` @${item.assignee}` : ''
+    return {
+      pr,
+      tag: tags.length ? ` ${tags.join(' ')}` : '',
+      ticks: part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
+      prTag: pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : '',
+      wait: waits.length ? ` ⧗${waits.join(',')}` : '',
+      who: item.assignee ? ` @${item.assignee}` : '',
+      stale: isStale(item, now) ? ' ⌛stale' : '',
+      // Past when it was due, its own date or one above it.
+      late: isLate(items, item, now) ? ' ⚠late' : '',
+      news: badge(item),
+    }
+  }
+  type Slots = Record<Exclude<keyof ReturnType<typeof piecesOf>, 'pr'> | 'id', number>
+  const SLOT_KEYS = ['tag', 'ticks', 'prTag', 'wait', 'who', 'stale', 'late', 'news'] as const
+  // A name is given at most this much of a stacked row's slots; a longer one is cut.
+  const WHO_SLOT = 19
+  /** The width of each piece's slot over `list`: the widest of each, so stacked rows line them up. */
+  const slotsOf = (list: Item[]): Slots => {
+    const slots = Object.fromEntries([...SLOT_KEYS, 'id'].map(key => [key, 0])) as Slots
+    for (const one of list) {
+      slots.id = Math.max(slots.id, one.id.length)
+      const pieces = piecesOf(one)
+      for (const key of SLOT_KEYS) slots[key] = Math.max(slots[key], key === 'who' ? Math.min(WHO_SLOT, pieces.who.length) : pieces[key].length)
+    }
+    return slots
+  }
+
+  /**
+   * How a card is laid out in `room` columns. Stacked, given `slots`, on one line: the title, then each
+   * piece in its slot so the rows line up. Else on one line when it all fits; else, in a board column, the
+   * title on one line and the details under it (every card of a column so, `isSplit`, when any needs it, so
+   * they line up); else one line with the title cut. Only the title and a long name are ever cut.
+   */
+  const cardLayout = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
+    const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, news } = piecesOf(item)
     const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + news.length
     const head = item.id.length + 1
     const cutWho = (whoRoom: number) => (fullWho.length <= whoRoom ? fullWho : whoRoom >= 5 ? `${fullWho.slice(0, whoRoom - 1)}…` : '')
     const cutTitle = (titleRoom: number) => (item.title.length <= titleRoom ? item.title : `${item.title.slice(0, Math.max(1, titleRoom - 1))}…`)
     const bits = { tag, ticks, pr, prTag, wait, stale, late, news }
+    const slotted = slots ? SLOT_KEYS.reduce((sum, key) => sum + slots[key], 0) : 0
+    if (isStacked && slots && room - slots.id - 1 - slotted >= 16) {
+      const fit = (text: string, key: keyof Slots) => (text.length > slots[key] ? `${text.slice(0, slots[key] - 1)}…` : text).padEnd(slots[key])
+      const lead = slots.id + 1
+      const title = cutTitle(room - lead - slotted)
+      return {
+        id: item.id.padEnd(slots.id), tag: fit(tag, 'tag'), ticks: fit(ticks, 'ticks'), pr, prTag: fit(prTag, 'prTag'), wait: fit(wait, 'wait'), who: fit(fullWho, 'who'),
+        stale: fit(stale, 'stale'), late: fit(late, 'late'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
+      }
+    }
     if (!isSplit && head + item.title.length + others + fullWho.length <= room) {
       const pad = isStacked ? room - head - item.title.length - others - fullWho.length : 0
       return { ...bits, title: item.title, who: fullWho, pad, rows: 1 }
@@ -293,8 +332,10 @@ export function drawPane(
     // A board column: the title, then its details on a line of their own under it.
     return { ...bits, title: cutTitle(room - head), who: cutWho(room - others + 1), pad: 0, rows: 2 }
   }
-  const card = (item: Item, room: number, isStacked: boolean, isSplit = false) => {
-    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news, pad, rows } = cardLayout(item, room, isStacked, isSplit)
+  const card = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
+    const laid = cardLayout(item, room, isStacked, isSplit, slots)
+    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news, pad, rows } = laid
+    const id = 'id' in laid && laid.id ? laid.id : item.id
     const isOpen = pick === item.id
     // A detail line leads with its first detail, its space dropped, under the title.
     let isFirst = rows === 2
@@ -306,7 +347,7 @@ export function drawPane(
     return (
       <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
         <Text dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
-          {item.id}
+          {id}
         </Text>{' '}
         <Text bold={isOpen}>{title}</Text>
         {rows === 2 ? '\n' : ' '.repeat(pad)}
@@ -392,28 +433,40 @@ export function drawPane(
         [status, columns[status].map(task => cardLayout(task, roomOf(status), !isWide, isSplit[status]).rows)])) as Record<Status, number[]>,
       isWide ? topRows - 1 : topRows, isWide)
     : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? 8 : 15])) as Record<Status, number>)
+  // Stacked, the empty columns fold into one line, and every card's pieces sit in slots shared by the board.
+  const empties = isWide ? [] : STATUSES.filter(status => columns[status].length === 0)
+  const stackSlots = isWide ? undefined : slotsOf(STATUSES.flatMap(status => columns[status].slice(0, caps[status])))
+  const heading = (status: Status) => (
+    <Button key={`col-${status}-head`} plain hotkey={HOTKEY[status]}
+      onPress={() => columns[status][0] && act.focus(`card-${columns[status][0]!.id}`)}>
+      <Text bold color={COLOR[status]}>
+        {GLYPH[status]} {LABEL[status]}
+      </Text>{' '}
+      <Text dimColor>{columns[status].length}</Text>
+    </Button>
+  )
   const board = (
-    <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? COLUMN_GAP : 0}>
-      {STATUSES.map(status => {
+    <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? COLUMN_GAP : isDocked ? 0 : 1}>
+      {empties.length > 0 && (
+        <Box key="col-empty" flexDirection="row" columnGap={1} flexWrap="wrap">
+          {empties.flatMap((status, i) => [...(i ? [<Text key={`col-empty-${i}`} dimColor>·</Text>] : []), heading(status)])}
+        </Box>
+      )}
+      {STATUSES.filter(status => !empties.includes(status)).map(status => {
         const column = columns[status]
         const shown = column.slice(0, caps[status])
         return (
-          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined} marginBottom={isWide || isDocked ? 0 : 1}>
-            <Button key={`col-${status}-head`} plain hotkey={HOTKEY[status]}
-              onPress={() => column[0] && act.focus(`card-${column[0].id}`)}>
-              <Text bold color={COLOR[status]}>
-                {GLYPH[status]} {LABEL[status]}
-              </Text>{' '}
-              <Text dimColor>{column.length}</Text>
-            </Button>
+          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}>
+            {heading(status)}
             {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
-            {shown.map(task => card(task, roomOf(status), !isWide, isSplit[status]))}
+            {shown.map(task => card(task, roomOf(status), !isWide, isSplit[status], stackSlots))}
             {column.length > shown.length && <Text dimColor>…{column.length - shown.length} more</Text>}
           </Box>
         )
       })}
     </Box>
   )
+
 
   const treeRows = rows(items).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
   // Docked, a window of rows that keeps the open item in sight.
