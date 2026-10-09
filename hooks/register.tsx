@@ -809,7 +809,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       return `Wrote ${out.added.length} note(s) into ${path} under [Unreleased]:\n${out.added.map(one => `- ${one}`).join('\n')}`
     }
     case 'ship':
-      return ship($, a.version, a.approved === true && !isSubagent)
+      return ship($, snap.items, a.version, a.approved === true && !isSubagent)
     case 'remove': {
       const it = need()
       const ids = subtree(snap.items, it.id)
@@ -872,7 +872,7 @@ const git = async ($: EngineInterface, args: string[]): Promise<Ran> =>
  * merge and publishes a GitHub release from the version's notes. Refuses a version that isn't higher,
  * and a first 1.0 without the user's say.
  */
-async function ship($: EngineInterface, raw: string | undefined, approved: boolean): Promise<string> {
+async function ship($: EngineInterface, items: Item[], raw: string | undefined, approved: boolean): Promise<string> {
   const wanted = versionOf(raw) ?? fail('version is required, as 1.2.3')
   const version = wanted.join('.')
   const read = async (path: string) => $.fs.read(await inProject($, path)).then(String, () => undefined)
@@ -912,7 +912,9 @@ async function ship($: EngineInterface, raw: string | undefined, approved: boole
   if (text === undefined) fail('no CHANGELOG.md to cut the release from')
   const remote = await git($, ['remote', 'get-url', 'origin'])
   if (remote.exitCode !== 0) fail('no git remote "origin" to open the release PR on')
-  if ((await git($, ['status', '--porcelain'])).stdout.trim()) fail('the working tree has changes; commit or stash them first')
+  // The release's own file may differ (notes written by changelog): it goes into the release commit.
+  const changed = (await git($, ['status', '--porcelain'])).stdout.split('\n').filter(line => line.trim() && line.slice(3).trim() !== 'CHANGELOG.md')
+  if (changed.length) fail('the working tree has changes; commit or stash them first')
   // A release is cut from the main line as it stands on origin: never from a feature branch, never stale.
   const mainLine = (await git($, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).stdout.trim().replace(/^origin\//, '') || 'main'
   const on = (await git($, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()
@@ -920,7 +922,10 @@ async function ship($: EngineInterface, raw: string | undefined, approved: boole
   await git($, ['fetch', 'origin', mainLine])
   const behind = Number((await git($, ['rev-list', '--count', `HEAD..origin/${mainLine}`])).stdout.trim()) || 0
   if (behind) fail(`${mainLine} is ${behind} commit(s) behind origin/${mainLine}; pull first`)
-  const cut = cutRelease(text!, version, new Date(await $.clock.now()).toISOString().slice(0, 10), webOf(remote.stdout))
+  // The notes of merged work not in the CHANGELOG yet go under [Unreleased] first, so they are released too.
+  const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
+  const merged = withNotes(text, mergedNotes(items, known).map(task => ({ section: sectionFor(task), note: task.note! })))
+  const cut = cutRelease(merged.text, version, new Date(await $.clock.now()).toISOString().slice(0, 10), webOf(remote.stdout))
   const made = await git($, ['switch', '-c', branch])
   if (made.exitCode !== 0) fail(`could not make branch ${branch}: ${whyNot(made)}`)
   for (const one of manifests) await $.fs.write(await inProject($, one.path), withVersion(one.text, version)!)
@@ -934,7 +939,8 @@ async function ship($: EngineInterface, raw: string | undefined, approved: boole
   const pr = await gh($, ['pr', 'create', '--head', branch, '--title', `Release ${version}`, '--body', cut.notes])
   if (pr.exitCode !== 0) fail(`${branch} is pushed, but gh pr create failed: ${whyNot(pr)}`)
   return (
-    `Opened ${pr.stdout.trim() || 'the release PR'} for ${version}: ${manifests.map(one => one.path).join(' and ')} bumped, CHANGELOG [Unreleased] cut as ${version}; back on ${mainLine}. ` +
+    `Opened ${pr.stdout.trim() || 'the release PR'} for ${version}: ${manifests.map(one => one.path).join(' and ')} bumped, ` +
+    `${merged.added.length ? `${merged.added.length} release note(s) of merged work added and ` : ''}CHANGELOG [Unreleased] cut as ${version}; back on ${mainLine}. ` +
     `Once it has merged, pull ${mainLine} and send ship ${version} again; it tags and publishes the release when the user says so (approved: true).`
   )
 }
