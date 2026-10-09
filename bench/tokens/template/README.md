@@ -1,0 +1,3 @@
+# textkit
+
+Small string utilities.

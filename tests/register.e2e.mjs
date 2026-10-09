@@ -177,6 +177,39 @@ test('claim starts a task and names its branch; update writes several fields at 
   assert.match(await ok({ action: 'pr', id: 'T1' }), /Fixed:\n- The parser handles comments \(T1\)/)
 })
 
+test('claim on an epic takes it whole: held by the caller, its first ready task claimed, every task in the answer', async () => {
+  await ok({
+    action: 'plan', tree: [
+      { kind: 'epic', title: 'Utils', children: [
+        { ref: 'a', kind: 'task', title: 'Slugify', description: 'Add slugify.', checklist: ['lowercases'] },
+        { ref: 'b', kind: 'task', title: 'Truncate', checklist: ['cuts'], priority: 'p1' },
+        { kind: 'task', title: 'CLI', blocked_by: ['a', 'b'], checklist: ['prints'] },
+      ] },
+    ],
+  })
+  // Another agent holding the epic keeps it.
+  await ok({ action: 'update', id: 'E1', assignee: 'explore:x' })
+  assert.match((await call({ action: 'claim', id: 'E1' })).text, /E1 is held by explore:x/)
+  await ok({ action: 'update', id: 'E1', assignee: '' })
+  const taken = await ok({ action: 'claim', id: 'E1' })
+  // The p1 task goes first; the answer names its branch and shows every open task whole.
+  assert.match(taken, /^E1 is yours \(claude\): its tasks close as you finish them, and it goes to review once they all have\.\nT2 is yours, in progress\.\nWork on branch e1-utils \(E1's/)
+  assert.match(taken, /T1 ○ todo Slugify {2}\(0\/1 checked\)\n {4}Add slugify\.\n {4}\[ \] 1\. lowercases/)
+  assert.match(taken, /T3 ○ todo CLI {2}\(0\/1 checked, waiting on T1, T2\)\n {4}\[ \] 1\. prints/)
+  assert.equal(everything(), 'E1 epic todo - claude; T1 task todo E1 -; T2 task in_progress E1 claude; T3 task todo E1 - | 13 | T1>T3,T2>T3')
+  // Claimed again, it carries on with the task already under way.
+  assert.match(await ok({ action: 'claim', id: 'E1' }), /\nT2 is yours, in progress\./)
+  // Done ticks its entries and goes straight on to the next ready task; the blocked one comes last.
+  assert.match((await call({ action: 'update', id: 'T2', status: 'done', items: [1], note: 'x' })).text, /Next in E1: T1 is yours \(claude\), in progress\./)
+  assert.match((await call({ action: 'update', id: 'T1', status: 'done', items: [9], note: 'x' })).text, /T1 has no checklist entry 9/)
+  assert.match((await call({ action: 'update', id: 'T1', items: [1] })).text, /items goes with status done/)
+  assert.match(await ok({ action: 'update', id: 'T1', status: 'done', items: [1], note: 'y' }), /Next in E1: T3 is yours/)
+  const last = await ok({ action: 'update', id: 'T3', status: 'done', items: [1], note: '-' })
+  assert.match(last, /that was the last task in E1, which now waits on the user's review\. Open its pull request, if it has none: push branch e1-utils/)
+  assert.equal(query("SELECT group_concat(item_id || n || done, ' ') FROM checks;"), 'T111 T211 T311')
+  assert.equal(everything().split(' | ')[0], 'E1 epic todo - claude; T1 task done E1 claude; T2 task done E1 claude; T3 task done E1 claude')
+})
+
 test('batch: every op lands in one transaction, refs naming new items; one failing op writes nothing', async () => {
   await ok({ action: 'add', kind: 'epic', title: 'E' })
   const reply = await ok({ action: 'batch', ops: [

@@ -84,6 +84,7 @@ T27 Official 1.0.0 release…                                                   
 What Claude does with it:
 
 - Gets a short brief at the start of each session (open milestones, its own tasks, anything blocked, and your recent changes), plus a reminder if it has been working without updating its tasks.
+- Works through a handed epic or milestone in as few calls as it can: `claim E7` takes the whole unit and starts its first ready task, with every task's description and checklist in the answer. Setting a task done ticks its checklist and takes its release note in the same call, then starts the next ready task. On a small three-task epic that comes to four tracker calls, at about 1.2× the cost of the same work without the mod (`bench/tokens`).
 - Claims a task before starting it. A claim is refused if someone else holds the task or the task is still waiting on unfinished work, so parallel agents don't collide. A claim is a lease: the holder's activity keeps it alive, and once an agent has been silent for 30 minutes its claim goes stale (`⌛stale` on the card). Another agent can then take it over, and the takeover is logged. Subagents show up by name, such as `explore:find-auth-handlers`.
 - Can't mark a task done until every item on its checklist is checked, and its done goes to Review for you to approve.
 - Leaves a handoff note when it lets a task go (`release` with a note). The next agent to claim the task gets the note first, along with the task's description, checklist, recent activity and linked commits, so it can pick up where the last one stopped.
@@ -114,6 +115,8 @@ claude plugin test .                   # unit and UI tests (hooks/*.test.ts)
 node --test tests/sql.integration.mjs  # the generated SQL against a real sqlite3
 node --test tests/register.e2e.mjs     # the roadmap tool end to end (hooks/register.tsx) against a real sqlite3
 ```
+
+`node bench/tokens/run.mjs` measures what the mod costs an agent. It runs the same small epic headless with this checkout loaded and without the mod, 3 runs each, and tabulates turns, tool calls, tokens and cost. These are real runs, billed to your own account (about $1.50).
 
 CI runs all four on every push to `main` and on pull requests (`.github/workflows/test.yml`).
 

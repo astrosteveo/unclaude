@@ -182,7 +182,7 @@ test('the tool description fits the 2048 characters the model reads; each action
   on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
   await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
   expect(spec!.description.length).toBeLessThanOrEqual(2048)
-  for (const rule of ['claim a task before you start it', 'handoff note', 'blocked with a comment', 'approved: true', 'open its PR'])
+  for (const rule of ['claim it', 'Claim any task before you start it', 'status done with items', 'handoff note', 'blocked with a comment', 'approved: true', 'PR step'])
     expect(spec!.description).toContain(rule)
   const actions = spec!.inputSchema.properties.action.description
   for (const action of ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'])
@@ -326,6 +326,21 @@ test('a checklist shows in the outline and the detail', async () => {
   const list = [item('T1', { checklist: [{ n: 1, text: 'tests pass', done: true }, { n: 2, text: 'docs', done: false }] })]
   expect(outline(list)).toBe('T1 ○ todo T1 title  (1/2 checked)')
   expect(detail({ items: list, activity: [], seen: {} }, list[0]!)).toContain('Checklist:\n  [x] 1. tests pass\n  [ ] 2. docs')
+})
+
+test('show on an epic carries each open task whole, and a done one as a line', async () => {
+  const unit = [
+    item('E1'),
+    item('T1', { parent: 'E1', status: 'done', description: 'gone', checklist: [{ n: 1, text: 'old', done: true }] }),
+    item('T2', { parent: 'E1', description: 'Add slugify.', checklist: [{ n: 1, text: 'lowercases', done: false }] }),
+    item('T3', { parent: 'E1', blocked_by: ['T2'], checklist: [{ n: 1, text: 'cli', done: false }] }),
+  ]
+  const text = detail({ items: unit, activity: [], seen: {} }, unit[0]!)
+  expect(text).toContain(
+    'T1 ● done T1 title  (1/1 checked)\nT2 ○ todo T2 title  (0/1 checked)\n    Add slugify.\n    [ ] 1. lowercases\n' +
+      'T3 ○ todo T3 title  (0/1 checked, waiting on T2)\n    [ ] 1. cli',
+  )
+  expect(text).not.toContain('gone')
 })
 
 test("the band shows the agents' current task, and pressing it opens that task on the board", async ($, on) => {
@@ -1100,7 +1115,8 @@ test('review at the level handed over: tasks in a handed epic close as they go; 
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   const inScope = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
-  expect(inScope).toContain('closed as part of E1')
+  // Nothing else in E1 to start, so the answer stops at the close.
+  expect(inScope).toContain('T2: status in_progress → done; no release note needed; nothing else in E1 is ready')
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='T2'"))).toBe(true)
   expect(String((await call({ action: 'update', id: 'T3', status: 'done', note: '-' })).result)).toContain("waiting on the user's approval")
   expect((await call({ action: 'update', id: 'E1', status: 'done' })).deny).toContain('closes when its tasks are done')
@@ -1723,7 +1739,7 @@ test('backups: on start, a JSON export outside the checkout when the roadmap cha
 })
 
 test('release notes: an agent sets a task done with its note; the PR body lists the notes by section', async ($, on) => {
-  const some = [item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', type: 'bug', status: 'in_progress' }), item('T2', { parent: 'E1' })]
+  const some = [item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', type: 'bug', status: 'in_progress' }), item('T2', { parent: 'E1', assignee: 'explore:x' })]
   const scripts: string[] = []
   on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -1739,7 +1755,7 @@ test('release notes: an agent sets a task done with its note; the PR body lists 
   expect(scripts.some(one => one.startsWith('BEGIN'))).toBe(false)
   expect(await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'nope' })).toContain('section must be one of Added, Changed, Fixed')
   const done = await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'fixed' })
-  expect(done).toContain('release note: Cards no longer flicker')
+  expect(done).toContain('release note set')
   expect(done).toContain('section → Fixed')
   expect(scripts.some(one => one.startsWith('BEGIN') && one.includes("note='Cards no longer flicker'"))).toBe(true)
   // "none" or "-": the work needs no line.
