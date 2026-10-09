@@ -13,5 +13,6 @@
     "planning",
     "agents",
     "jira"
-  ]
+  ],
+  "license": "MIT"
 }
