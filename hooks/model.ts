@@ -854,3 +854,48 @@ export function withNotes(text: string | undefined, notes: { section: Section; n
   }
   return { text: lines.join('\n'), added: fresh.map(one => one.note) }
 }
+
+/** A version as `[major, minor, patch]`, from `1.2.3` or `v1.2.3`; undefined when it is not one. */
+export function versionOf(text: string | undefined): [number, number, number] | undefined {
+  const found = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(text?.trim() ?? '')
+  return found ? [Number(found[1]), Number(found[2]), Number(found[3])] : undefined
+}
+
+/** Whether version `a` comes after `b`. */
+export const isAfter = (a: [number, number, number], b: [number, number, number]) => (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0
+
+/** A manifest's text (plugin.json, package.json) with its version set, the rest as it was; undefined when it has none. */
+export function withVersion(text: string, version: string): string | undefined {
+  const pattern = /("version"\s*:\s*")([^"]*)(")/
+  return pattern.test(text) ? text.replace(pattern, `$1${version}$3`) : undefined
+}
+
+/** The repository's web address from a git remote (`git@github.com:o/r.git`, `https://github.com/o/r.git`). */
+export const webOf = (remote: string) =>
+  remote.trim().replace(/^git@([^:]+):/, 'https://$1/').replace(/\.git$/, '').replace(/\/+$/, '')
+
+/**
+ * A CHANGELOG with its [Unreleased] section cut as `version`, dated `date`, under a fresh empty
+ * [Unreleased], and its links pointing [Unreleased] at what comes after the version's tag. Answers the
+ * text and the version's notes (what [Unreleased] held), or throws when there is nothing to release.
+ */
+export function cutRelease(text: string, version: string, date: string, web: string): { text: string; notes: string } {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const start = lines.findIndex(line => /^## \[?unreleased\]?/i.test(line))
+  if (start < 0) throw new Error('the CHANGELOG has no [Unreleased] section to release')
+  const next = lines.findIndex((line, i) => i > start && line.startsWith('## '))
+  const links = lines.findIndex((line, i) => i > start && /^\[[^\]]+\]: \S/.test(line))
+  const end = next >= 0 ? next : links >= 0 ? links : lines.length
+  const notes = lines.slice(start + 1, end).join('\n').trim()
+  if (!notes) throw new Error('nothing is under [Unreleased] in the CHANGELOG; there is nothing to release')
+  lines.splice(start, 1, '## [Unreleased]', '', `## [${version}] - ${date}`)
+  // The links: [Unreleased] now compares against this version's tag, which gets one of its own.
+  const ours = [`[Unreleased]: ${web}/compare/v${version}...HEAD`, `[${version}]: ${web}/releases/tag/v${version}`]
+  const old = lines.findIndex(line => /^\[unreleased\]: /i.test(line))
+  if (old >= 0) lines.splice(old, 1, ...ours)
+  else {
+    while (lines.length && lines.at(-1)!.trim() === '') lines.pop()
+    lines.push('', ...ours, '')
+  }
+  return { text: lines.join('\n'), notes }
+}

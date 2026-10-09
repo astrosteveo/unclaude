@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, askAbout, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, askAbout, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -327,7 +327,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship'
   id?: string
   ids?: string[] | string
   ref?: string
@@ -359,6 +359,7 @@ type Input = {
   path?: string
   note?: string
   section?: string
+  version?: string
 }
 
 const fail = (message: string): never => {
@@ -685,6 +686,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       await $.fs.write(file, out.text.replace(/\n*$/, '\n'))
       return `Wrote ${out.added.length} note(s) into ${path} under [Unreleased]:\n${out.added.map(one => `- ${one}`).join('\n')}`
     }
+    case 'ship':
+      return ship($, a.version, a.approved === true && !isSubagent)
     case 'remove': {
       const it = need()
       const ids = subtree(snap.items, it.id)
@@ -733,6 +736,78 @@ async function undo($: EngineInterface, actor: string, ids: number[], t: Target 
   return `Undid ${[...found].sort((a, b) => a.id - b.id).map(one => `${one.item_id}: ${one.body}`).join('; ')}`
 }
 
+// The manifests whose version a release sets, those the project has.
+const MANIFESTS = ['.claude-plugin/plugin.json', 'package.json']
+
+/** Runs git in the project; one that cannot start answers as a failure. */
+const git = async ($: EngineInterface, args: string[]): Promise<Ran> =>
+  runAt($, ['git', ...args], { timeoutMs: 60_000 }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }))
+
+/**
+ * Ships a version, in two steps. While the project is before `version`: bumps its manifests, cuts the
+ * CHANGELOG's [Unreleased] as that version, commits that on a branch of its own and opens its PR. Once
+ * that PR has merged (the manifests now read `version`) and the user has said so (`approved`): tags the
+ * merge and publishes a GitHub release from the version's notes. Refuses a version that isn't higher,
+ * and a first 1.0 without the user's say.
+ */
+async function ship($: EngineInterface, raw: string | undefined, approved: boolean): Promise<string> {
+  const wanted = versionOf(raw) ?? fail('version is required, as 1.2.3')
+  const version = wanted.join('.')
+  const read = async (path: string) => $.fs.read(await inProject($, path)).then(String, () => undefined)
+  const manifests = (await Promise.all(MANIFESTS.map(async path => ({ path, text: await read(path) }))))
+    .filter((one): one is { path: string; text: string } => one.text !== undefined && withVersion(one.text, version) !== undefined)
+  if (manifests.length === 0) fail(`no manifest with a version here (${MANIFESTS.join(', ')})`)
+  const current = versionOf((/"version"\s*:\s*"([^"]*)"/.exec(manifests[0]!.text) ?? [])[1]) ?? fail(`${manifests[0]!.path} has no version like 1.2.3`)
+  const branch = `release-v${version}`
+  const tag = `v${version}`
+  const text = await read('CHANGELOG.md')
+
+  if (current.join('.') === version) {
+    // The bump is in: its PR merged. Tagging and publishing are the user's to say.
+    if ((await git($, ['rev-parse', '-q', '--verify', `refs/tags/${tag}`])).exitCode === 0) fail(`${tag} is already tagged; ${version} is out`)
+    const pr = await gh($, ['pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number,mergeCommit', '--limit', '1'], 30_000)
+    const merged = pr.exitCode === 0 ? (JSON.parse(pr.stdout || '[]') as { number: number; mergeCommit?: { oid?: string } }[])[0] : undefined
+    if (!merged?.mergeCommit?.oid) fail(`no merged PR from ${branch} yet: merge the release PR first`)
+    if (!approved)
+      fail(`PR #${merged!.number} for ${version} has merged. Tagging ${tag} and publishing the release is the user's call: ask them, and when they say so, send ship again with approved: true.`)
+    const notes = (text ?? '').split('\n')
+    const at = notes.findIndex(line => line.startsWith(`## [${version}]`))
+    const next = notes.findIndex((line, i) => i > at && (line.startsWith('## ') || /^\[[^\]]+\]: \S/.test(line)))
+    const body = at < 0 ? '' : notes.slice(at + 1, next < 0 ? undefined : next).join('\n').trim()
+    await git($, ['fetch', 'origin'])
+    const tagged = await git($, ['tag', '-a', tag, '-m', tag, merged!.mergeCommit!.oid!])
+    if (tagged.exitCode !== 0) fail(`git tag failed: ${whyNot(tagged)}`)
+    const pushed = await git($, ['push', 'origin', tag])
+    if (pushed.exitCode !== 0) fail(`pushing ${tag} failed: ${whyNot(pushed)}`)
+    const out = await gh($, ['release', 'create', tag, '--title', tag, '--verify-tag', '--notes', body || `Release ${version}.`])
+    if (out.exitCode !== 0) fail(`${tag} is tagged and pushed, but gh release create failed: ${whyNot(out)}`)
+    return `Released ${version}: tagged ${tag} on PR #${merged!.number}'s merge and published ${out.stdout.trim() || 'the GitHub release'}.`
+  }
+
+  if (!isAfter(wanted, current)) fail(`${version} isn't after ${current.join('.')}, the version now`)
+  if (wanted[0] >= 1 && current[0] < 1 && !approved)
+    fail(`${version} would be the first 1.x: the major version stays at 0 until the user says otherwise. Ask them; send approved: true once they have.`)
+  if (text === undefined) fail('no CHANGELOG.md to cut the release from')
+  const remote = await git($, ['remote', 'get-url', 'origin'])
+  if (remote.exitCode !== 0) fail('no git remote "origin" to open the release PR on')
+  if ((await git($, ['status', '--porcelain'])).stdout.trim()) fail('the working tree has changes; commit or stash them first')
+  const cut = cutRelease(text!, version, new Date(await $.clock.now()).toISOString().slice(0, 10), webOf(remote.stdout))
+  const made = await git($, ['switch', '-c', branch])
+  if (made.exitCode !== 0) fail(`could not make branch ${branch}: ${whyNot(made)}`)
+  for (const one of manifests) await $.fs.write(await inProject($, one.path), withVersion(one.text, version)!)
+  await $.fs.write(await inProject($, 'CHANGELOG.md'), cut.text)
+  const committed = await git($, ['commit', '-am', `Release ${version}`])
+  if (committed.exitCode !== 0) fail(`git commit failed: ${whyNot(committed)}`)
+  const pushed = await git($, ['push', '-u', 'origin', branch])
+  if (pushed.exitCode !== 0) fail(`pushing ${branch} failed: ${whyNot(pushed)}`)
+  const pr = await gh($, ['pr', 'create', '--head', branch, '--title', `Release ${version}`, '--body', cut.notes])
+  if (pr.exitCode !== 0) fail(`${branch} is pushed, but gh pr create failed: ${whyNot(pr)}`)
+  return (
+    `Opened ${pr.stdout.trim() || 'the release PR'} for ${version}: ${manifests.map(one => one.path).join(' and ')} bumped, CHANGELOG [Unreleased] cut as ${version}. ` +
+    `Once it has merged, pull main and send ship ${version} again; it tags and publishes the release when the user says so (approved: true).`
+  )
+}
+
 /** A release note and section as sent: `-` or `none` for no line needed, empty to clear; the section checked. */
 function noteOf(a: Input): { note?: string | null; section?: Section | null } {
   const note = a.note === undefined ? undefined : ['-', 'none'].includes(a.note.trim().toLowerCase()) ? db.NO_NOTE : a.note.trim() || null
@@ -774,6 +849,9 @@ async function runBatch($: EngineInterface, actor: string, raw: Input[], isSubag
     op.ids === undefined ? [op] : idList(op.ids).map(id => ({ ...op, ids: undefined, id })))
   if (ops.length === 0) fail('ids names no items')
   if (ops.some(op => op.action === 'batch' || op.ops !== undefined)) fail('a batch cannot hold another batch')
+  // What writes files or talks to git and GitHub can't be tried on a copy and taken back.
+  const outside = ops.find(op => ['export', 'import', 'changelog', 'ship'].includes(op.action))
+  if (outside) fail(`${outside.action} can't go in a batch; send it on its own`)
   await sql($, db.STAMP) // the database, made and brought to this schema version if need be
   const now = await $.clock.now().catch(() => 0)
   const copy: Target = { path: `${db.DB}-batch-${now}-${Math.random().toString(36).slice(2, 8)}`, writes: [] }
@@ -1190,7 +1268,7 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship'],
             description: [
               'show: the whole tree, or one item (id) with its activity and linked commits and PRs.',
               'next: your open tasks, then unassigned ones by priority and due date.',
@@ -1208,6 +1286,8 @@ export const register: Register = on => {
               'export: path (default .claude/roadmap-export-<date>.json): the whole roadmap as JSON.',
               'import: path: restores an export into an empty roadmap. The mod also backs up to ~/.claude/roadmap-backups on its own.',
               'changelog: writes the release notes of merged work into CHANGELOG.md under [Unreleased] (path for another file).',
+              'ship: version; bumps the manifests, cuts CHANGELOG [Unreleased] as that version and opens its PR; once merged, again with approved',
+              '(the user said so) tags it and publishes the GitHub release. Only when the user asks for a release.',
             ].join(' '),
           },
           id: { type: 'string', description: 'Item id, e.g. T12' },
@@ -1259,6 +1339,7 @@ export const register: Register = on => {
             type: 'string',
             description: "A task's release note (add/update): one line for the CHANGELOG, saying what changed for whoever uses the project; \"-\" when none is needed. The pr body and changelog are written from it.",
           },
+          version: { type: 'string', description: 'ship: the version to release, as 1.2.3' },
           section: { type: 'string', enum: SECTIONS, description: "The CHANGELOG section of the task's note; by default Fixed for a bug, Changed for a chore, else Added" },
         },
         required: ['action'],

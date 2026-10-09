@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, commentNote, stackFrom, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, commentNote, cutRelease, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -2056,4 +2056,80 @@ test('mark all read: the button by the unread count reads everything; a comment 
   expect(await ui.find({ type: 'Text', text: /● 1 unread/ })).toBeDefined()
   expect((await ui.find({ key: 'card-T2' }))?.text).toContain('● 1')
   await ui.unmount()
+})
+
+test('ship: versions compare, manifests bump in place, and [Unreleased] is cut with its links', async () => {
+  expect(versionOf('v0.4.0')).toEqual([0, 4, 0])
+  expect(versionOf('1.2')).toBeUndefined()
+  expect(isAfter([0, 5, 0], [0, 4, 9])).toBe(true)
+  expect(isAfter([0, 4, 0], [0, 4, 0])).toBe(false)
+  expect(isAfter([0, 3, 9], [0, 4, 0])).toBe(false)
+  expect(withVersion('{\n  "name": "x",\n  "version": "0.4.0",\n  "deps": { "version": "9" }\n}\n', '0.5.0')).toBe('{\n  "name": "x",\n  "version": "0.5.0",\n  "deps": { "version": "9" }\n}\n')
+  expect(withVersion('{}', '1.0.0')).toBeUndefined()
+  expect(webOf('git@github.com:astrosteveo/unclaude.git\n')).toBe('https://github.com/astrosteveo/unclaude')
+  expect(webOf('https://github.com/astrosteveo/unclaude.git')).toBe('https://github.com/astrosteveo/unclaude')
+  const log = '# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n'
+  const cut = cutRelease(log, '0.5.0', '2026-10-10', 'https://github.com/o/r')
+  expect(cut.notes).toBe('### Added\n\n- Undo.')
+  expect(cut.text).toBe('# Changelog\n\nIntro.\n\n## [Unreleased]\n\n## [0.5.0] - 2026-10-10\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/compare/v0.5.0...HEAD\n[0.5.0]: https://github.com/o/r/releases/tag/v0.5.0\n')
+  expect(() => cutRelease(cut.text, '0.6.0', '2026-10-11', 'https://github.com/o/r')).toThrow('nothing is under [Unreleased]')
+  // No links yet: they go at the end.
+  expect(cutRelease('# C\n\n## [Unreleased]\n\n- x\n', '0.1.0', 'd', 'https://w').text).toBe('# C\n\n## [Unreleased]\n\n## [0.1.0] - d\n\n- x\n\n[Unreleased]: https://w/compare/v0.1.0...HEAD\n[0.1.0]: https://w/releases/tag/v0.1.0\n')
+})
+
+test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or a dirty tree; tagging waits on the user', async ($, on) => {
+  const files: Record<string, string> = {
+    '/p/.claude-plugin/plugin.json': '{\n  "name": "roadmap",\n  "version": "0.4.0"\n}\n',
+    '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n',
+  }
+  const ran: string[] = []
+  let dirty = ''
+  let mergedPr = '[]'
+  on('process.run', ($, e) => {
+    const line = e.argv.join(' ')
+    if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
+      ran.push(line)
+      const stdout = line === 'git remote get-url origin' ? 'git@github.com:o/r.git\n' : line === 'git status --porcelain' ? dirty
+        : line.startsWith('gh pr create') ? 'https://github.com/o/r/pull/30\n' : line.startsWith('gh pr list --head') ? mergedPr
+        : line.startsWith('gh release create') ? 'https://github.com/o/r/releases/tag/v0.5.0\n' : ''
+      const exitCode = line.startsWith('git rev-parse -q --verify') ? 1 : 0
+      return { value: { ...fakeSqlite('', null), stdout, exitCode } }
+    }
+    return { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('session.root', () => ({ value: '/p' }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T09:00:00Z') }) as never)
+  on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: 'ENOENT' } : { value: files[e.path] }) as never)
+  on('fs.write', ($, e) => ((files[e.path] = e.text), { value: undefined }) as never)
+  const ship = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  expect(await ship({ version: '0.3.0' })).toBe("0.3.0 isn't after 0.4.0, the version now")
+  expect(await ship({ version: '1.0.0' })).toContain('would be the first 1.x')
+  dirty = ' M x\n'
+  expect(await ship({ version: '0.5.0' })).toBe('the working tree has changes; commit or stash them first')
+  dirty = ''
+  ran.length = 0
+  expect(await ship({ version: '0.5.0' })).toContain('Opened https://github.com/o/r/pull/30 for 0.5.0: .claude-plugin/plugin.json bumped')
+  expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state'))).toEqual([
+    'git remote get-url origin', 'git status --porcelain', 'git switch -c release-v0.5.0', 'git commit -am Release 0.5.0',
+    'git push -u origin release-v0.5.0', 'gh pr create --head release-v0.5.0 --title Release 0.5.0 --body ### Added\n\n- Undo.',
+  ])
+  expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.5.0"')
+  expect(files['/p/CHANGELOG.md']).toContain('## [Unreleased]\n\n## [0.5.0] - 2026-10-10\n\n### Added')
+  // After the merge (the manifest reads 0.5.0): no merged PR yet is said; then tagging waits on the user's say.
+  expect(await ship({ version: '0.5.0' })).toBe('no merged PR from release-v0.5.0 yet: merge the release PR first')
+  mergedPr = JSON.stringify([{ number: 30, mergeCommit: { oid: 'abc123' } }])
+  expect(await ship({ version: '0.5.0' })).toContain("Tagging v0.5.0 and publishing the release is the user's call")
+  expect(ran.some(one => one.startsWith('git tag'))).toBe(false)
+  ran.length = 0
+  expect(await ship({ version: '0.5.0', approved: true })).toBe("Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0.")
+  expect(ran).toContain('git tag -a v0.5.0 -m v0.5.0 abc123')
+  expect(ran).toContain('git push origin v0.5.0')
+  expect(ran).toContain('gh release create v0.5.0 --title v0.5.0 --verify-tag --notes ### Added\n\n- Undo.')
+  // A subagent's approval doesn't count.
+  ran.length = 0
+  expect(await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', version: '0.5.0', approved: true, agentId: 'a1' } as never).then(r => String(r.result ?? r.deny))).toContain("the user's call")
 })
