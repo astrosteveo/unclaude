@@ -1,9 +1,9 @@
 import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-code'
 
-import type { Draft, Item, Priority, Refs, Snapshot, Status, View } from '../types'
+import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, openPrOf, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -12,6 +12,9 @@ export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yello
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
 const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog']]
+// A pull request's checks, as marked next to it.
+const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
+const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
 export const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', review: 'r', done: 'd' }
 
 /** What the pane draws from, read by the hooks module. */
@@ -33,6 +36,8 @@ export type PaneState = {
   isEditing: boolean
   /** The item waiting on a yes before it is handed to Claude. */
   handing: string | null
+  /** The item waiting on a yes before it is approved and its pull request merged. */
+  merging: string | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -47,6 +52,10 @@ export type PaneActions = {
   open: (id: string | null) => void
   closeDetail: (id: string) => void
   userAct: (a: { action: string; [field: string]: unknown }) => void
+  /** Asks to confirm approving an item and merging its pull request (null drops the question). */
+  askMerge: (id: string | null) => void
+  /** Approves an item in review, merging `pr` first when given. */
+  approve: (item: Item, pr?: Pr) => void
   /** Asks to confirm handing an item to Claude (null drops the question). */
   askHand: (id: string | null) => void
   handToClaude: (item: Item) => void
@@ -96,7 +105,7 @@ export function drawPane(
   const { Box, Text, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -155,15 +164,18 @@ export function drawPane(
 
   const unreadTotal = items.reduce((sum, item) => sum + unread(snap, item.id, USER).length, 0)
   const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
+  const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done').length
+  const taskCount = items.filter(i => i.kind === 'task').length
   const header = (
-    <Box flexDirection="row" gap={1}>
+    // Wraps rather than squeezing its counts into columns when the filter and buttons crowd it.
+    <Box flexDirection="row" columnGap={1} flexWrap="wrap">
       {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
       {VIEWS.map(([one, label]) => (
         <Button key={`tab-${one}`} label={label} variant={mode === one ? 'primary' : 'secondary'}
           hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)} />
       ))}
       <Text dimColor>
-        {items.filter(i => i.kind === 'task' && i.status === 'done').length}/{items.filter(i => i.kind === 'task').length} tasks done
+        {doneCount}/{taskCount} tasks done
       </Text>
       {unreadTotal > 0 && (
         <Text color="magenta" bold>
@@ -391,10 +403,11 @@ export function drawPane(
       ...links.duplicateOf.map(id => linkRow('dup', 'duplicate of', id)),
       ...links.duplicatedBy.map(id => linkRow('dupby', 'duplicated by', id)),
       ...links.relates.map(id => linkRow('rel', 'relates to', id)),
-      ...linked.prs.slice(0, 3).map(pr => ({ key: `pr-${pr.number}`, rows: tall(`PR #${pr.number} [${pr.state}] ${pr.title}`), node: (
+      ...linked.prs.slice(0, 3).map(pr => ({ key: `pr-${pr.number}`, rows: tall(`PR #${pr.number} [${pr.state}] ${CHECKS[pr.checks]} ${pr.title}`), node: (
         <Text key={`pr-${pr.number}`}>
           <Text dimColor>PR </Text>#{pr.number}{' '}
-          <Text color={pr.state === 'merged' ? 'magenta' : pr.state === 'open' ? 'green' : undefined}>[{pr.state}]</Text> {pr.title}
+          <Text color={pr.state === 'merged' ? 'magenta' : pr.state === 'open' ? 'green' : undefined}>[{pr.state}]</Text>
+          {pr.state === 'open' && <Text color={CHECKS_COLOR[pr.checks]}> {CHECKS[pr.checks]}</Text>} {pr.title}
         </Text>
       ) })),
       ...linked.commits.slice(0, 4).map(c => ({ key: `commit-${c.hash}`, rows: tall(`commit ${c.hash} ${c.subject}`), node: (
@@ -448,23 +461,35 @@ export function drawPane(
   const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 : 0)
   // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
   // The bar's two rows of buttons, as they wrap at this width ("[ label ]", one column apart).
-  const buttonRows = (labels: string[]) => {
+  // How many rows pieces of these widths take, laid one column apart and wrapped at `room`.
+  const flowRows = (widths: number[], room: number) => {
     let lines = 1
     let used = 0
-    for (const label of labels) {
-      const w = label.length + 4
-      if (used > 0 && used + 1 + w > inner) (lines++, (used = w))
+    for (const w of widths) {
+      if (used > 0 && used + 1 + w > room) (lines++, (used = w))
       else used += (used > 0 ? 1 : 0) + w
     }
     return lines
   }
+  // A row of buttons, each drawn as "[ label ]".
+  const buttonRows = (labels: string[]) => flowRows(labels.map(label => label.length + 4), inner)
+  // The header as it wraps over the whole pane, when it shows above an open card.
+  const headerRows = flowRows([
+    ...VIEWS.map(([, label]) => label.length + 4),
+    `${doneCount}/${taskCount} tasks done`.length,
+    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length] : []),
+    ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
+    ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
+  ], width)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
+  // The pull request the item under review ships in, which Approve can merge.
+  const reviewPr = isReview && item ? openPrOf(known, item) : undefined
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(status !== 'done' ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(status !== 'done' ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
@@ -476,7 +501,7 @@ export function drawPane(
     .join(' · ')
   // The footer is as wide as the pane, not the panel inside it.
   const footerRows = Math.max(1, Math.ceil(footer.length / Math.max(1, width)))
-  const fixed = (isCompact ? 0 : 1) + 2 + titleRows + barRows + (isCompact ? 0 : tall(info)) + footerRows + 1
+  const fixed = (isCompact ? 0 : headerRows) + 2 + titleRows + barRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   const total = sections.reduce((sum, row) => sum + row.rows, 0)
   const isScrolling = space < total
@@ -536,6 +561,15 @@ export function drawPane(
         )}
         {handing === item.id ? (
           confirmHand(item)
+        ) : merging === item.id && reviewPr ? (
+          <Box key="merge-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
+            <Text color={reviewPr.checks === 'fail' ? 'red' : 'yellow'}>
+              Merge PR #{reviewPr.number}{reviewPr.checks === 'pass' ? '' : ` (checks: ${reviewPr.checks})`}?
+            </Text>
+            <Button key="merge-yes" label="Approve and merge" onPress={() => act.approve(item, reviewPr)} />
+            <Button key="merge-no" label="Approve only" onPress={() => act.approve(item)} />
+            <Button key="merge-cancel" label="Cancel" onPress={() => act.askMerge(null)} />
+          </Box>
         ) : isRequesting && Input ? (
           <Box key="changes-row" flexDirection="row" gap={1}>
             <Input key="changes" label="Changes" placeholder="What needs changing? Enter sends it back" autoFocus
@@ -545,8 +579,8 @@ export function drawPane(
         ) : (
         <Box key="action-row" flexDirection="row" columnGap={1} flexWrap="wrap">
           {isReview && (
-            <Button key="approve" label="Approve" hotkey="a" variant="primary"
-              onPress={() => act.userAct({ action: 'update', id: item.id, status: 'done' })} />
+            <Button key="approve" label={reviewPr ? `Approve…` : 'Approve'} hotkey="a" variant="primary"
+              onPress={() => (reviewPr ? act.askMerge(item.id) : act.approve(item))} />
           )}
           {isReview && Input && (
             <Button key="request" label="Request changes" hotkey="c"

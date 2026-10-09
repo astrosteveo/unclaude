@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Draft, IssueType, Item, Kind, PlanNode, Priority, Query, Refs, Snapshot, Status, View } from '../types'
+import type { Draft, IssueType, Item, Kind, Pr, PlanNode, Priority, Query, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, brief, handedScope, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, brief, handedScope, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -32,6 +32,8 @@ const draft = atom({ plugin: 'roadmap', key: 'draft' } as const, null as Draft |
 const editing = atom({ plugin: 'roadmap', key: 'editing' } as const, false)
 // The item waiting on a yes before it is handed to Claude.
 const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as string | null)
+// The item waiting on a yes before it is approved and its pull request merged.
+const merging = atom({ plugin: 'roadmap', key: 'merging' } as const, null as string | null)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -65,7 +67,7 @@ async function refreshRefs($: EngineInterface, isForced = false) {
   if (isForced || now - ghAskedAt > GH_EVERY) {
     ghAskedAt = now
     const ran = await $.process
-      .run(['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,state,url'], { timeoutMs: 15_000 })
+      .run(['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
       .catch(() => undefined)
     try {
       prs = ran && ran.exitCode === 0 ? parsePrs(ran.stdout) : []
@@ -597,6 +599,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, requesting, () => false)
   await update($, editing, () => false)
   await update($, handing, () => null)
+  await update($, merging, () => null)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -619,12 +622,40 @@ async function showItem($: EngineInterface, id: string) {
   await open($, id)
 }
 
+/**
+ * Approves an item in review; with `pr`, merges that pull request first, and approves only once it is
+ * merged. Runs only from the person's press on the board.
+ */
+async function approve($: EngineInterface, item: Item, pr?: Pr) {
+  await update($, merging, () => null)
+  if (pr) {
+    const ran = await $.process.run(['gh', 'pr', 'merge', String(pr.number), '--merge'], { timeoutMs: 60_000 }).catch(
+      (err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }),
+    )
+    if (ran.exitCode !== 0) {
+      $.ui.toast(`roadmap: PR #${pr.number} was not merged, so ${item.id} stays in review: ${ran.stderr.trim() || `exit ${ran.exitCode}`}`)
+      await focusOn($, 'close')
+      return
+    }
+    await userAct($, { action: 'comment', id: item.id, body: `Approved; merged PR #${pr.number}.` })
+    await refreshRefs($, true).catch(() => undefined)
+  }
+  await userAct($, { action: 'update', id: item.id, status: 'done' })
+  await focusOn($, 'close')
+}
+
 /** Sends a task back from review with what needs changing, and puts its agent back on it. */
 async function requestChanges($: EngineInterface, item: Item, what: string) {
   const body = what.trim()
   if (!body) return
   await update($, requesting, () => false)
   await userAct($, { action: 'comment', id: item.id, body: `Changes requested: ${body}` })
+  // The same note on its pull request, where the code is.
+  const pr = openPrOf(await read($, refs), item)
+  if (pr) {
+    const ran = await $.process.run(['gh', 'pr', 'comment', String(pr.number), '--body', `Changes requested: ${body}`], { timeoutMs: 30_000 }).catch(() => undefined)
+    if (!ran || ran.exitCode !== 0) $.ui.toast(`roadmap: couldn't post the note on PR #${pr.number}; it is on ${item.id}`)
+  }
   await userAct($, { action: 'update', id: item.id, status: 'in_progress' })
   await focusOn($, 'close')
   if (item.assignee && item.assignee !== USER)
@@ -874,6 +905,7 @@ export const register: Register = on => {
       draft: await read($, draft),
       isEditing: await read($, editing),
       handing: await read($, handing),
+      merging: await read($, merging),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
@@ -885,6 +917,8 @@ export const register: Register = on => {
       userAct: a => void userAct($, a as Input),
       // The question opens on Cancel: only a deliberate move to Yes hands the item over.
       askHand: id => void update($, handing, () => id).then(() => focusOn($, id ? 'hand-cancel' : pick ? 'close' : 'tab-board')),
+      askMerge: id => void update($, merging, () => id).then(() => focusOn($, id ? 'merge-cancel' : 'close')),
+      approve: (item, pr) => void approve($, item, pr),
       handToClaude: item => void update($, handing, () => null).then(() => handToClaude($, item)),
       requestChanges: (item, what) => void requestChanges($, item, what),
       setView: mode => void update($, view, () => mode),

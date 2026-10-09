@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, branchFor, brief, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -1074,4 +1074,67 @@ test('branch and pull request per unit of work: named from the unit, body from i
   const pr = String((await call({ action: 'pr', id: 'T1' })).result)
   expect(pr).toContain('Branch: e1-agent-coordination')
   expect(pr).toContain('Title: E1: Agent coordination!')
+})
+
+test('review with a pull request: checks on the card; Approve offers to merge; changes go on the PR too', async ($, on) => {
+  expect(checksOf([])).toBe('none')
+  expect(checksOf([{ status: 'COMPLETED', conclusion: 'SUCCESS' }, { state: 'SUCCESS' }])).toBe('pass')
+  expect(checksOf([{ status: 'IN_PROGRESS', conclusion: '' }, { status: 'COMPLETED', conclusion: 'SUCCESS' }])).toBe('pending')
+  expect(checksOf([{ status: 'IN_PROGRESS' }, { status: 'COMPLETED', conclusion: 'FAILURE' }])).toBe('fail')
+
+  const some = [item('E1', { assignee: 'claude', status: 'review' }), item('T1', { parent: 'E1', status: 'done' }), item('T2', { status: 'review', assignee: 'claude' })]
+  const ghList = JSON.stringify([
+    { number: 8, title: 'E1: Things', headRefName: 'e1-things', state: 'OPEN', url: 'https://x/8', statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }] },
+  ])
+  const ran: string[][] = []
+  const scripts: string[] = []
+  let mergeExit = 1
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    if (e.argv[0] === 'gh' && e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
+    if (e.argv[0] === 'gh' && e.argv[2] === 'merge') return { value: { ...fakeSqlite('', null), exitCode: mergeExit, stderr: 'not mergeable' } }
+    if (e.argv[0] === 'gh' || e.argv[0] === 'git') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    scripts.push(e.init?.stdin ?? '')
+    return { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('prompt.submit', ($, e) => ({ text: e.text, origin: e.origin }))
+  // `show` asks git and gh afresh, which is how the board learns of the PR here.
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'E1' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'row-E1' })
+  expect(await ui.find({ type: 'Text', text: /✗ checks failing/ })).toBeDefined()
+  const wrote = (needle: string) => scripts.some(one => one.includes(needle))
+  // A merge that fails leaves it in review.
+  await ui.press({ key: 'approve' })
+  expect(wrote("status='done'")).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /Merge PR #8 \(checks: fail\)\?/ })).toBeDefined()
+  await ui.press({ key: 'merge-yes' })
+  expect(ran.some(argv => argv.join(' ') === 'gh pr merge 8 --merge')).toBe(true)
+  expect(wrote("status='done'")).toBe(false)
+  // Merged: approved, with a note saying so.
+  mergeExit = 0
+  await ui.press({ key: 'approve' })
+  await ui.press({ key: 'merge-yes' })
+  expect(wrote('Approved; merged PR #8.')).toBe(true)
+  expect(wrote("status='done'")).toBe(true)
+  // Approve only never merges.
+  const merges = ran.filter(argv => argv[2] === 'merge').length
+  await ui.press({ key: 'approve' })
+  await ui.press({ key: 'merge-no' })
+  expect(ran.filter(argv => argv[2] === 'merge').length).toBe(merges)
+  // Request changes puts the note on the PR too.
+  await ui.press({ key: 'request' })
+  await ui.input({ key: 'changes', text: 'split the migration' } as never)
+  expect(ran.some(argv => argv.join(' ') === 'gh pr comment 8 --body Changes requested: split the migration')).toBe(true)
+  await ui.unmount()
 })

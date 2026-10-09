@@ -7,6 +7,8 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 ### Added
 
 - Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.
+- Review acts on the pull request. A card shows its PRs with their checks (running, passed or failing). Approving an item whose PR is open asks whether to merge it (`gh pr merge --merge`) or approve only; if the merge fails, the item stays in review. Request changes also posts the note on the PR. Nothing is merged or posted without the person's press.
+- The board's header wraps instead of squeezing its counts when the filter and buttons crowd it.
 - One branch and one pull request per unit of work handed over. `claim` names the branch to work on (the handed epic's or milestone's, or the task's own). When the unit goes to Review, Claude is told to open its PR, and the `pr` action gives its branch, title and body. The session brief lists each item in review with its PR, or notes it has none yet.
 - Commits and pull requests that name an epic or milestone (`E9:`, `M4`, a branch like `e9-agent-coordination`) link to it, as task ids always did. A PR shows on the item it names, on what that item sits in, and on the tasks under it.
 - Review happens at the level of the work handed over. Inside a milestone or epic assigned to an agent, tasks close as the agent finishes them, and the milestone or epic itself reads Review once they're all done, until approved on its card or in chat. A task handed over on its own is reviewed by itself. Milestones and epics finished before this keep reading done.

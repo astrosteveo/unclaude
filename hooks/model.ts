@@ -1,4 +1,4 @@
-import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
+import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
 
 // The person at the board, and the main loop's agent; subagents go by names from agentName.
 export const USER = 'user'
@@ -508,13 +508,32 @@ export function parseGitLog(out: string): Commit[] {
     .filter(commit => commit.ids.length > 0)
 }
 
-/** Pull requests from `gh pr list --json number,title,headRefName,state,url` that name a task id. */
+type CheckEntry = { status?: string; conclusion?: string; state?: string }
+
+/** A rollup of check runs and status contexts as one word: a failure wins, then anything unfinished. */
+export function checksOf(rollup: CheckEntry[] | null | undefined): Checks {
+  const list = rollup ?? []
+  if (list.length === 0) return 'none'
+  const outcome = (one: CheckEntry) => (one.conclusion || one.state || '').toUpperCase()
+  if (list.some(one => ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'].includes(outcome(one)))) return 'fail'
+  if (list.some(one => (one.status && one.status.toUpperCase() !== 'COMPLETED') || ['PENDING', 'EXPECTED', ''].includes(outcome(one)))) return 'pending'
+  return 'pass'
+}
+
+/** Pull requests from `gh pr list --json number,title,headRefName,state,url,statusCheckRollup` that name a roadmap id. */
 export function parsePrs(out: string): Pr[] {
-  const list = JSON.parse(out) as { number: number; title: string; headRefName: string; state: string; url: string }[]
+  const list = JSON.parse(out) as { number: number; title: string; headRefName: string; state: string; url: string; statusCheckRollup?: CheckEntry[] }[]
   return list
-    .map(pr => ({ number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url, ids: idsIn(`${pr.title} ${pr.headRefName}`) }))
+    .map(pr => ({
+      number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
+      ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup),
+    }))
     .filter(pr => pr.ids.length > 0)
 }
+
+/** The open pull request a unit of work ships in: the one naming the unit itself. */
+export const openPrOf = (refs: Refs, item: Item): Pr | undefined =>
+  refs.prs.find(pr => pr.state === 'open' && pr.ids.includes(item.id))
 
 /**
  * The commits and pull requests that name `item` or anything under it; and the pull requests of what
