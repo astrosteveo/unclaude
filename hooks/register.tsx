@@ -791,6 +791,13 @@ async function ship($: EngineInterface, raw: string | undefined, approved: boole
   const remote = await git($, ['remote', 'get-url', 'origin'])
   if (remote.exitCode !== 0) fail('no git remote "origin" to open the release PR on')
   if ((await git($, ['status', '--porcelain'])).stdout.trim()) fail('the working tree has changes; commit or stash them first')
+  // A release is cut from the main line as it stands on origin: never from a feature branch, never stale.
+  const mainLine = (await git($, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).stdout.trim().replace(/^origin\//, '') || 'main'
+  const on = (await git($, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()
+  if (on !== mainLine) fail(`the checkout is on ${on || 'no branch'}; a release is cut from ${mainLine}: switch to it and pull first`)
+  await git($, ['fetch', 'origin', mainLine])
+  const behind = Number((await git($, ['rev-list', '--count', `HEAD..origin/${mainLine}`])).stdout.trim()) || 0
+  if (behind) fail(`${mainLine} is ${behind} commit(s) behind origin/${mainLine}; pull first`)
   const cut = cutRelease(text!, version, new Date(await $.clock.now()).toISOString().slice(0, 10), webOf(remote.stdout))
   const made = await git($, ['switch', '-c', branch])
   if (made.exitCode !== 0) fail(`could not make branch ${branch}: ${whyNot(made)}`)
@@ -800,11 +807,13 @@ async function ship($: EngineInterface, raw: string | undefined, approved: boole
   if (committed.exitCode !== 0) fail(`git commit failed: ${whyNot(committed)}`)
   const pushed = await git($, ['push', '-u', 'origin', branch])
   if (pushed.exitCode !== 0) fail(`pushing ${branch} failed: ${whyNot(pushed)}`)
+  // The bump lives on its branch and PR; the checkout goes back to the main line it was cut from.
+  await git($, ['switch', mainLine])
   const pr = await gh($, ['pr', 'create', '--head', branch, '--title', `Release ${version}`, '--body', cut.notes])
   if (pr.exitCode !== 0) fail(`${branch} is pushed, but gh pr create failed: ${whyNot(pr)}`)
   return (
-    `Opened ${pr.stdout.trim() || 'the release PR'} for ${version}: ${manifests.map(one => one.path).join(' and ')} bumped, CHANGELOG [Unreleased] cut as ${version}. ` +
-    `Once it has merged, pull main and send ship ${version} again; it tags and publishes the release when the user says so (approved: true).`
+    `Opened ${pr.stdout.trim() || 'the release PR'} for ${version}: ${manifests.map(one => one.path).join(' and ')} bumped, CHANGELOG [Unreleased] cut as ${version}; back on ${mainLine}. ` +
+    `Once it has merged, pull ${mainLine} and send ship ${version} again; it tags and publishes the release when the user says so (approved: true).`
   )
 }
 
@@ -1073,30 +1082,38 @@ async function mergeStack($: EngineInterface, stack: Pr[]) {
     $.ui.toast(`roadmap: merging the stack stopped at PR #${at.number}: ${why}. Claude is looking into it.`)
     await $.prompt.submit({ text: stackNote(stack, merged, base, { at, why }) }).catch(() => undefined)
   }
-  for (const [i, pr] of stack.entries()) {
-    const step = `PR #${pr.number} (${i + 1} of ${stack.length})`
-    if (i > 0) {
-      await say(`${step}: moving it onto ${base}`)
-      const moved = await gh($, ['pr', 'edit', String(pr.number), '--base', base])
-      if (moved.exitCode !== 0) return stop(pr, `it could not be moved onto ${base}: ${whyNot(moved)}`)
-      const fresh = await gh($, ['pr', 'update-branch', String(pr.number)])
-      if (fresh.exitCode !== 0 && !/up.to.date/i.test(`${fresh.stdout} ${fresh.stderr}`))
-        return stop(pr, `its branch could not be brought up to date with ${base}: ${whyNot(fresh)}`)
+  let at = stack[0]!
+  try {
+    for (const [i, pr] of stack.entries()) {
+      at = pr
+      const step = `PR #${pr.number} (${i + 1} of ${stack.length})`
+      if (i > 0) {
+        await say(`${step}: moving it onto ${base}`)
+        const moved = await gh($, ['pr', 'edit', String(pr.number), '--base', base])
+        if (moved.exitCode !== 0) return stop(pr, `it could not be moved onto ${base}: ${whyNot(moved)}`)
+        const fresh = await gh($, ['pr', 'update-branch', String(pr.number)])
+        if (fresh.exitCode !== 0 && !/up.to.date/i.test(`${fresh.stdout} ${fresh.stderr}`))
+          return stop(pr, `its branch could not be brought up to date with ${base}: ${whyNot(fresh)}`)
+      }
+      await say(`${step}: waiting for its checks on ${base}`)
+      const problem = await checksSettle($, pr, base)
+      if (problem) return stop(pr, problem)
+      await say(`${step}: merging`)
+      const ran = await gh($, ['pr', 'merge', String(pr.number), '--merge'])
+      if (ran.exitCode !== 0) return stop(pr, `the merge failed: ${whyNot(ran)}`)
+      merged.push(pr)
+      const snap = await read($, snapshot)
+      for (const id of pr.ids) {
+        const it = find(snap.items, id)
+        if (!it || statusOf(snap.items, it) !== 'review') continue
+        await userAct($, { action: 'comment', id: it.id, body: `Approved; merged PR #${pr.number} with its stack.` })
+        await userAct($, { action: 'update', id: it.id, status: 'done' })
+      }
     }
-    await say(`${step}: waiting for its checks on ${base}`)
-    const problem = await checksSettle($, pr, base)
-    if (problem) return stop(pr, problem)
-    await say(`${step}: merging`)
-    const ran = await gh($, ['pr', 'merge', String(pr.number), '--merge'])
-    if (ran.exitCode !== 0) return stop(pr, `the merge failed: ${whyNot(ran)}`)
-    merged.push(pr)
-    const snap = await read($, snapshot)
-    for (const id of pr.ids) {
-      const it = find(snap.items, id)
-      if (!it || statusOf(snap.items, it) !== 'review') continue
-      await userAct($, { action: 'comment', id: it.id, body: `Approved; merged PR #${pr.number} with its stack.` })
-      await userAct($, { action: 'update', id: it.id, status: 'done' })
-    }
+  } catch (err) {
+    // Anything unforeseen (gh answering something that isn't JSON, say) stops the run like any failure,
+    // rather than leaving it marked as merging for the rest of the session.
+    return stop(at, err instanceof Error ? err.message : String(err))
   }
   await say('')
   await refreshRefs($, true).catch(() => undefined)

@@ -5,7 +5,7 @@
 //
 // Node strips the TypeScript itself; the resolver below adds the `.ts` the mod's imports leave out.
 import { execFile, execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -195,6 +195,17 @@ test('quotes, newlines and dot-command lines round-trip as plain text', () => {
   assert.equal(item('T1').description, nasty)
   assert.equal(load().activity.find(one => one.type === 'comment').body, nasty)
   assert.equal(load().items.length, 1)
+})
+
+test('an undo planted in the database (a cloned repo, an import) cannot run a shell command', () => {
+  const marker = join(dir, 'pwned')
+  sql(db.insert('claude', { kind: 'task', title: 'x', parent: null }))
+  // Written straight into the table, as a tampered database would hold it: a real newline, then a dot-command.
+  sql(`INSERT INTO activity(item_id, author, type, body, undo, redo) VALUES ('T1', 'user', 'edit', 'title → x', ${db.q(`SELECT 1;`)} || char(10) || '.shell touch ${marker}', 'SELECT 1;');`)
+  const [entry] = JSON.parse(sql(db.entries([2])))
+  assert.throws(() => sql(db.revert('user', [{ entry, undo: entry.undo, redo: entry.redo }], sql(db.STAMP))), /safe mode/)
+  assert.equal(existsSync(marker), false)
+  assert.ok(!log('T1').some(one => one.startsWith('user: undid')))
 })
 
 test('parallel writers each get their own id', async () => {
