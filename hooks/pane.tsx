@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Item, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, isAgent, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -376,7 +376,9 @@ export function drawPane(
     }
     return lines
   }
-  const isReview = item?.kind === 'task' && item.status === 'review'
+  // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
+  // one that reads review only because a part of it does.
+  const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
@@ -456,11 +458,11 @@ export function drawPane(
           </Box>
         ) : (
         <Box key="action-row" flexDirection="row" columnGap={1} flexWrap="wrap">
-          {item.kind === 'task' && item.status === 'review' && (
+          {isReview && (
             <Button key="approve" label="Approve" hotkey="a" variant="primary"
               onPress={() => act.userAct({ action: 'update', id: item.id, status: 'done' })} />
           )}
-          {item.kind === 'task' && item.status === 'review' && Input && (
+          {isReview && Input && (
             <Button key="request" label="Request changes" hotkey="c"
               onPress={() => act.setRequesting(true)} />
           )}

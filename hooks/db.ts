@@ -32,6 +32,14 @@ ALTER TABLE items ADD COLUMN type TEXT NOT NULL DEFAULT 'feature';
 ALTER TABLE items ADD COLUMN lease_at TEXT;
 CREATE TABLE IF NOT EXISTS labels(item_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY (item_id, label));
 CREATE TABLE IF NOT EXISTS relations(a TEXT NOT NULL, b TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY (a, b, type));`,
+  // v3: a milestone or epic handed to an agent is now reviewed once its tasks are done. Those already
+  // finished before that were never asked for review, so they keep reading done.
+  `UPDATE items SET status='done' WHERE kind!='task' AND id IN (
+  WITH RECURSIVE under(root, id) AS (
+    SELECT id, id FROM items WHERE kind!='task'
+    UNION ALL SELECT under.root, items.id FROM items JOIN under ON items.parent=under.id)
+  SELECT root FROM under JOIN items ON items.id=under.id WHERE items.kind='task'
+  GROUP BY root HAVING SUM(items.status!='done')=0);`,
 ]
 
 /** The schema version this build of the mod reads and writes. */

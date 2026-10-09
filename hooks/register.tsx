@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, brief, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, brief, handedScope, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -384,8 +384,13 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (a.approved && actor === USER) a.approved = undefined
       if (a.approved && isSubagent) fail('Only the user approves work; a subagent sets done and it goes to review.')
       if (a.approved && a.status !== 'done') fail('approved goes with status: done')
-      // An agent's done waits on the user's approval in review; the person's own is final.
-      const isToReview = a.status === 'done' && actor !== USER && !a.approved && it.kind === 'task'
+      // An agent's done waits on the user's approval in review; the person's own is final. Inside a
+      // milestone or epic handed over whole, a task's done is final too: the review comes once, on that.
+      const scope = it.kind === 'task' ? handedScope(snap.items, it) : undefined
+      const isToReview = a.status === 'done' && actor !== USER && !a.approved && !scope
+      const left = progress(snap.items, it)
+      if (isToReview && it.kind !== 'task' && left.done < left.total)
+        fail(`${it.id} closes when its tasks are done; finish those (they close as you go when ${it.id} is assigned to you)`)
       const { script, notes } = db.change(actor, it, {
         title: a.title?.trim() || undefined,
         status: isToReview ? 'review' : a.status,
@@ -425,6 +430,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       }
       if (isToReview)
         notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
+      else if (scope && a.status === 'done' && actor !== USER)
+        notes.push(`closed as part of ${scope.id}, which the user reviews as a whole once all its tasks are done`)
       else if (a.approved) notes.push('approved by the user')
       return notes.length ? `${it.id}: ${notes.join('; ')}` : `${it.id}: nothing changed`
     }
@@ -588,7 +595,7 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
   await focusOn($, 'hand')
   if (item.assignee && item.assignee !== USER)
     await $.prompt.submit({
-      text: `The user sent roadmap task ${item.id} (${item.title}) back from review: ${body}. Read it with the roadmap tool (show ${item.id}), make the changes, comment, and set it done again when finished.`,
+      text: `The user sent roadmap ${item.kind} ${item.id} (${item.title}) back from review: ${body}. Read it with the roadmap tool (show ${item.id}), make the changes (adding tasks under it if that helps), comment, and set it done again when finished.`,
     })
 }
 
@@ -598,7 +605,7 @@ async function handToClaude($: EngineInterface, item: Item) {
     text:
       item.kind === 'task'
         ? `Work on roadmap task ${item.id}: ${item.title}. Read it with the roadmap tool (show ${item.id}), claim it, and comment as you go.`
-        : `Work on roadmap ${item.kind} ${item.id}: ${item.title}. Read it with the roadmap tool (show ${item.id}), then claim its tasks one at a time, commenting as you go.`,
+        : `Work on roadmap ${item.kind} ${item.id}: ${item.title}. It's yours as a whole: read it with the roadmap tool (show ${item.id}), then claim its tasks one at a time, commenting as you go. They close as you finish them; set ${item.id} done when they all are, and I'll review it then.`,
   })
 }
 
@@ -620,8 +627,9 @@ export const register: Register = on => {
         "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
         'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
-        'Review: setting a task done moves it to review, where the user approves it on the board. Pass approved: true with status done only when',
-        "the user has told you in this conversation that the work is approved; subagents can't.",
+        'Review: the user reviews what they handed you, once. A task you set done goes to review; but when they hand you a whole epic or milestone',
+        '("implement E27"), first assign it to yourself (update id, assignee) so its tasks close as you go, then set it done when they all are: it goes to review.',
+        "Pass approved: true with status done only when the user has told you in this conversation that the work is approved; subagents can't.",
         'Name the task id in commit messages and PR titles or branches (e.g. "T12: ..."); show lists the commits and PRs that name it.',
         'Milestone and epic status roll up from their tasks. Working rules: claim a task before you start it; comment on decisions,',
         'findings and handoff notes; mark it done when finished, or blocked with a comment saying why. Subagents are named from their type and task automatically.',
