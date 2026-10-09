@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkLinks, isStale, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, checkPlan, isStale, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -636,4 +636,64 @@ test('handoff: release leaves a note that leads the detail, counts as unread, an
   expect((await ui.find({ key: 'act-2' }))?.type).toBe('Box')
   expect(await ui.find({ type: 'Text', text: /explore:a handoff/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('plan: the whole tree is checked before anything is written', async () => {
+  const have = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' })]
+  const ok = checkPlan(have, [
+    { ref: 'auth', kind: 'epic', title: 'Auth', children: [
+      { ref: 'login', kind: 'task', title: 'Login', blocked_by: ['T1'] },
+      { kind: 'task', title: 'Logout', blocked_by: ['login'] },
+    ] },
+  ], 'M1')
+  expect(ok.map(one => [one.ref, one.parentId, one.parentRef, one.blockerRefs, one.blockerIds])).toEqual([
+    ['auth', 'M1', null, [], []],
+    ['login', null, 'auth', [], ['T1']],
+    ['#3', null, 'auth', ['login'], []],
+  ])
+  const bad = (nodes: unknown[], parent?: string) => () => checkPlan(have, nodes as never, parent)
+  expect(bad([{ kind: 'epic', title: 'x', children: [{ kind: 'milestone', title: 'y' }] }])).toThrow('a milestone cannot sit under a epic')
+  expect(bad([{ kind: 'epic', title: 'x' }], 'E1')).toThrow('cannot sit under a epic')
+  expect(bad([{ kind: 'task', title: 'x' }], 'M9')).toThrow('No item M9')
+  expect(bad([{ kind: 'task', title: '' }])).toThrow('title is required')
+  expect(bad([{ ref: 'a', kind: 'task', title: 'x' }, { ref: 'a', kind: 'task', title: 'y' }])).toThrow('ref a is used twice')
+  expect(bad([{ ref: 'a', kind: 'task', title: 'x', blocked_by: ['b'] }, { ref: 'b', kind: 'task', title: 'y', blocked_by: ['a'] }])).toThrow('cycle')
+  expect(bad([{ kind: 'task', title: 'x', blocked_by: ['nope'] }])).toThrow('No item nope')
+  expect(bad([{ kind: 'epic', title: 'x', checklist: ['a'] }])).toThrow('only tasks carry a checklist')
+  expect(bad([{ kind: 'task', title: 'x', priority: 'urgent' }])).toThrow('priority must be one of')
+})
+
+test('plan: creates parents first, wires refs to new ids, and answers the map', async ($, on) => {
+  // A small stand-in for sqlite3 that keeps the items it is asked to insert.
+  const made: Item[] = [item('M1')]
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    const m = stdin.match(/VALUES \('(\w)'\|\|\(SELECT n FROM counters WHERE prefix='\w'\), '(\w+)',\s*'([^']*)', '\w+', (NULL|'\w+')/)
+    if (m) {
+      const id = `${m[1]}${made.filter(one => one.id[0] === m[1]).length + 1}`
+      made.push(item(id, { kind: m[2] as Item['kind'], title: m[3]!, parent: m[4] === 'NULL' ? null : m[4]!.slice(1, -1) }))
+      return { value: { ...fakeSqlite('', null), stdout: id } }
+    }
+    return { value: fakeSqlite(stdin, { items: made, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const ran = await $.tool.call({
+    tool: 'mcp__roadmap__roadmap', action: 'plan', parent: 'M1',
+    tree: [{ ref: 'auth', kind: 'epic', title: 'Auth', children: [
+      { ref: 'login', kind: 'task', title: 'Login', checklist: ['works'], labels: ['UI'] },
+      { ref: 'logout', kind: 'task', title: 'Logout', blocked_by: ['login'] },
+    ] }],
+  } as never)
+  expect(String(ran.result)).toContain('Planned 3 item(s): auth → E1, login → T1, logout → T2')
+  expect(made.find(one => one.id === 'T2')?.parent).toBe('E1')
+  expect(scripts.some(one => one.includes("INSERT OR IGNORE INTO links(blocker, blocked) VALUES ('T1', 'T2')"))).toBe(true)
+  expect(scripts.some(one => one.includes("INSERT INTO checks(item_id, n, text, done) VALUES ('T1', 1, 'works', 0)"))).toBe(true)
+  expect(scripts.some(one => one.includes("INSERT INTO labels(item_id, label) VALUES ('T1', 'ui')"))).toBe(true)
+  // A bad tree writes nothing.
+  const before = scripts.length
+  const refused = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'plan', tree: [{ kind: 'task', title: 'x', blocked_by: ['ghost'] }] } as never)
+  expect(refused.deny).toContain('No item ghost')
+  expect(scripts.slice(before).some(one => one.includes('INSERT'))).toBe(false)
 })

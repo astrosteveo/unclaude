@@ -1,4 +1,4 @@
-import type { Activity, Commit, IssueType, Item, Kind, Pr, Priority, Refs, Snapshot, Status } from '../types'
+import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Refs, Snapshot, Status } from '../types'
 
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
 export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
@@ -42,6 +42,61 @@ export function isStale(item: Item, now: number): boolean {
   if (item.kind !== 'task' || item.status !== 'in_progress' || !item.assignee) return false
   const at = Date.parse(item.lease_at ?? item.updated_at)
   return Number.isFinite(at) && now - at > LEASE_MS
+}
+
+/**
+ * A whole plan checked before anything is written, flattened parents first, or throws naming the first
+ * problem: a bad kind or nesting, a missing title, a ref used twice, a blocker that is neither a new
+ * task nor an existing one, or new tasks waiting on each other in a cycle.
+ */
+export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | undefined): PlannedItem[] {
+  const out: PlannedItem[] = []
+  const refs = new Map<string, PlannedItem>()
+  const walk = (list: PlanNode[], parentId: string | null, parentRef: string | null, parentKind: Kind | null) => {
+    for (const node of list) {
+      const ref = String(node.ref ?? `#${out.length + 1}`).trim()
+      const where = `${ref}${node.title ? ` (${node.title})` : ''}`
+      if (!KINDS.includes(node.kind)) throw new Error(`${where}: kind must be one of ${KINDS.join(', ')}`)
+      if (!node.title?.trim()) throw new Error(`${where}: title is required`)
+      if (refs.has(ref)) throw new Error(`ref ${ref} is used twice`)
+      if (find(items, ref)) throw new Error(`ref ${ref} is an existing item's id; pick another`)
+      if (node.priority && !PRIORITIES.includes(node.priority)) throw new Error(`${where}: priority must be one of ${PRIORITIES.join(', ')}`)
+      if (node.type && !TYPES.includes(node.type)) throw new Error(`${where}: type must be one of ${TYPES.join(', ')}`)
+      if (node.kind !== 'task' && (node.checklist?.length || node.blocked_by?.length))
+        throw new Error(`${where}: only tasks carry a checklist or blocked_by`)
+      if (parentKind === null) checkParent(items, node.kind, parentId ?? undefined)
+      else if (!PARENTS[node.kind].includes(parentKind)) throw new Error(`${where}: a ${node.kind} cannot sit under a ${parentKind}`)
+      const planned: PlannedItem = { ref, node, parentId: parentRef ? null : parentId, parentRef, blockerRefs: [], blockerIds: [] }
+      refs.set(ref, planned)
+      out.push(planned)
+      walk(node.children ?? [], null, ref, node.kind)
+    }
+  }
+  const top = parent ? find(items, parent)?.id ?? null : null
+  if (parent && !top) throw new Error(`No item ${parent}`)
+  walk(nodes, top, null, null)
+  for (const one of out) {
+    for (const raw of one.node.blocked_by ?? []) {
+      const name = String(raw).trim()
+      const local = refs.get(name)
+      if (local) {
+        if (local.node.kind !== 'task') throw new Error(`${one.ref}: only tasks block tasks; ${name} is a ${local.node.kind}`)
+        if (local === one) throw new Error(`${one.ref} cannot block itself`)
+        one.blockerRefs.push(local.ref)
+      } else one.blockerIds.push(...checkBlockers(items, '\u0000new', [name]))
+    }
+  }
+  // Existing tasks can't wait on new ones, so a cycle can only run through the new tasks.
+  const state = new Map<string, 'open' | 'done'>()
+  const visit = (ref: string) => {
+    if (state.get(ref) === 'done') return
+    if (state.get(ref) === 'open') throw new Error(`blocked_by runs in a cycle through ${ref}`)
+    state.set(ref, 'open')
+    for (const next of refs.get(ref)!.blockerRefs) visit(next)
+    state.set(ref, 'done')
+  }
+  for (const one of out) visit(one.ref)
+  return out
 }
 
 /** The tasks `item` waits on that are not done yet. */

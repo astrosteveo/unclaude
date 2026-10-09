@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } from '../types'
+import type { IssueType, Item, Kind, PlanNode, Priority, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, checkLinks, isMessage, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, line, checkLinks, checkPlan, isMessage, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -234,7 +234,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'add' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
+  action: 'show' | 'next' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
   id?: string
   kind?: Kind
   title?: string
@@ -246,6 +246,7 @@ type Input = {
   priority?: Priority
   type?: IssueType
   labels?: string[] | string
+  tree?: PlanNode[] | PlanNode | string
   relates_to?: string[] | string
   duplicates?: string
   body?: string
@@ -446,6 +447,49 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       await sql($, db.comment(actor, it.id, a.body!.trim()))
       return `Commented on ${it.id}.`
     }
+    case 'plan': {
+      let tree: unknown = a.tree
+      if (typeof tree === 'string') {
+        try {
+          tree = JSON.parse(tree)
+        } catch {
+          fail('tree must be a list of items (JSON)')
+        }
+      }
+      const nodes = (Array.isArray(tree) ? tree : tree ? [tree] : []) as PlanNode[]
+      if (nodes.length === 0) fail('tree is required: a list of { kind, title, …, children }')
+      // All or nothing up front: nothing is written until the whole tree has passed.
+      const planned = checkPlan(snap.items, nodes, a.parent || undefined)
+      const ids = new Map<string, string>()
+      for (const one of planned) {
+        const n = one.node
+        const id = await sql($, db.insert(actor, {
+          kind: n.kind,
+          title: n.title.trim(),
+          parent: one.parentRef ? ids.get(one.parentRef)! : one.parentId,
+          description: n.description,
+          due: n.due,
+          assignee: n.assignee,
+          priority: n.priority,
+          type: n.type,
+        }))
+        ids.set(one.ref, id)
+      }
+      const after = (await refresh($)).items
+      for (const one of planned) {
+        const created = find(after, ids.get(one.ref))!
+        const blockers = [...one.blockerRefs.map(ref => ids.get(ref)!), ...one.blockerIds]
+        if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
+        if (one.node.checklist?.length) await sql($, db.setChecklist(actor, created, texts(one.node.checklist)).script)
+        if (one.node.labels?.length) await sql($, db.setLabels(actor, created, idList(one.node.labels)).script)
+      }
+      const final = (await refresh($)).items
+      const roots = planned.filter(one => !one.parentRef).map(one => ids.get(one.ref)!)
+      return [
+        `Planned ${planned.length} item(s): ${planned.map(one => `${one.ref} → ${ids.get(one.ref)}`).join(', ')}`,
+        ...roots.map(id => [line(final, find(final, id)!), outline(final, id)].filter(Boolean).join('\n')),
+      ].join('\n')
+    }
     case 'remove': {
       const it = need()
       const ids = subtree(snap.items, it.id)
@@ -569,6 +613,8 @@ export const register: Register = on => {
         'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
         'claim (id: take a task and start it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks), release (id; body leaves a handoff note for whoever picks it up next),',
         'comment (id, body), remove (id; cascade for children).',
+        'plan (tree; optional parent): add a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
+        "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
         'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
         'Review: setting a task done moves it to review, where the user approves it on the board. Pass approved: true with status done only when',
@@ -580,7 +626,7 @@ export const register: Register = on => {
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['show', 'next', 'add', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
+          action: { type: 'string', enum: ['show', 'next', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
           id: { type: 'string', description: 'Item id, e.g. T12' },
           kind: { type: 'string', enum: KINDS },
           title: { type: 'string' },
@@ -599,6 +645,11 @@ export const register: Register = on => {
           },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
+          tree: {
+            type: 'array',
+            description: 'plan: new items, each { ref?, kind, title, description?, due?, assignee?, priority?, type?, labels?, checklist?, blocked_by?, children? }',
+            items: { type: 'object', properties: { ref: { type: 'string' }, kind: { type: 'string', enum: KINDS }, title: { type: 'string' }, children: { type: 'array' } }, required: ['kind', 'title'] },
+          },
           labels: { type: 'array', items: { type: 'string' }, description: 'Tags such as "ui" or "auth" (add/update); replaces the list, [] clears.' },
           relates_to: {
             type: 'array', items: { type: 'string' },
