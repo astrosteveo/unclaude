@@ -31,6 +31,8 @@ export type PaneState = {
   draft: Draft | null
   /** Whether the open card shows its fields for editing. */
   isEditing: boolean
+  /** The item waiting on a yes before it is handed to Claude. */
+  handing: string | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -45,6 +47,8 @@ export type PaneActions = {
   open: (id: string | null) => void
   closeDetail: (id: string) => void
   userAct: (a: { action: string; [field: string]: unknown }) => void
+  /** Asks to confirm handing an item to Claude (null drops the question). */
+  askHand: (id: string | null) => void
   handToClaude: (item: Item) => void
   requestChanges: (item: Item, what: string) => void
   setView: (mode: View) => void
@@ -92,7 +96,15 @@ export function drawPane(
   const { Box, Text, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing } = state
+  // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
+  const confirmHand = (one: Item) => (
+    <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
+      <Text color="yellow">Hand {one.id} to Claude? It starts on it now.</Text>
+      <Button key="hand-yes" label="Yes, hand it over" onPress={() => act.handToClaude(one)} />
+      <Button key="hand-cancel" label="Cancel" onPress={() => act.askHand(null)} />
+    </Box>
+  )
   const query = parseQuery(filter)
   // What the filter lets through: everything without one; with one, what matches and, in the tree, what holds it.
   const isShown = (item: Item) => !query || matches(snap, item, query)
@@ -229,7 +241,7 @@ export function drawPane(
       {triage.map(task => {
         const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
         const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
-        return (
+        const row = (
           <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
             {Select ? (
               <Select key={`prio-${task.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={task.priority}
@@ -244,9 +256,15 @@ export function drawPane(
                 {tags ? ` ${tags}` : ''}
               </Text>
             </Button>
-            <Button key={`hand-${task.id}`} label="→ Claude" onPress={() => act.handToClaude(task)} />
+            <Button key={`hand-${task.id}`} label="→ Claude" onPress={() => act.askHand(task.id)} />
           </Box>
         )
+        return handing === task.id ? (
+          <Box key={`back-wrap-${task.id}`} flexDirection="column">
+            {row}
+            {confirmHand(task)}
+          </Box>
+        ) : row
       })}
     </Box>
   )
@@ -446,12 +464,12 @@ export function drawPane(
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), 'Hand to Claude', ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(status !== 'done' ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
-    ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', isEditing ? 'e done editing' : 'e edit', 'm/u assign', 'x close']
+    ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', isEditing ? 'e done editing' : 'e edit', 'x close']
     : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
   )
     .filter(Boolean)
@@ -516,7 +534,9 @@ export function drawPane(
             </Text>
           </Box>
         )}
-        {isRequesting && Input ? (
+        {handing === item.id ? (
+          confirmHand(item)
+        ) : isRequesting && Input ? (
           <Box key="changes-row" flexDirection="row" gap={1}>
             <Input key="changes" label="Changes" placeholder="What needs changing? Enter sends it back" autoFocus
               submitLabel="send back" onSubmit={(value: string) => act.requestChanges(item, value)} />
@@ -532,14 +552,14 @@ export function drawPane(
             <Button key="request" label="Request changes" hotkey="c"
               onPress={() => act.setRequesting(true)} />
           )}
-          <Button key="hand" label="Hand to Claude" hotkey="h" onPress={() => act.handToClaude(item)} />
+          {status !== 'done' && <Button key="hand" label="Hand to Claude" onPress={() => act.askHand(item.id)} />}
           {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
           {(Input || Select) && (
             <Button key="edit" label={isEditing ? 'Done editing' : 'Edit'} hotkey="e" variant={isEditing ? 'primary' : 'secondary'}
               onPress={() => act.setEditing(!isEditing)} />
           )}
-          <Button key="mine" label="Assign me" hotkey="m" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: USER })} />
-          <Button key="unassign" label="Unassign" hotkey="u" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: '' })} />
+          <Button key="mine" label="Assign me" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: USER })} />
+          <Button key="unassign" label="Unassign" onPress={() => act.userAct({ action: 'update', id: item.id, assignee: '' })} />
           <Button key="close" label="Close" hotkey="x" onPress={() => act.closeDetail(item.id)} />
         </Box>
         )}
