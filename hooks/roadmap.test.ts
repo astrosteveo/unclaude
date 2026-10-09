@@ -50,6 +50,7 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   type: 'feature',
   note: null,
   section: null,
+  resolution: null,
   lease_at: null,
   labels: [],
   relations: [],

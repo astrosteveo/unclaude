@@ -21,8 +21,12 @@ export const sectionOf = (text: string | undefined): Section | undefined =>
 export const sectionFor = (item: Item): Section => item.section ?? (item.type === 'bug' ? 'Fixed' : item.type === 'chore' ? 'Changed' : 'Added')
 
 /** Whether a task has a note worth a CHANGELOG line (not none, and not `-`, none needed). */
-export const hasNote = (item: Item) => Boolean(item.note && item.note !== '-')
+/** A task closed as won't do: closed, but dropped rather than finished. */
+export const isDropped = (item: Item) => item.resolution === 'wontdo'
+export const hasNote = (item: Item) => Boolean(item.note && item.note !== '-') && !isDropped(item)
 /** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
+// How a task closed as won't do is marked.
+export const WONTDO_GLYPH = '✕'
 export const marks = (item: Item) =>
   [item.priority && item.priority !== 'p2' ? item.priority : '', item.type && item.type !== 'feature' ? item.type : ''].filter(Boolean)
 const byPriority = (a: Item, b: Item) => PRIORITIES.indexOf(a.priority ?? 'p2') - PRIORITIES.indexOf(b.priority ?? 'p2')
@@ -274,8 +278,9 @@ const tasksUnder = (items: Item[], item: Item) =>
 
 /** Tasks in an item's subtree: done and total. */
 export function progress(items: Item[], item: Item): { done: number; total: number } {
-  if (item.kind === 'task') return { done: item.status === 'done' ? 1 : 0, total: 1 }
-  const tasks = tasksUnder(items, item)
+  // Dropped work is closed, but neither done nor still to do.
+  if (item.kind === 'task') return isDropped(item) ? { done: 0, total: 0 } : { done: item.status === 'done' ? 1 : 0, total: 1 }
+  const tasks = tasksUnder(items, item).filter(task => !isDropped(task))
   return { done: tasks.filter(task => task.status === 'done').length, total: tasks.length }
 }
 
@@ -368,7 +373,8 @@ export function line(items: Item[], item: Item): string {
   ]
     .filter(Boolean)
     .join(', ')
-  return `${item.id} ${GLYPH[status]} ${status} ${item.title}${bits ? `  (${bits})` : ''}`
+  const state = isDropped(item) ? `${WONTDO_GLYPH} won't do` : `${GLYPH[status]} ${status}`
+  return `${item.id} ${state} ${item.title}${bits ? `  (${bits})` : ''}`
 }
 
 export function outline(items: Item[], root: string | null = null): string {
@@ -705,6 +711,7 @@ export function pullRequest(items: Item[], item: Item): { branch: string; title:
   parts.push(
     tasks
       .map(task => {
+        if (isDropped(task)) return `- **${task.id}** ~~${task.title}~~ (won't do)`
         const head = item.kind === 'task' ? '' : `- **${task.id}** ${task.title}\n`
         const pad = item.kind === 'task' ? '' : '  '
         return head + task.checklist.map(c => `${pad}- [${c.done ? 'x' : ' '}] ${c.text}`).join('\n')

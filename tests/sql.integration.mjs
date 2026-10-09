@@ -277,6 +277,8 @@ test('a fresh database starts at version 0 and migrates to this build\'s version
   assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
   assert.equal(raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('items','counters','activity','links','checks','reads');"), '6')
   assert.equal(raw('PRAGMA journal_mode;'), 'wal')
+  // v6: how a task was closed when not by doing it.
+  assert.equal(raw("SELECT count(*) FROM pragma_table_info('items') WHERE name='resolution';"), '1')
 })
 
 test('a database from before versioning adopts the schema with its data kept', () => {

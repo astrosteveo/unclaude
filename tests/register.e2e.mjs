@@ -297,3 +297,32 @@ test('a subfolder of a fresh repository starts the roadmap at the top, never in 
   assert.match(await ok({ action: 'add', kind: 'task', title: 'x' }), new RegExp(`^Started a new roadmap at ${dir}/\\.claude/roadmap\\.db\\.`))
   assert.equal(existsSync(join(dir, 'sub/.claude')), false)
 })
+
+test("won't do: a reason closes a task as dropped, not finished; no ticks or note; out of counts and notes; any status reopens it", async () => {
+  await ok({ action: 'add', kind: 'epic', title: 'Polish' })
+  await ok({ action: 'add', kind: 'task', title: 'Kept', parent: 'E1', checklist: ['works'] })
+  await ok({ action: 'add', kind: 'task', title: 'Dropped', parent: 'E1', checklist: ['never ticked'], note: 'Should never ship.' })
+  await ok({ action: 'update', id: 'T1', status: 'done', items: [1], note: 'Kept works.', approved: true })
+  // A reason is required, and only tasks are dropped.
+  assert.equal((await call({ action: 'update', id: 'T2', wontdo: '  ' })).ok, false)
+  assert.match((await call({ action: 'update', id: 'E1', wontdo: 'no' })).text, /Only tasks close as won't do/)
+  // An agent's won't do waits on the user, with no checklist ticked and no note asked for.
+  const dropped = await ok({ action: 'update', id: 'T2', wontdo: 'superseded by T1' })
+  assert.match(dropped, /waiting on the user's approval to drop it/)
+  assert.doesNotMatch(dropped, /pull request/)
+  assert.equal(query("SELECT status || ' ' || resolution FROM items WHERE id='T2';"), "review wontdo")
+  assert.equal(query("SELECT body FROM activity WHERE item_id='T2' AND type='comment';"), "Won't do: superseded by T1")
+  await ok({ action: 'update', id: 'T2', status: 'done', approved: true })
+  assert.equal(query("SELECT status || ' ' || resolution FROM items WHERE id='T2';"), 'done wontdo')
+  // Closed: the epic rolls up done, counting only the finished task; it reads as won't do; its note never ships.
+  const shown = await ok({ action: 'show', id: 'E1' })
+  assert.match(shown, /1\/1 tasks/)
+  assert.match(await ok({ action: 'show', id: 'T2' }), /T2 ✕ won't do Dropped/)
+  const log = await ok({ action: 'changelog' })
+  assert.match(log, /Kept works\./)
+  assert.doesNotMatch(log, /Should never ship/)
+  assert.doesNotMatch(await ok({ action: 'pr', id: 'E1' }), /Should never ship/)
+  // Back to work, it is no longer won't do.
+  await ok({ action: 'update', id: 'T2', status: 'todo' })
+  assert.equal(query("SELECT status || ' ' || COALESCE(resolution, '-') FROM items WHERE id='T2';"), 'todo -')
+})
