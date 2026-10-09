@@ -4,14 +4,14 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, upOf, tasksIn, targetOf, releaseOf, unreleased, shipNote, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, tasksIn, targetOf, releaseOf, unreleased, shipNote, releasesOf, nextVersion, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['plan', 'Plan'], ['timeline', 'Timeline'], ['inbox', 'Inbox']]
+const VIEWS: [View, string][] = [['board', 'Board'], ['plan', 'Plan'], ['timeline', 'Timeline'], ['inbox', 'Inbox'], ['releases', 'Releases']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -151,6 +151,8 @@ export type PaneState = {
   isFiltering: boolean
   /** Whether the field filing to the inbox is open. */
   isFiling: boolean
+  /** Whether the Releases tab asks for the version to release. */
+  isReleasing: boolean
   /** Whether the board's Done column shows all done work, not just the recent. */
   isDoneOpen: boolean
   /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
@@ -204,6 +206,9 @@ export type PaneActions = {
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
   setFiling: (isOn: boolean) => void
+  setReleasing: (isOn: boolean) => void
+  /** Runs ship from the board: the release PR for `version`, or (`publish`, once it has merged) its tag and release. */
+  release: (version: string, publish: boolean) => void
   /** Files `title` to the inbox. */
   file: (title: string) => void
   setDoneOpen: (isOn: boolean) => void
@@ -273,7 +278,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -523,6 +528,71 @@ export function drawPane(
                 {one.body.length > width - 3 ? `${one.body.replace(/\s+/g, ' ').slice(0, width - 4)}…` : one.body.replace(/\s+/g, ' ')}
               </Text>
             ) : null}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+
+  // Releases: what the next one would carry, then each version shipped, newest first and open, older folded.
+  const shippedVersions = releasesOf(snap)
+  const pendingNotes = unreleased(snap, known)
+  const suggested = nextVersion(shippedVersions[0]?.version, pendingNotes)
+  // A release under way: its PR open, or merged and waiting to be tagged and published.
+  const releasePrs = known.prs.filter(pr => pr.branch.startsWith('release-v'))
+  const openRelease = releasePrs.find(pr => pr.state === 'open')
+  const toPublish = releasePrs.find(pr => pr.state === 'merged' && !shippedVersions.some(one => `release-v${one.version}` === pr.branch))
+  const releaseLine = (text: string, key: string) => (
+    <Text key={key} dimColor={!/^- /.test(text)}>
+      {text.length > width - 2 ? `${text.slice(0, width - 3)}…` : text || ' '}
+    </Text>
+  )
+  const releasesView = (
+    <Box flexDirection="column">
+      <Box key="unreleased-head" flexDirection="row" columnGap={1} flexWrap="wrap">
+        <Text bold>Unreleased</Text>
+        <Text dimColor>{pendingNotes.length ? `${pendingNotes.length} note${pendingNotes.length === 1 ? '' : 's'} merged since the last release` : 'nothing merged since the last release'}</Text>
+        {openRelease ? (
+          <Text color="yellow">Release PR #{openRelease.number} is open; merge it, then Tag and publish</Text>
+        ) : toPublish ? (
+          <Button key="publish" label={`Tag and publish ${toPublish.branch.slice('release-'.length)}`} variant="primary"
+            onPress={() => act.release(toPublish.branch.slice('release-v'.length), true)} />
+        ) : (
+          pendingNotes.length > 0 && !isReleasing && <Button key="release" label="Release…" onPress={() => act.setReleasing(true)} />
+        )}
+      </Box>
+      {isReleasing && Input && (
+        <Box key="release-row" flexDirection="row" columnGap={1}>
+          <Input key="release-version" label="Version" value={suggested} autoFocus submitLabel="open its PR"
+            onSubmit={(value: string) => (value.trim() ? act.release(value.trim(), false) : act.setReleasing(false))} />
+          <Button key="release-cancel" label="Cancel" onPress={() => act.setReleasing(false)} />
+        </Box>
+      )}
+      {SECTIONS.map(section => {
+        const some = pendingNotes.filter(task => sectionFor(task) === section)
+        return some.length ? (
+          <Box key={`pending-${section}`} flexDirection="column">
+            <Text dimColor>{section}</Text>
+            {some.map(task => releaseLine(`- ${task.note} (${task.id})`, `pending-${task.id}`))}
+          </Box>
+        ) : null
+      })}
+      {shippedVersions.length === 0 && <Text dimColor>No releases yet. ship records each one; past versions are read from CHANGELOG.md.</Text>}
+      {shippedVersions.map((one, i) => {
+        const key = `v${one.version}`
+        const isOpen = (i === 0) !== flipped.includes(key)
+        return (
+          <Box key={`release-${one.version}`} flexDirection="column">
+            <Button key={`fold-${key}`} plain onPress={() => act.toggleFold(key)}>
+              <Text dimColor>{isOpen ? '▾' : '▸'}</Text> <Text bold>v{one.version}</Text>
+              <Text dimColor>
+                {one.at ? `  ${one.at}` : ''}
+                {one.tasks.length ? `  ${one.tasks.length} task${one.tasks.length === 1 ? '' : 's'}` : ''}
+                {one.pr ? `  PR #${one.pr}` : ''}
+              </Text>
+              <Text color="green">{known.stable === one.version ? '  stable ●' : ''}</Text>
+            </Button>
+            {isOpen && one.notes.split('\n').filter(text => text.trim()).map((text, n) => releaseLine(`  ${text.replace(/^### /, '')}`, `${key}-${n}`))}
           </Box>
         )
       })}
@@ -1334,12 +1404,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : tree}
+                {mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : tree)
+            panel ?? (mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
           )
         )}
         {items.length > 0 && !trouble && (

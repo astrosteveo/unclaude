@@ -126,7 +126,7 @@ export type InboxItem = { id: string; title: string; body: string | null; author
 /** A version that shipped: when, from which tag and release PR, its notes, and the tasks it carried. */
 export type Release = { version: string; tag: string | null; at: string; pr: number | null; notes: string; tasks: { id: string; note: string; section: Section | null }[] }
 
-export type View = 'board' | 'plan' | 'timeline' | 'inbox'
+export type View = 'board' | 'plan' | 'timeline' | 'inbox' | 'releases'
 
 /** The new-item form's choices so far; the title is typed last and submits it. */
 export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: string }
@@ -142,10 +142,10 @@ export type Pr = { number: number; title: string; state: string; url: string; id
 export type Checks = 'none' | 'pending' | 'pass' | 'fail'
 
 /** What the repository says about the roadmap: commits and pull requests that name items. */
-export type Refs = { commits: Commit[]; prs: Pr[] }
+export type Refs = { commits: Commit[]; prs: Pr[]; /** The version the stable branch serves, when known. */ stable?: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null; filing: boolean }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null; filing: boolean; releasing: boolean }
   }
 }

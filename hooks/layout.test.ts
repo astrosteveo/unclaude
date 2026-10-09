@@ -77,6 +77,7 @@ const VIEWS = [
   ['plan', 'tab-plan', 'row-T5'],
   ['timeline', 'tab-timeline', 'time-E2'],
   ['inbox', 'tab-inbox', null],
+  ['releases', 'tab-releases', null],
 ] as const
 
 test('every view fits the pane at narrow and wide widths, with and without a docked card', async ($, on) => {
@@ -233,7 +234,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     const { lines } = paintPane(await ui.drawn(), width)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Board +v: +Plan +Timeline +Inbox 3 +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Board +v: +Plan +Timeline +Inbox 3 +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -390,5 +391,59 @@ test('releases on the board: a done card and its plan row name the version it sh
   expect((await ui.find({ key: 'row-T1' }))?.text).toContain('v0.6.3')
   await ui.press({ key: 'row-T1' })
   expect(paintPane(await ui.drawn(), 84).lines.some(line => line.includes('shipped in v0.6.3'))).toBe(true)
+  await ui.unmount()
+})
+
+test('releases tab: what the next release carries by section, each version newest first (older folded), stable marked; Release… runs ship', async ($, on) => {
+  const items = [
+    item('T1', { status: 'done', note: 'One.' }), item('T2', { status: 'done', note: 'A fix.', type: 'bug' }),
+    item('T3', { status: 'done', note: 'New thing.' }),
+  ]
+  const releases = [
+    { version: '0.6.2', tag: 'v0.6.2', at: '2026-10-08', pr: 31, notes: '### Fixed\n\n- One.', tasks: [{ id: 'T1', note: 'One.', section: 'Fixed' as const }] },
+    { version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: '### Changed\n\n- Installs get releases.', tasks: [] },
+  ]
+  const snap = { items, activity: [], seen: {}, releases }
+  const toasts: string[] = []
+  const ran: string[] = []
+  on('process.run', ($, e) => {
+    const line = e.argv.join(' ')
+    ran.push(line)
+    if (e.argv[0] === 'sqlite3') return { value: fake(e.init?.stdin, snap) }
+    const stdout = line.startsWith('git ls-remote') ? 'abc\trefs/heads/stable\n' : line.startsWith('git tag --points-at') ? 'v0.6.3\n' : '[]'
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.read', () => ({ deny: 'ENOENT' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', ($, e) => (toasts.push(String((e as { text?: string }).text ?? '')), { value: undefined }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('store.get', () => ({ value: undefined }) as never)
+  on('store.set', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-releases' })
+  const { lines, problems } = paintPane(await ui.drawn(), 100)
+  expect(problems).toEqual([])
+  const text = lines.join('\n')
+  // T2 and T3 merged since; T1 shipped in 0.6.2. By section, Added before Fixed.
+  expect(text).toMatch(/Unreleased +2 notes merged since the last release +\[ Release… \]\nAdded\n- New thing\. \(T3\)\nFixed\n- A fix\. \(T2\)/)
+  // Newest open with its notes, stable marked; the older one folded to its line.
+  expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +PR #33 +stable ●\n *Changed\n *- Installs get releases\./)
+  expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 task +PR #31\n/)
+  // Release… suggests the next minor (an Added note waits) and runs ship with what is typed.
+  await ui.press({ key: 'release' })
+  expect((await ui.find({ key: 'release-version' }))?.props.value).toBe('0.7.0')
+  await ui.input({ key: 'release-version', text: '0.7.0' })
+  expect(toasts.at(-1)).toMatch(/^roadmap: no manifest with a version here/)
   await ui.unmount()
 })

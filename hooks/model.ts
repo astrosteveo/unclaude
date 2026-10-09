@@ -628,6 +628,16 @@ export function shipNote(snap: Snapshot, item: Item, refs?: Refs): string | unde
   return `${out.length}/${noted.length} shipped (${versions.map(one => `v${one}`).join(', ')})`
 }
 
+/** The version to suggest for the next release after `last`: a patch when it only fixes, else a minor. */
+export function nextVersion(last: string | undefined, notes: Item[]): string {
+  const [major, minor, patch] = versionOf(last) ?? [0, 0, 0]
+  return notes.length > 0 && notes.every(task => sectionFor(task) === 'Fixed') ? `${major}.${minor}.${patch + 1}` : `${major}.${minor + 1}.0`
+}
+
+/** Releases, newest version first. */
+export const releasesOf = (snap: Snapshot): Release[] =>
+  [...(snap.releases ?? [])].sort((a, b) => (isAfter(versionOf(a.version) ?? [0, 0, 0], versionOf(b.version) ?? [0, 0, 0]) ? -1 : 1))
+
 /** Open work first, then what is done, each in the order `list` gives. */
 export const openFirst = (items: Item[], list: Item[]): Item[] => [
   ...list.filter(one => statusOf(items, one) !== 'done'),
@@ -1011,7 +1021,7 @@ export function withIgnore(text: string | undefined): string {
 
 /**
  * The release notes of merged work: done tasks with a note whose unit of work has no open pull request,
- * and has a merged one or none at all (work committed straight to the main line).
+ * and has a merged one, or none at all and is done (work committed straight to the main line).
  */
 export function mergedNotes(items: Item[], refs: Refs): Item[] {
   return rows(items)
@@ -1020,7 +1030,10 @@ export function mergedNotes(items: Item[], refs: Refs): Item[] {
     .filter(task => {
       const unit = unitOf(items, task)
       const prs = refs.prs.filter(pr => pr.ids.includes(unit.id))
-      return !prs.some(pr => pr.state === 'open') && (prs.length === 0 || prs.some(pr => pr.state === 'merged'))
+      if (prs.some(pr => pr.state === 'open')) return false
+      // Merged by its PR; or, with none, once its whole unit is done (committed straight to the main line),
+      // not while a milestone or epic it ships in is still under way on its branch.
+      return prs.some(pr => pr.state === 'merged') || (prs.length === 0 && statusOf(items, unit) === 'done')
     })
     // Newest first, as a CHANGELOG reads.
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || Number(b.id.slice(1)) - Number(a.id.slice(1)))

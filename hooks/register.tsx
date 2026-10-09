@@ -28,6 +28,8 @@ const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
 const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
 // Whether the field filing to the inbox is open.
 const filing = atom({ plugin: 'roadmap', key: 'filing' } as const, false)
+// Whether the Releases tab asks for the version to release.
+const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
 // The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
 const flipped = atom({ plugin: 'roadmap', key: 'flipped' } as const, [] as string[])
 // Whether the board's Done column shows all done work rather than the recent.
@@ -140,7 +142,9 @@ async function refreshRefs($: EngineInterface, isForced = false) {
     const ran = await runAt($, ['git', 'log', '-n', '1000', '--format=%h%x1f%an%x1f%as%x1f%B%x1e']).catch(() => undefined)
     commits = ran && ran.exitCode === 0 ? parseGitLog(ran.stdout) : []
   }
-  if (isForced || now - ghAskedAt > GH_EVERY) {
+  // gh and the remote go over the network: asked far less often than git.
+  const isRemoteTime = isForced || now - ghAskedAt > GH_EVERY
+  if (isRemoteTime) {
     ghAskedAt = now
     const ran = await runAt($, ['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,baseRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
       .catch(() => undefined)
@@ -150,8 +154,15 @@ async function refreshRefs($: EngineInterface, isForced = false) {
       prs = []
     }
   }
-  if (JSON.stringify({ commits, prs }) !== JSON.stringify(current)) await update($, refs, () => ({ commits, prs }))
-  return { commits, prs }
+  let stable = current.stable
+  if (isRemoteTime) {
+    // The version installs get: the tag the stable branch's head carries.
+    const head = (await runAt($, ['git', 'ls-remote', '--heads', 'origin', 'stable'], { timeoutMs: 15_000 }).catch(() => undefined))?.stdout.split(/\s/)[0]
+    const tags = head ? (await runAt($, ['git', 'tag', '--points-at', head]).catch(() => undefined))?.stdout ?? '' : ''
+    stable = tags.split('\n').map(one => one.trim()).find(one => /^v\d+\.\d+\.\d+$/.test(one))?.slice(1)
+  }
+  if (JSON.stringify({ commits, prs, stable }) !== JSON.stringify(current)) await update($, refs, () => ({ commits, prs, ...(stable ? { stable } : {}) }))
+  return { commits, prs, ...(stable ? { stable } : {}) }
 }
 
 export const MISSING_SQLITE =
@@ -1134,6 +1145,22 @@ async function userAct($: EngineInterface, a: Input) {
   await refresh($)
 }
 
+/**
+ * The person's Release from the Releases tab: ship's first step (the release PR), or, once that has merged
+ * and they press Tag and publish, its second, which their press approves. Either way ship's answer is shown.
+ */
+async function releaseFromBoard($: EngineInterface, version: string, publish: boolean) {
+  await update($, releasing, () => false)
+  try {
+    const snap = await refresh($)
+    $.ui.toast(`roadmap: ${await ship($, snap.items, version, publish)}`, { timeoutMs: 12_000 })
+  } catch (err) {
+    $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`, { timeoutMs: 12_000 })
+  }
+  await refresh($)
+  await refreshRefs($, true).catch(() => undefined)
+}
+
 /** The person's Undo: their last change, or the entries `ids` (a line on a card), taken back. */
 async function userUndo($: EngineInterface, ids?: number[]) {
   try {
@@ -1690,6 +1717,7 @@ export const register: Register = on => {
       filter: await read($, filter),
       isFiltering: await read($, filtering),
       isFiling: await read($, filing),
+      isReleasing: await read($, releasing),
       isDoneOpen: await read($, doneOpen),
       flipped: await read($, flipped),
       draft: await read($, draft),
@@ -1727,6 +1755,8 @@ export const register: Register = on => {
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
+      setReleasing: isOn => void update($, releasing, () => isOn).then(() => focusOn($, isOn ? 'release-version' : 'release')),
+      release: (version, publish) => void releaseFromBoard($, version, publish),
       setFiling: isOn => void update($, filing, () => isOn).then(() => focusOn($, isOn ? 'inbox-input' : 'file')),
       file: title => void sql($, db.fileInbox(USER, title)).then(() => refresh($)).then(() => $.ui.toast('roadmap: filed to the inbox'), () => undefined),
       toggleFold: id => void update($, flipped, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id])),

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { nextVersion, shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -584,6 +584,14 @@ test('shipped in vX: a task says which release carried it, or that it is merged 
   expect(unreleased(snap, refs).map(one => one.id)).toEqual(['T3'])
   expect(detail(snap, find(items, 'T2')!, 15, refs)).toContain('\nShipped in v0.6.1')
   expect(brief(snap, 'claude', [], undefined, refs)).toContain('Merged, not released yet: T3.')
+})
+
+test('the next version: a patch when the waiting notes only fix, else a minor; notes of a unit still under way do not wait', () => {
+  expect(nextVersion('0.6.3', [item('T1', { type: 'bug', note: 'x' })])).toBe('0.6.4')
+  expect(nextVersion('0.6.3', [item('T1', { type: 'bug', note: 'x' }), item('T2', { note: 'y' })])).toBe('0.7.0')
+  expect(nextVersion(undefined, [])).toBe('0.1.0')
+  const some = [item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done', note: 'Not yet.' }), item('T2', { parent: 'E1' }), item('T3', { status: 'done', note: 'Lone.' })]
+  expect(mergedNotes(some, { commits: [], prs: [] }).map(one => one.id)).toEqual(['T3'])
 })
 
 test('the filter takes m:M2: what targets M2, and M2 itself', () => {
@@ -2269,7 +2277,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.4.0"')
   ran.length = 0
   expect(await ship({ version: '0.5.0' })).toContain('Opened https://github.com/o/r/pull/30 for 0.5.0: .claude-plugin/plugin.json bumped')
-  expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state'))).toEqual([
+  expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state') && !one.startsWith('git ls-remote --heads origin stable') && !one.startsWith('git tag --points-at'))).toEqual([
     'git remote get-url origin', 'git status --porcelain', 'git symbolic-ref --short refs/remotes/origin/HEAD', 'git rev-parse --abbrev-ref HEAD',
     'git fetch origin main', 'git rev-list --count HEAD..origin/main', 'git switch -c release-v0.5.0', 'git commit -am Release 0.5.0',
     'git push -u origin release-v0.5.0', 'git switch main', 'gh pr create --head release-v0.5.0 --title Release 0.5.0 --body ### Added\n\n- Undo.',
@@ -2280,7 +2288,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(await ship({ version: '0.5.0' })).toBe('no merged PR from release-v0.5.0 yet: merge the release PR first')
   mergedPr = JSON.stringify([{ number: 30, mergeCommit: { oid: 'abc123' } }])
   expect(await ship({ version: '0.5.0' })).toContain("Tagging v0.5.0 and publishing the release is the user's call")
-  expect(ran.some(one => one.startsWith('git tag'))).toBe(false)
+  expect(ran.some(one => one.startsWith('git tag -a'))).toBe(false)
   ran.length = 0
   expect(await ship({ version: '0.5.0', approved: true })).toBe(
     "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now serves 0.5.0. Deleted release-v0.5.0.")
