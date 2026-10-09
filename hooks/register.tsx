@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Item, Kind, Refs, Snapshot, Status, View } from '../types'
+import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -72,6 +72,8 @@ export const MISSING_SQLITE =
   '(Arch: pacman -S sqlite; Debian/Ubuntu: apt install sqlite3; Fedora: dnf install sqlite; macOS: brew install sqlite), then run /roadmap again.'
 
 const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', done: 'green' }
+// Urgent priorities stand out on a card; the rest of the marks read dim.
+const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 
 // The main loop's view of the roadmap: the newest activity it has been told about, and whether it
 // has done work since it last touched the roadmap. Module state: a reload starts both over.
@@ -227,6 +229,8 @@ type Input = {
   parent?: string
   assignee?: string
   due?: string
+  priority?: Priority
+  type?: IssueType
   body?: string
   blocked_by?: string[] | string
   checklist?: string[] | string
@@ -273,6 +277,8 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
   const item = find(snap.items, a.id)
   const need = () => item ?? fail(a.id ? `No item ${a.id}` : 'id is required')
   if (a.status && !STATUSES.includes(a.status)) fail(`status must be one of ${STATUSES.join(', ')}`)
+  if (a.priority && !PRIORITIES.includes(a.priority)) fail(`priority must be one of ${PRIORITIES.join(', ')}`)
+  if (a.type && !TYPES.includes(a.type)) fail(`type must be one of ${TYPES.join(', ')}`)
 
   switch (a.action) {
     case 'show':
@@ -301,6 +307,8 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
         due: a.due,
         status: a.status,
         assignee: a.assignee,
+        priority: a.priority || undefined,
+        type: a.type || undefined,
       }))
       const checklist = a.checklist === undefined ? [] : texts(a.checklist)
       if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
@@ -327,6 +335,8 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
         description: a.description === undefined ? undefined : a.description || null,
         due: a.due === undefined ? undefined : a.due || null,
         assignee: a.assignee === undefined ? undefined : a.assignee || null,
+        priority: a.priority || undefined,
+        type: a.type || undefined,
         parent: a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id),
       })
       if (script) await sql($, script)
@@ -483,7 +493,7 @@ export const register: Register = on => {
         "The project's shared tracker, a lightweight Jira kept in .claude/roadmap.db that you, the user and other agents all work from.",
         'Hierarchy: milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
         'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by due date),',
-        'add (kind, title; optional parent, description, due, status, assignee), update (id plus any field; empty string clears),',
+        'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
         'claim (id: take a task and start it; refused when someone else holds it or it waits on unfinished tasks), release (id), comment (id, body), remove (id; cascade for children).',
         'Dependencies: blocked_by lists the tasks a task waits on. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
@@ -513,6 +523,8 @@ export const register: Register = on => {
           },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
+          priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3 can wait; p2 is the default. next picks higher priority first.' },
+          type: { type: 'string', enum: TYPES, description: 'What sort of work: feature (default), bug or chore' },
           body: { type: 'string', description: 'Comment text (comment)' },
           as: { type: 'string', description: `Who is acting, to override the default: "${CLAUDE}", or a subagent's name from its type and task.` },
           force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
@@ -668,11 +680,16 @@ export const register: Register = on => {
       const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
       const list = item.checklist ?? []
       const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
-      const extra = item.id.length + who.length + news.length + wait.length + ticks.length + 1
+      const tags = marks(item)
+      const tag = tags.length ? ` ${tags.join(' ')}` : ''
+      const extra = item.id.length + who.length + news.length + wait.length + ticks.length + tag.length + 1
       const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
       return (
         <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
           <Text dimColor>{item.id}</Text> {title}
+          <Text color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
+            {tag}
+          </Text>
           <Text dimColor>{ticks}</Text>
           <Text color="yellow" dimColor>
             {wait}
@@ -857,7 +874,7 @@ export const register: Register = on => {
     // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
     // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
-    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
+    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
     const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 : 0)
     // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
     const fixed = (isCompact ? 0 : 1) + 2 + titleRows + 2 + (inner < 56 ? 1 : 0) + (isCompact ? 0 : 1) + 1 + 1
@@ -929,6 +946,9 @@ export const register: Register = on => {
           <Text>
             <Text dimColor>assignee </Text>
             <Text color="cyan">{item.assignee ?? 'none'}</Text>
+            {item.kind === 'task' && <Text dimColor>  priority </Text>}
+            {item.kind === 'task' && <Text color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>}
+            {item.kind === 'task' && <Text dimColor>  {item.type}</Text>}
             {item.due && <Text dimColor>  due {item.due}</Text>}
             {where && <Text dimColor>  in {where}</Text>}
           </Text>

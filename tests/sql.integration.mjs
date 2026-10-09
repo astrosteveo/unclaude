@@ -201,7 +201,7 @@ test('a fresh database starts at version 0 and migrates to this build\'s version
 test('a database from before versioning adopts the schema with its data kept', () => {
   // As the mod left databases until now: the tables, data in them, no version recorded.
   raw(db.MIGRATIONS[0])
-  raw(db.insert('claude', { kind: 'task', title: 'kept', parent: null }))
+  raw("INSERT INTO items(id, kind, title) VALUES ('T1', 'task', 'kept');")
   assert.equal(raw(db.READ_VERSION), '0')
   raw(db.migrate(0))
   assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
@@ -227,7 +227,8 @@ test('two sessions migrating at once both come out at the current version', asyn
 test('a v1 database migrates to v2 with its data kept and the new fields defaulted', () => {
   raw(`BEGIN IMMEDIATE;\n${db.MIGRATIONS[0]}\nPRAGMA user_version=1;\nCOMMIT;`)
   assert.equal(raw(db.READ_VERSION), '1')
-  raw(db.insert('claude', { kind: 'task', title: 'kept', parent: null, assignee: 'claude' }))
+  // Rows as a v1 build wrote them: today's insert names columns v1 doesn't have.
+  raw("INSERT INTO items(id, kind, title, assignee) VALUES ('T1', 'task', 'kept', 'claude');")
   raw(db.migrate(1))
   assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
   isMigrated = true
@@ -250,4 +251,15 @@ test('labels and relations load with their item and go with it on removal', () =
   sql(db.remove(['T1']))
   assert.equal(sql('SELECT count(*) FROM labels;'), '0')
   assert.equal(sql('SELECT count(*) FROM relations;'), '0')
+})
+
+test('priority and type are written on insert and changed like any field', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null, priority: 'p0', type: 'bug' }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: null }))
+  assert.equal(item('T1').priority, 'p0')
+  assert.equal(item('T1').type, 'bug')
+  assert.equal(item('T2').priority, 'p2')
+  sql(db.change('user', item('T2'), { priority: 'p1', type: 'chore' }).script)
+  assert.equal(item('T2').priority, 'p1')
+  assert.deepEqual(log('T2').slice(1), ['user: priority → p1', 'user: type → chore'])
 })

@@ -1,9 +1,15 @@
-import type { Activity, Commit, Item, Kind, Pr, Refs, Snapshot, Status } from '../types'
+import type { Activity, Commit, IssueType, Item, Kind, Pr, Priority, Refs, Snapshot, Status } from '../types'
 
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
 export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'done']
 export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', done: '●' }
 export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' }
+export const PRIORITIES: Priority[] = ['p0', 'p1', 'p2', 'p3']
+export const TYPES: IssueType[] = ['feature', 'bug', 'chore']
+/** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
+export const marks = (item: Item) =>
+  [item.priority && item.priority !== 'p2' ? item.priority : '', item.type && item.type !== 'feature' ? item.type : ''].filter(Boolean)
+const byPriority = (a: Item, b: Item) => PRIORITIES.indexOf(a.priority ?? 'p2') - PRIORITIES.indexOf(b.priority ?? 'p2')
 export const PREFIX: Record<Kind, string> = { milestone: 'M', epic: 'E', task: 'T' }
 // Which kinds each kind may sit under.
 const PARENTS: Record<Kind, Kind[]> = { milestone: [], epic: ['milestone'], task: ['epic', 'milestone'] }
@@ -116,6 +122,7 @@ export function line(items: Item[], item: Item): string {
   const p = progress(items, item)
   const status = statusOf(items, item)
   const bits = [
+    ...marks(item),
     item.kind !== 'task' && p.total > 0 ? `${p.done}/${p.total} tasks` : '',
     item.assignee ? `@${item.assignee}` : '',
     item.due ? `due ${item.due}` : '',
@@ -165,7 +172,7 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
 
 /**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
- * unassigned todo tasks that wait on nothing unfinished, by due date.
+ * unassigned todo tasks that wait on nothing unfinished, by priority, then due date.
  */
 export function nextUp(items: Item[], actor: string): Item[] {
   const tasks = items.filter(item => item.kind === 'task')
@@ -178,9 +185,12 @@ export function nextUp(items: Item[], actor: string): Item[] {
   const isWaiting = (task: Item) => waitingOn(items, task).length > 0
   const free = tasks
     .filter(task => !task.assignee && task.status === 'todo' && !isWaiting(task))
-    .sort((a, b) => due(a).localeCompare(due(b)) || byId(a, b))
+    .sort((a, b) => byPriority(a, b) || due(a).localeCompare(due(b)) || byId(a, b))
   const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, done: 3 }
-  return [...mine.sort((a, b) => Number(isWaiting(a)) - Number(isWaiting(b)) || rank[a.status] - rank[b.status]), ...free]
+  return [
+    ...mine.sort((a, b) => Number(isWaiting(a)) - Number(isWaiting(b)) || rank[a.status] - rank[b.status] || byPriority(a, b)),
+    ...free,
+  ]
 }
 
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */

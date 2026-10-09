@@ -25,6 +25,7 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 - **`/roadmap`** opens the board. Columns are Todo, In progress, Blocked and Done, and a Tree tab shows the full hierarchy.
 - **Keys:** `t` `p` `b` `d` jump to a column, Enter opens a card, `1`–`4` set its status, `h` hands it to Claude, `m`/`u` assign it to you or unassign it, `x` closes it, and `v` switches between board and tree.
 - **Comments** you post on a card reach Claude with your next prompt. A `● N` badge marks cards with comments you haven't read yet.
+- **Priority and type:** each task has a priority (`p0` urgent to `p3` can wait, `p2` by default) and a type (feature, bug or chore). Cards show them when they differ from the defaults, with `p0` in red and `p1` in yellow.
 - **The band** above the prompt shows what an agent is working on. Press it to open that task.
 
 What Claude does with it:
@@ -32,7 +33,7 @@ What Claude does with it:
 - Gets a short brief at the start of each session (open milestones, its own tasks, anything blocked, and your recent changes), plus a reminder if it has been working without updating its tasks.
 - Claims a task before starting it. A claim is refused if someone else holds the task or the task is still waiting on unfinished work, so parallel agents don't collide. Subagents show up by name, such as `explore:find-auth-handlers`.
 - Can't mark a task done until every item on its checklist is checked.
-- Uses `next` to pick up the next task that's ready to start.
+- Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Puts task ids in commit messages (`T12: ...`). Commits and PRs that name a task show up on it.
 
 ## How it's stored

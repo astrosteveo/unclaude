@@ -418,3 +418,36 @@ test('inline, an open card folds the info line into its title and borrows the ta
     await ui.unmount()
   }
 })
+
+test('priority and type: next takes higher priority first, and only what differs from the defaults is shown', async ($, on) => {
+  const some = [
+    item('T1', { due: '2026-10-10' }),
+    item('T2', { priority: 'p0', type: 'bug' }),
+    item('T3', { priority: 'p3', due: '2026-10-01' }),
+    item('T4', { priority: 'p1', type: 'chore' }),
+  ]
+  expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T2', 'T4', 'T1', 'T3'])
+  const lines = outline(some).split('\n')
+  expect(lines).toContain('T1 ○ todo T1 title  (due 2026-10-10)')
+  expect(lines).toContain('T2 ○ todo T2 title  (p0, bug)')
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const bad = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'update', id: 'T1', priority: 'high' } as never)
+  expect(bad.deny).toContain('priority must be one of p0, p1, p2, p3')
+  const wrong = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'add', kind: 'task', title: 'x', type: 'story' } as never)
+  expect(wrong.deny).toContain('type must be one of feature, bug, chore')
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'update', id: 'T1', priority: 'p1', type: 'bug' } as never)
+  expect(scripts.some(one => one.includes("priority='p1'") && one.includes("type='bug'") && one.includes('priority → p1'))).toBe(true)
+
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('p0 bug')
+  expect((await ui.find({ key: 'card-T1' }))?.text).not.toContain('p2')
+  await ui.unmount()
+})

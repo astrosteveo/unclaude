@@ -1,4 +1,4 @@
-import type { Check, Item, Kind, Snapshot, Status } from '../types'
+import type { Check, IssueType, Item, Kind, Priority, Snapshot, Status } from '../types'
 import { PREFIX } from './model'
 
 export const DB = '.claude/roadmap.db'
@@ -112,6 +112,8 @@ export type NewItem = {
   due?: string
   status?: Status
   assignee?: string
+  priority?: Priority
+  type?: IssueType
 }
 
 /**
@@ -126,15 +128,15 @@ export function insert(actor: string, item: NewItem): string {
 INSERT INTO counters(prefix, n) VALUES (${q(prefix)},
   COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM items WHERE SUBSTR(id, 1, 1)=${q(prefix)}), 0) + 1)
   ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
-INSERT INTO items(id, kind, title, status, parent, description, assignee, due) VALUES (${id}, ${q(item.kind)},
+INSERT INTO items(id, kind, title, status, parent, description, assignee, due, priority, type) VALUES (${id}, ${q(item.kind)},
   ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.description || null)},
-  ${q(item.assignee || null)}, ${q(item.due || null)});
+  ${q(item.assignee || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
 INSERT INTO activity(item_id, author, type, body) VALUES (${id}, ${q(actor)}, 'create', ${q(created)});
 SELECT ${id};
 COMMIT;`
 }
 
-export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due'>>
+export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due' | 'priority' | 'type'>>
 
 /** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
