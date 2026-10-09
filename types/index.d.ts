@@ -32,6 +32,22 @@ export type Item = {
   updated_at: string
 }
 
+/**
+ * What to look for (`find`, and the board's filter); every field given must match. `assignee` "none"
+ * means unassigned; `labels` matches an item carrying any of them; `text` searches title, description
+ * and what was written on the item.
+ */
+export type Query = {
+  kind?: Kind
+  status?: Status[]
+  assignee?: string[]
+  priority?: Priority[]
+  type?: IssueType[]
+  labels?: string[]
+  under?: string
+  text?: string
+}
+
 /** One item of a `plan` call: a new item and, nested under it, its own new items. */
 export type PlanNode = {
   /** A name other nodes' blocked_by can use before the item has an id; defaults to its place, `#1`, `#2`… */

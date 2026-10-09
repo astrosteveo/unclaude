@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkLinks, checkPlan, isStale, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, checkPlan, isStale, matches, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -696,4 +696,32 @@ test('plan: creates parents first, wires refs to new ids, and answers the map', 
   const refused = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'plan', tree: [{ kind: 'task', title: 'x', blocked_by: ['ghost'] }] } as never)
   expect(refused.deny).toContain('No item ghost')
   expect(scripts.slice(before).some(one => one.includes('INSERT'))).toBe(false)
+})
+
+test('find: every given filter must match, with text searched in titles, descriptions and comments', async ($, on) => {
+  const some = [
+    item('M1'),
+    item('E1', { parent: 'M1' }),
+    item('T1', { parent: 'E1', title: 'Login form', priority: 'p0', type: 'bug', labels: ['ui'], assignee: 'claude', status: 'in_progress' }),
+    item('T2', { parent: 'E1', title: 'Session store', description: 'Redis backed', labels: ['api'] }),
+    item('T3', { title: 'Docs' }),
+  ]
+  const activity: Activity[] = [{ id: 1, item_id: 'T3', author: 'user', type: 'comment', body: 'mention the login flow', at: '' }]
+  const snap = { items: some, activity, seen: {} }
+  const ids = (query: object) => some.filter(one => matches(snap, one, query)).map(one => one.id)
+  expect(ids({ labels: ['ui', 'api'] })).toEqual(['T1', 'T2'])
+  expect(ids({ assignee: ['none'], kind: 'task' })).toEqual(['T2', 'T3'])
+  expect(ids({ under: 'M1' })).toEqual(['E1', 'T1', 'T2'])
+  expect(ids({ text: 'login' })).toEqual(['T1', 'T3'])
+  expect(ids({ text: 'redis session' })).toEqual(['T2'])
+  expect(ids({ status: ['in_progress'] })).toEqual(['M1', 'E1', 'T1'])
+  expect(ids({ priority: ['p0'], type: ['bug'] })).toEqual(['T1'])
+  expect(ids({ priority: ['p2'], kind: 'task' })).toEqual(['T2', 'T3'])
+
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'find', ...input } as never)
+  expect(String((await call({ labels: ['#UI'] })).result)).toBe('1 match:\nT1 ◐ in_progress Login form  (p0, bug, #ui, @claude) [E1]')
+  expect(String((await call({ text: 'nothing like this' })).result)).toBe('Nothing matches.')
+  expect((await call({ under: 'E9' })).deny).toContain('No item E9')
 })

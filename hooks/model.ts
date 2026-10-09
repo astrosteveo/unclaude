@@ -1,4 +1,4 @@
-import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Refs, Snapshot, Status } from '../types'
+import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
 
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
 export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
@@ -97,6 +97,28 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
   }
   for (const one of out) visit(one.ref)
   return out
+}
+
+/** Whether `item` is what `query` looks for. Status is the rolled-up one, as the board shows it. */
+export function matches(snap: Snapshot, item: Item, query: Query): boolean {
+  if (query.kind && item.kind !== query.kind) return false
+  if (query.status?.length && !query.status.includes(statusOf(snap.items, item))) return false
+  if (query.assignee?.length && !query.assignee.some(who => (who === 'none' ? !item.assignee : item.assignee?.toLowerCase() === who.toLowerCase())))
+    return false
+  if (query.priority?.length && !query.priority.includes(item.priority ?? 'p2')) return false
+  if (query.type?.length && !query.type.includes(item.type ?? 'feature')) return false
+  if (query.labels?.length && !query.labels.some(one => (item.labels ?? []).includes(one))) return false
+  if (query.under) {
+    const root = find(snap.items, query.under)
+    if (!root || root.id === item.id || !subtree(snap.items, root.id).includes(item.id)) return false
+  }
+  if (query.text?.trim()) {
+    const words = query.text.toLowerCase().split(/\s+/).filter(Boolean)
+    const said = snap.activity.filter(one => one.item_id === item.id && isMessage(one)).map(one => one.body)
+    const hay = [item.id, item.title, item.description ?? '', ...said].join('\n').toLowerCase()
+    if (!words.every(word => hay.includes(word))) return false
+  }
+  return true
 }
 
 /** The tasks `item` waits on that are not done yet. */

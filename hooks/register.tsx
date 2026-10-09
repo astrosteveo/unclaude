@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { IssueType, Item, Kind, PlanNode, Priority, Refs, Snapshot, Status, View } from '../types'
+import type { IssueType, Item, Kind, PlanNode, Priority, Query, Refs, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, line, checkLinks, checkPlan, isMessage, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, line, matches, checkLinks, checkPlan, isMessage, isStale, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -234,7 +234,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
+  action: 'show' | 'next' | 'find' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove'
   id?: string
   kind?: Kind
   title?: string
@@ -247,6 +247,8 @@ type Input = {
   type?: IssueType
   labels?: string[] | string
   tree?: PlanNode[] | PlanNode | string
+  under?: string
+  text?: string
   relates_to?: string[] | string
   duplicates?: string
   body?: string
@@ -315,6 +317,27 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const up = nextUp(snap.items, actor, await $.clock.now().catch(() => undefined)).slice(0, 5)
       if (up.length === 0) return 'Nothing open: no tasks assigned to you and no unassigned todo tasks.'
       return up.map(task => detail(snap, task, 5)).join('\n\n')
+    }
+    case 'find': {
+      const query: Query = {
+        kind: a.kind,
+        status: a.status ? [a.status] : undefined,
+        assignee: a.assignee ? [a.assignee] : undefined,
+        priority: a.priority ? [a.priority] : undefined,
+        type: a.type ? [a.type] : undefined,
+        labels: a.labels === undefined ? undefined : idList(a.labels).map(db.label),
+        under: a.under || undefined,
+        text: a.text || undefined,
+      }
+      if (query.under && !find(snap.items, query.under)) fail(`No item ${query.under}`)
+      const found = rows(snap.items).map(row => row.item).filter(one => matches(snap, one, query))
+      if (found.length === 0) return 'Nothing matches.'
+      const cap = 40
+      return [
+        `${found.length} match${found.length === 1 ? '' : 'es'}:`,
+        ...found.slice(0, cap).map(one => `${line(snap.items, one)}${one.parent ? ` [${one.parent}]` : ''}`),
+        ...(found.length > cap ? [`…${found.length - cap} more; narrow the search`] : []),
+      ].join('\n')
     }
     case 'add': {
       if (!a.kind || !KINDS.includes(a.kind)) fail(`kind must be one of ${KINDS.join(', ')}`)
@@ -609,7 +632,8 @@ export const register: Register = on => {
       description: [
         "The project's shared tracker, a lightweight Jira kept in .claude/roadmap.db that you, the user and other agents all work from.",
         'Hierarchy: milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
-        'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by due date),',
+        'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by priority and due date),',
+        'find (any of kind, status, assignee ("none" for unassigned), priority, type, labels, under (an id: its subtree), text (title, description, comments)),',
         'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
         'claim (id: take a task and start it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks), release (id; body leaves a handoff note for whoever picks it up next),',
         'comment (id, body), remove (id; cascade for children).',
@@ -626,7 +650,7 @@ export const register: Register = on => {
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['show', 'next', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
+          action: { type: 'string', enum: ['show', 'next', 'find', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
           id: { type: 'string', description: 'Item id, e.g. T12' },
           kind: { type: 'string', enum: KINDS },
           title: { type: 'string' },
@@ -645,6 +669,8 @@ export const register: Register = on => {
           },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
+          under: { type: 'string', description: 'find: only items under this milestone or epic' },
+          text: { type: 'string', description: 'find: words that must all appear in the title, description or comments' },
           tree: {
             type: 'array',
             description: 'plan: new items, each { ref?, kind, title, description?, due?, assignee?, priority?, type?, labels?, checklist?, blocked_by?, children? }',

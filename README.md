@@ -37,6 +37,7 @@ What Claude does with it:
 - Can't mark a task done until every item on its checklist is checked, and its done goes to Review for you to approve.
 - Leaves a handoff note when it lets a task go (`release` with a note). The next agent to claim the task gets the note first, along with the task's description, checklist, recent activity and linked commits, so it can pick up where the last one stopped.
 - Plans a whole breakdown in one call (`plan`): milestones, epics and tasks nested as a tree, with checklists, labels and dependencies between the new tasks. The tree is checked in full before anything is written.
+- Searches with `find`: by status, assignee (`none` for unassigned), priority, type, labels, a subtree (`under`) or words in titles, descriptions and comments.
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Puts task ids in commit messages (`T12: ...`). Commits and PRs that name a task show up on it.
 
