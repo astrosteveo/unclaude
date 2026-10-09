@@ -30,6 +30,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - An `add` or `update` that fails writes nothing. Before, a bad related or duplicate id, or a checklist on an epic, failed after the item was added, so a retry added it twice; and an `update` with a bad blocker or link had already written its other fields.
 - A task let go while under way (`release`, or Unassign on the board) goes back to todo, so `next` and the backlog offer it to the next agent. Before, it stayed in progress with nobody on it and no agent was offered it again. Blocked and review tasks keep their status.
 - A project that never uses the roadmap is left alone: no `.claude/roadmap.db` is created until the first write, and git and gh aren't run there. Before, a user-scope install made an empty database in every folder Claude Code opened.
+- A milestone or epic up for review shows in the board's Review column, so its Approve (and the merge of its pull request) is a press away. Before, the board listed tasks only, and it was reachable only from the Tree.
 
 ### Changed
 

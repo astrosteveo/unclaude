@@ -1015,6 +1015,43 @@ test('a handed epic in review is approved, or sent back, from its card', async (
   await ui.unmount()
 })
 
+test("an epic up for review waits in the board's Review column, whose card approves and merges it", async ($, on) => {
+  const some = [
+    item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'done' }),
+    // Not up for review: nobody was handed E2, and E3's tasks aren't all done.
+    item('E2'), item('T3', { parent: 'E2', status: 'done' }),
+    item('E3', { assignee: 'claude' }), item('T4', { parent: 'E3' }),
+  ]
+  const ghList = JSON.stringify([{ number: 9, title: 'E1: Things', headRefName: 'e1-things', state: 'OPEN', url: 'https://x/9', statusCheckRollup: [] }])
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    if (e.argv[0] === 'gh' && e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
+    if (e.argv[0] === 'gh' || e.argv[0] === 'git') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    return { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'E1' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  expect(await ui.find({ key: 'card-E1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: / 2\/2 tasks/ })).toBeDefined()
+  expect(await ui.find({ key: 'card-E2' })).toBeUndefined()
+  expect(await ui.find({ key: 'card-E3' })).toBeUndefined()
+  await ui.press({ key: 'card-E1' })
+  await ui.press({ key: 'approve' })
+  await ui.press({ key: 'merge-yes' })
+  expect(ran.some(argv => argv.join(' ') === 'gh pr merge 9 --merge')).toBe(true)
+  await ui.unmount()
+})
+
 test('new item from the board: n opens the form, choices narrow the parents, Enter creates and opens it', async ($, on) => {
   const some = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' }), item('M2'), item('T2', { parent: 'M2', status: 'done' })]
   expect(homesFor(some, 'task').map(one => one.id)).toEqual(['M1', 'E1'])
