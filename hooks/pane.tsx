@@ -52,6 +52,17 @@ export function columnCaps(heights: Record<Status, number[]>, budget: number, is
   return caps
 }
 
+/** The first of `list` whose rows (`heights`, one each) fit in `room`. */
+export function fitRows<T>(list: T[], heights: number[], room: number): T[] {
+  let used = 0
+  let n = 0
+  while (n < list.length && used + heights[n]! <= room) used += heights[n++]!
+  return list.slice(0, Math.max(1, n))
+}
+
+// A backlog row's picker, priority and hand-off beside its title, with the gaps between them.
+const BACKLOG_EDGES = 1 + 5 + 12 + 3
+
 /** The rows `text` takes wrapped at word boundaries to `width` columns, as the terminal draws it. */
 export function rowsOf(text: string, width: number): number {
   if (width < 1) return 1
@@ -370,20 +381,23 @@ export function drawPane(
       {treeShown.map(({ item, depth }) => {
         const p = progress(items, item)
         const status = statusOf(items, item)
+        const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
+        const news = badge(item)
+        // Docked, a row keeps to one line so the window of rows fits above the card: a long name, then the title, is cut.
+        const lead = depth * 2 + 2 + item.id.length + 1
+        const fullWho = item.assignee ? `  @${item.assignee}` : ''
+        const who = isDocked && fullWho.length > 18 ? `${fullWho.slice(0, 17)}…` : fullWho
+        const room = width - lead - facts.length - who.length - news.length
+        const title = isDocked && item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
         return (
           <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
             {'  '.repeat(depth)}
             <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
-            <Text bold={item.kind === 'milestone'}>
-              {isDocked && item.title.length > width - depth * 2 - item.id.length - 16 ? `${item.title.slice(0, Math.max(8, width - depth * 2 - item.id.length - 17))}…` : item.title}
-            </Text>
-            <Text dimColor>
-              {item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}
-              {item.due ? `  due ${item.due}` : ''}
-            </Text>
-            <Text color="cyan">{item.assignee ? `  @${item.assignee}` : ''}</Text>
+            <Text bold={item.kind === 'milestone'}>{title}</Text>
+            <Text dimColor>{facts}</Text>
+            <Text color="cyan">{who}</Text>
             <Text color="magenta" bold>
-              {badge(item)}
+              {news}
             </Text>
           </Button>
         )
@@ -408,7 +422,13 @@ export function drawPane(
 
   // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
   const triageAll = backlog(items).filter(isShown)
-  const triage = isDocked ? triageAll.slice(0, Math.max(1, Math.floor((topRows - 1) / 2))) : triageAll
+  // Docked, as many rows as fit above the card, each as tall as its title wraps beside the picker and hand-off.
+  const triageRows = (task: Item) => {
+    const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
+    const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
+    return rowsOf(`${task.id} ${task.title}${where}${tags ? ` ${tags}` : ''}`, Math.max(10, width - BACKLOG_EDGES))
+  }
+  const triage = isDocked ? fitRows(triageAll, triageAll.map(triageRows), topRows - 1) : triageAll
   const backlogView = (
     <Box flexDirection="column">
       {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
