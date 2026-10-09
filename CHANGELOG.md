@@ -4,6 +4,12 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-09
+
+### Fixed
+
+- ship writes the release notes of merged work itself when [Unreleased] is empty, instead of refusing.
+
 ## [0.6.0] - 2026-10-09
 
 ### Added
@@ -120,6 +126,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.1
 [0.6.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.0
 [0.5.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.5.0
