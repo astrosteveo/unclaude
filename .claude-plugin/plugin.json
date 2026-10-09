@@ -1,7 +1,17 @@
 {
   "name": "roadmap",
-  "version": "0.1.0",
-  "description": "Project roadmap tracking: milestones > epics > tasks, kept in .claude/roadmap.json, editable by Claude and shown in a pane",
-  "author": { "name": "astrosteveo" },
-  "types": "./types/index.d.ts"
+  "version": "1.0.0",
+  "description": "A lightweight Jira for Claude Code: milestones, epics and tasks that you and your agents plan and work from together",
+  "author": {
+    "name": "astrosteveo"
+  },
+  "types": "./types/index.d.ts",
+  "repository": "https://github.com/astrosteveo/unclaude",
+  "keywords": [
+    "roadmap",
+    "tasks",
+    "planning",
+    "agents",
+    "jira"
+  ]
 }

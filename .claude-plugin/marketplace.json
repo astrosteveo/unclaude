@@ -1,0 +1,14 @@
+{
+  "name": "unclaude",
+  "description": "Claude Code mods by astrosteveo",
+  "owner": {
+    "name": "astrosteveo"
+  },
+  "plugins": [
+    {
+      "name": "roadmap",
+      "source": "./",
+      "description": "A lightweight Jira for Claude Code: milestones, epics and tasks that you and your agents plan and work from together"
+    }
+  ]
+}
