@@ -3,8 +3,8 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, timelineOf, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn,
+  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
+  subtree, waitingOn, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -148,6 +148,8 @@ export type PaneState = {
   isFiltering: boolean
   /** Whether the board's Done column shows all done work, not just the recent. */
   isDoneOpen: boolean
+  /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
+  flipped: string[]
   /** The new-item form, while it is open. */
   draft: Draft | null
   /** Whether the open card shows its fields for editing. */
@@ -195,6 +197,8 @@ export type PaneActions = {
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
   setDoneOpen: (isOn: boolean) => void
+  /** Folds or unfolds a milestone or epic in the tree and the timeline. */
+  toggleFold: (id: string) => void
   /** Opens the new-item form (under `parent` when given), changes its choices, or closes it (null). */
   setDraft: (draft: Draft | null) => void
   create: (draft: Draft, title: string) => void
@@ -258,7 +262,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -542,7 +546,25 @@ export function drawPane(
   )
 
 
-  const treeRows = rows(items).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
+  // A finished milestone or epic is folded to its own line, an open one unfolded, each until pressed;
+  // with a filter typed, nothing is folded, so every match shows.
+  const hasKids = (item: Item) => item.kind !== 'task' && childrenOf(items, item.id).length > 0
+  // What holds the open card stays unfolded, so the card's row is always there to return to.
+  const holdsPick = new Set<string>()
+  for (let at = find(items, pick ?? undefined)?.parent; at; at = find(items, at)?.parent ?? null) holdsPick.add(at)
+  const isFolded = (item: Item) =>
+    !query && hasKids(item) && !holdsPick.has(item.id) && (statusOf(items, item) === 'done') !== flipped.includes(item.id)
+  // The timeline shows epics under milestones, not tasks: there, only a milestone with epics folds.
+  const foldsInTimeline = (item: Item) => item.kind === 'milestone' && childrenOf(items, item.id).some(one => one.kind === 'epic')
+  const foldToggle = (item: Item, canFold = hasKids(item)) =>
+    canFold ? (
+      <Button key={`fold-${item.id}`} plain onPress={() => act.toggleFold(item.id)}>
+        <Text dimColor>{isFolded(item) ? '▸' : '▾'}</Text>
+      </Button>
+    ) : (
+      <Text key={`fold-${item.id}`}> </Text>
+    )
+  const treeRows = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
   // Docked, a window of rows that keeps the open item in sight.
   const treeFrom = isDocked && treeRows.length > topRows
     ? Math.max(0, Math.min(treeRows.findIndex(row => row.item.id === pick) - Math.floor(topRows / 2), treeRows.length - (topRows - 1)))
@@ -555,23 +577,26 @@ export function drawPane(
         const status = statusOf(items, item)
         const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
         const news = badge(item)
-        // Docked, a row keeps to one line so the window of rows fits above the card: a long name, then the title, is cut.
-        const lead = depth * 2 + 2 + item.id.length + 1
+        // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
+        // name, then the title, is cut.
+        const lead = depth * 2 + 2 + 2 + item.id.length + 1
         const fullWho = item.assignee ? `  @${item.assignee}` : ''
-        const who = isDocked && fullWho.length > 18 ? `${fullWho.slice(0, 17)}…` : fullWho
+        const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
         const room = width - lead - facts.length - who.length - news.length
-        const title = isDocked && item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
+        const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
         return (
-          <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
-            {'  '.repeat(depth)}
-            <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
-            <Text bold={item.kind === 'milestone'}>{title}</Text>
-            <Text dimColor>{facts}</Text>
-            <Text color="cyan">{who}</Text>
-            <Text color="magenta" bold>
-              {news}
-            </Text>
-          </Button>
+          <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+            {foldToggle(item)}
+            <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
+              <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
+              <Text bold={item.kind === 'milestone'}>{title}</Text>
+              <Text dimColor>{facts}</Text>
+              <Text color="cyan">{who}</Text>
+              <Text color="magenta" bold>
+                {news}
+              </Text>
+            </Button>
+          </Box>
         )
       })}
       {treeShown.length < treeRows.length && <Text key="tree-more" dimColor>…{treeRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
@@ -649,39 +674,63 @@ export function drawPane(
 
   // The timeline: milestones and epics by due date, each with its progress and how it stands against the date.
   const today = now > 0 ? dateOf(now) : undefined
-  const timelineAll = timelineOf(items).filter(one => !query || subtree(items, one.id).some(id => isShown(find(items, id)!)))
+  const timelineAll = timelineRows(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
   const timelineShown = isDocked ? timelineAll.slice(0, Math.max(1, topRows - 1)) : timelineAll
   const BAR = 10
+  // The timeline lines up in columns: the name, the date (a dim dash for none), the bar and its count,
+  // then how it stands against its date.
+  const countWidth = Math.max(0, ...timelineAll.map(({ item }) => { const p = progress(items, item); return `${p.done}/${p.total}`.length }))
+  const right = 2 + 10 + 2 + BAR + 1 + countWidth
+  // How each stands against its date: room is kept for it, up to a point, before the names take the rest.
+  const standing = (one: Item) => {
+    const p = progress(items, one)
+    const days = one.due && today ? daysBetween(today, one.due) : undefined
+    if (days === undefined || statusOf(items, one) === 'done') return ''
+    if (isLate(items, one, now)) return `${-days} day${days === -1 ? '' : 's'} late, ${p.total - p.done} open`
+    return days === 0 ? 'due today' : `in ${days} day${days === 1 ? '' : 's'}`
+  }
+  const whenWidth = Math.min(22, Math.max(0, ...timelineAll.map(({ item }) => standing(item).length)))
+  const nameWidth = Math.min(
+    Math.max(0, ...timelineAll.map(({ item, depth }) => depth * 2 + 2 + 2 + item.id.length + 1 + item.title.length)),
+    Math.max(20, width - right - 2 - (whenWidth ? whenWidth + 2 : 0)),
+  )
   const timelineView = (
     <Box flexDirection="column">
       {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
-      {timelineShown.map(one => {
+      {timelineShown.map(({ item: one, depth }) => {
         const p = progress(items, one)
         const st = statusOf(items, one)
         const filled = p.total ? Math.round((p.done / p.total) * BAR) : 0
-        const days = one.due && today ? daysBetween(today, one.due) : undefined
         const late = isLate(items, one, now)
-        const open = p.total - p.done
-        const when = days === undefined ? '' : st === 'done' ? '' : late ? `${-days} day${days === -1 ? '' : 's'} late, ${open} open` : days === 0 ? 'due today' : `in ${days} day${days === 1 ? '' : 's'}`
-        const isUnder = Boolean(one.parent && find(items, one.parent))
+        const when = standing(one)
+        const lead = depth * 2 + 2 + 2 + one.id.length + 1
+        const title = one.title.length + lead > nameWidth ? `${one.title.slice(0, Math.max(4, nameWidth - lead - 1))}…` : one.title
+        const pad = ' '.repeat(Math.max(0, nameWidth - lead - title.length))
         // An epic without a date of its own goes by its milestone's.
-        const date = one.due ? `  ${one.due}` : isUnder ? '' : '  no due date'
-        const fixed = (isUnder ? 2 : 0) + 2 + one.id.length + 1 + date.length + 2 + BAR + ` ${p.done}/${p.total}`.length + (when ? when.length + 2 : 0)
-        const title = one.title.length + fixed > width - 1 ? `${one.title.slice(0, Math.max(8, width - fixed - 2))}…` : one.title
+        const date = one.due ?? (depth > 0 ? '' : '—')
+        // Room left on the line for how it stands: cut rather than wrapped.
+        const whenRoom = width - nameWidth - right - 2
+        const said = when && whenRoom > 4 ? (when.length > whenRoom ? `${when.slice(0, whenRoom - 1)}…` : when) : ''
         return (
-          <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
-            {isUnder ? '  ' : ''}
-            <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
-            <Text dimColor>{date}  </Text>
-            <Text color="green">{'▓'.repeat(filled)}</Text>
-            <Text dimColor>{'░'.repeat(BAR - filled)} {p.done}/{p.total}</Text>
-            <Text color={late ? 'red' : undefined} dimColor={!late} bold={late}>{when ? `  ${when}` : ''}</Text>
-          </Button>
+          <Box key={`timeline-${one.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+            {foldToggle(one, foldsInTimeline(one))}
+            <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
+              <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
+              {pad}
+              <Text dimColor>{`  ${date.padEnd(10)}  `}</Text>
+              <Text color="green">{'▓'.repeat(filled)}</Text>
+              <Text dimColor>
+                {'░'.repeat(BAR - filled)} {`${p.done}/${p.total}`.padStart(countWidth)}
+              </Text>
+              <Text color={late ? 'red' : undefined} dimColor={!late} bold={late}>{said ? `  ${said}` : ''}</Text>
+            </Button>
+          </Box>
         )
       })}
       {timelineShown.length < timelineAll.length && <Text key="timeline-more" dimColor>…{timelineAll.length - timelineShown.length} more (close the card to see them all)</Text>}
     </Box>
   )
+
 
   const item = find(items, pick ?? undefined)
   const status = item && statusOf(items, item)

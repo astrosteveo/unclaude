@@ -239,3 +239,58 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     await ui.unmount()
   }
 })
+
+test('tree and timeline: open work first, finished scopes folded to a line, a toggle (Tab to it, Enter) opens them', async ($, on) => {
+  const items = [
+    item('M1', { title: 'Shipped', due: '2026-09-01' }), item('E1', { parent: 'M1', title: 'Old epic' }),
+    item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'done' }),
+    item('M2', { title: 'Going', due: '2026-12-01' }), item('E2', { parent: 'M2', title: 'Current' }),
+    item('T3', { parent: 'E2', status: 'done' }), item('T4', { parent: 'E2', status: 'in_progress' }),
+    item('M3', { title: 'Undated' }), item('E3', { parent: 'M3' }), item('T5', { parent: 'E3' }),
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  const rowsOf = async (prefix: string) =>
+    (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
+  await ui.press({ key: 'tab-tree' })
+  // Open milestones lead, done tasks after open ones; finished M1 is one line, its epic and tasks folded away.
+  expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1'])
+  expect((await ui.find({ key: 'fold-M1' }))?.text).toBe('▸')
+  // Opened, M1 shows its finished epic, itself folded until opened.
+  await ui.press({ key: 'fold-M1' })
+  expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1', 'E1'])
+  await ui.press({ key: 'fold-E1' })
+  expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1', 'E1', 'T1', 'T2'])
+  // An open one folds too.
+  await ui.press({ key: 'fold-M2' })
+  expect(await rowsOf('row-')).toEqual(['M2', 'M3', 'E3', 'T5', 'M1', 'E1', 'T1', 'T2'])
+  await ui.press({ key: 'fold-M2' })
+  await ui.press({ key: 'fold-M1' })
+
+  // A card open on work inside a folded scope unfolds what holds it.
+  await ui.press({ key: 'tab-board' })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'tab-tree' })
+  expect(await rowsOf('row-')).toContain('T1')
+  await ui.press({ key: 'close' })
+
+  await ui.press({ key: 'tab-timeline' })
+  expect(await rowsOf('time-')).toEqual(['M2', 'E2', 'M3', 'E3', 'M1'])
+  // Only milestones fold here, where epics have no rows under them.
+  expect(await ui.find({ key: 'fold-E2', type: 'Button' })).toBeUndefined()
+  await ui.press({ key: 'fold-M1' })
+  expect(await rowsOf('time-')).toEqual(['M2', 'E2', 'M3', 'E3', 'M1', 'E1'])
+  // Bars and counts line up; an undated milestone shows a dash, not words.
+  const { lines } = paintPane(await ui.drawn(), 84)
+  const rows = lines.filter(line => /[▓░]/.test(line) && !line.includes('done'))
+  expect(new Set(rows.map(line => line.search(/[▓░]/))).size).toBe(1)
+  expect(rows.find(line => line.includes('M3 Undated'))).toMatch(/M3 Undated +— +░/)
+  await ui.unmount()
+})

@@ -2218,7 +2218,7 @@ test('timeline: milestones and epics by due date with their progress; late work 
   await ui.press({ key: 'tab-timeline' })
   expect((await ui.find({ key: 'time-E1' }))?.text).toContain('2026-10-05  ▓▓▓▓▓░░░░░ 1/2  4 days late, 1 open')
   expect((await ui.find({ key: 'time-M1' }))?.text).toContain('2026-10-20  ▓▓▓░░░░░░░ 1/3  in 11 days')
-  expect((await ui.find({ key: 'time-M2' }))?.text).toContain('no due date')
+  expect((await ui.find({ key: 'time-M2' }))?.text).toMatch(/M2 Later +— /)
   // A row opens its card.
   await ui.press({ key: 'time-M1' })
   expect(await ui.find({ key: 'detail' })).toBeDefined()
