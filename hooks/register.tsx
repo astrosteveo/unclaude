@@ -425,12 +425,16 @@ export function wrap(text: string, width: number): string[] {
 
 const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', done: 'd' }
 
+// The inline height an open card asks for: more than most cards need; the layout caps it.
+const CARD_ROWS = 40
+
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
 /** Closes the detail panel and hands the ring back to the card or row it was opened from. */
 async function closeDetail($: EngineInterface, id: string) {
   await update($, selected, () => null)
+  await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   await focusOn($, (await read($, view)) === 'board' ? `card-${id}` : `row-${id}`)
 }
 
@@ -439,6 +443,8 @@ async function open($: EngineInterface, id: string | null) {
   await update($, selected, () => id)
   await update($, scrolled, () => 0)
   if (id === null) return
+  // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
+  await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
   // The card that held the ring is gone once the panel stands in for the board: hand the ring to the
   // panel, on the first unticked checklist entry when there is one.
   const item = find((await read($, snapshot)).items, id)
@@ -454,7 +460,6 @@ async function open($: EngineInterface, id: string | null) {
 
 /** Opens the board on one item, as pressing its card would. */
 async function showItem($: EngineInterface, id: string) {
-  await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   await open($, id)
 }
 
@@ -847,18 +852,18 @@ export const register: Register = on => {
     }
     // On the terminal the window is ours: what fits under the fixed rows, with a mark for what is above or below.
     // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
-    // footer, and a row for each scroll mark.
+    // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
-    const fixed = 1 + 2 + tall(item?.title ?? '', item ? item.kind.length + item.id.length + 2 : 0) + 2 + (inner < 56 ? 1 : 0) + 1 + 1 + 2
-    const room = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
+    const fixed = 1 + 2 + tall(item?.title ?? '', item ? item.kind.length + item.id.length + 2 : 0) + 2 + (inner < 56 ? 1 : 0) + 1 + 1 + 1
+    const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
     const total = sections.reduce((sum, row) => sum + row.rows, 0)
+    const isScrolling = space < total
+    scrollMax = isScrolling ? total - (space - 1) : 0
+    const want = isScrolling ? Math.min(await read($, scrolled), scrollMax) : 0
+    const room = want > 0 ? space - 1 : space
+    // Scroll in whole rows of the list: skip rows until the scrolled-to line is reached.
     let first = 0
-    if (room < total) {
-      // Scroll in whole rows of the list: skip rows until the scrolled-to line is reached.
-      const want = Math.min(await read($, scrolled), total - room)
-      for (let skipped = 0; first < sections.length && skipped + sections[first]!.rows <= want; first++) skipped += sections[first]!.rows
-      scrollMax = total - room
-    } else scrollMax = 0
+    for (let skipped = 0; first < sections.length && skipped + sections[first]!.rows <= want; first++) skipped += sections[first]!.rows
     let used = 0
     const shown = sections.slice(first).filter(row => (used += row.rows) <= room)
     // A heading whose first row didn't fit waits for it below.
@@ -871,9 +876,9 @@ export const register: Register = on => {
       below > 0 ? <Text key="more-below" dimColor>↓ {below} more {below === 1 ? 'line' : 'lines'} below · scroll down</Text> : null,
     ]
     // An inline pane is as tall as its tree: hold a scrolling card at one height so the frame doesn't jump.
-    if (room < total) {
+    if (isScrolling) {
       const drawn = shown.reduce((sum, row) => sum + row.rows, 0) + (above > 0 ? 1 : 0) + (below > 0 ? 1 : 0)
-      if (drawn < room + 2) body.push(<Box key="pad" height={room + 2 - drawn} />)
+      if (drawn < space + 1) body.push(<Box key="pad" height={space + 1 - drawn} />)
     }
 
     const panel = item && status && (
