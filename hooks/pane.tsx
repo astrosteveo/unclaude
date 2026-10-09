@@ -22,23 +22,56 @@ const DOCK_MIN_ROWS = 30
 const DOCK_SHARE = 0.4
 
 /**
- * How many cards of each column fit in `budget` rows, by column, beside one another (`isWide`) or
- * stacked: work under way and in review first, then blocked, todo and done. A column cut short spends
- * a row on its "… more".
+ * How many cards of each column fit in `budget` rows, given the rows each card takes (a card wraps in a
+ * narrow column), by column, beside one another (`isWide`) or stacked: work under way and in review
+ * first, then blocked, todo and done. A column cut short spends a row on its "… more".
  */
-export function columnCaps(lengths: Record<Status, number>, budget: number, isWide: boolean): Record<Status, number> {
+export function columnCaps(heights: Record<Status, number[]>, budget: number, isWide: boolean): Record<Status, number> {
   const caps = { todo: 0, in_progress: 0, blocked: 0, review: 0, done: 0 } as Record<Status, number>
+  // The cards from the top of a column that fit in `room` rows, and the rows they take.
+  const fit = (rows: number[], room: number) => {
+    let n = 0
+    let used = 0
+    while (n < rows.length && used + rows[n]! <= room) used += rows[n++]!
+    return { n, used }
+  }
+  const total = (rows: number[]) => rows.reduce((sum, one) => sum + one, 0)
   if (isWide) {
-    for (const status of STATUSES) caps[status] = lengths[status] <= budget - 1 ? lengths[status] : Math.max(0, budget - 2)
+    for (const status of STATUSES)
+      caps[status] = total(heights[status]) <= budget - 1 ? heights[status].length : fit(heights[status], Math.max(0, budget - 2)).n
     return caps
   }
   // Each column's heading, and a row kept for each non-empty one's "… more" in case it is cut.
-  let left = budget - STATUSES.length - STATUSES.filter(status => lengths[status] > 0).length
+  let left = budget - STATUSES.length - STATUSES.filter(status => heights[status].length > 0).length
   for (const status of ['in_progress', 'review', 'blocked', 'todo', 'done'] as Status[]) {
-    caps[status] = Math.max(0, Math.min(lengths[status], left))
-    left -= caps[status]
+    const { n, used } = fit(heights[status], Math.max(0, left))
+    caps[status] = n
+    // A column cut short takes what is left: the columns after it wait their turn.
+    left = n < heights[status].length ? 0 : left - used
   }
   return caps
+}
+
+/** The rows `text` takes wrapped at word boundaries to `width` columns, as the terminal draws it. */
+export function rowsOf(text: string, width: number): number {
+  if (width < 1) return 1
+  let rows = 1
+  let col = 0
+  for (const word of text.split(' ')) {
+    const length = [...word].length
+    if (col === 0) col = length
+    else if (col + 1 + length <= width) col += 1 + length
+    else {
+      rows++
+      col = length
+    }
+    // A word longer than the line is broken across rows.
+    while (col > width) {
+      rows++
+      col -= width
+    }
+  }
+  return rows
 }
 
 export const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', review: 'r', done: 'd' }
@@ -195,7 +228,8 @@ export function drawPane(
     return count ? ` ● ${count}` : ''
   }
 
-  const card = (item: Item, room: number) => {
+  // What a card says, cut to fit `room` columns where it can be.
+  const cardBits = (item: Item, room: number) => {
     const fullWho = item.assignee ? ` @${item.assignee}` : ''
     const stale = isStale(item, now) ? ' ⌛stale' : ''
     // Past when it was due, its own date or one above it.
@@ -217,6 +251,15 @@ export function drawPane(
     const who = fullWho.length > whoRoom ? `${fullWho.slice(0, whoRoom - 1)}…` : fullWho
     const extra = marked + who.length
     const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
+    return { title, tag, ticks, pr, prTag, wait, who, stale, late, news }
+  }
+  /** The rows a card takes in a column `width` wide: a narrow one wraps it. */
+  const cardRows = (item: Item, room: number, width: number) => {
+    const { title, tag, ticks, prTag, wait, who, stale, late, news } = cardBits(item, room)
+    return rowsOf(`${item.id} ${title}${tag}${ticks}${prTag}${wait}${who}${stale}${late}${news}`, width)
+  }
+  const card = (item: Item, room: number) => {
+    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news } = cardBits(item, room)
     return (
       <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
         <Text dimColor>{item.id}</Text> {title}
@@ -289,7 +332,10 @@ export function drawPane(
     [status, [...(status === 'review' ? scopes : []), ...tasks.filter(task => task.status === status)]])) as Record<Status, Item[]>
   // Docked, the board fits the rows above the card.
   const caps = isDocked
-    ? columnCaps(Object.fromEntries(STATUSES.map(status => [status, columns[status].length])) as Record<Status, number>, topRows, isWide)
+    ? columnCaps(
+      Object.fromEntries(STATUSES.map(status =>
+        [status, columns[status].map(task => cardRows(task, isWide ? colWidth - 1 : width - 2, isWide ? colWidth : width))])) as Record<Status, number[]>,
+      topRows, isWide)
     : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? 8 : 15])) as Record<Status, number>)
   const board = (
     <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? 1 : 0}>

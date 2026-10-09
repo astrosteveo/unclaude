@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
-import { columnCaps } from './pane'
+import { columnCaps, rowsOf } from './pane'
 import { ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -1374,8 +1374,14 @@ test('pull requests on the board: a tag on the row, a line under the bar, and a 
 })
 
 test('a card docks under the board: the board stays, another card swaps it, the open one or its ✕ closes it; a short pane shows the card alone', async ($, on) => {
-  expect(columnCaps({ todo: 10, in_progress: 2, blocked: 0, review: 1, done: 40 }, 14, false)).toEqual({ todo: 2, in_progress: 2, blocked: 0, review: 1, done: 0 })
-  expect(columnCaps({ todo: 10, in_progress: 2, blocked: 0, review: 1, done: 40 }, 8, true)).toEqual({ todo: 6, in_progress: 2, blocked: 0, review: 1, done: 6 })
+  const ones = (n: number) => Array<number>(n).fill(1)
+  expect(columnCaps({ todo: ones(10), in_progress: ones(2), blocked: [], review: ones(1), done: ones(40) }, 14, false)).toEqual({ todo: 2, in_progress: 2, blocked: 0, review: 1, done: 0 })
+  expect(columnCaps({ todo: ones(10), in_progress: ones(2), blocked: [], review: ones(1), done: ones(40) }, 8, true)).toEqual({ todo: 6, in_progress: 2, blocked: 0, review: 1, done: 6 })
+  // Cards that wrap to two rows in a narrow column count as two: the column stays above the card.
+  expect(columnCaps({ todo: [1], in_progress: [], blocked: [], review: [2], done: Array<number>(40).fill(2) }, 12, true)).toEqual({ todo: 1, in_progress: 0, blocked: 0, review: 1, done: 5 })
+  expect(rowsOf('T80 Safe… p1 bug ☑4/4 @claude', 35)).toBe(1)
+  expect(rowsOf('T80 Safe… p1 bug ☑4/4 @claude', 22)).toBe(2)
+  expect(rowsOf('T80 Safe… p1 bug ☑4/4 @claude', 21)).toBe(2)
   const some = [item('T1', { title: 'First' }), item('T2', { title: 'Second', status: 'in_progress' })]
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
