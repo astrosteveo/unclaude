@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // What the mod costs an agent: the same small epic, run headless with the roadmap mod and without it.
 //
-//   node bench/tokens/run.mjs [--runs 3] [--arms with,without] [--model <model>] [--out <dir>]
+//   node bench/tokens/run.mjs [--scenario small] [--runs 3] [--arms with,without] [--model <model>] [--out <dir>]
 //   node bench/tokens/run.mjs --report <dir>     (tabulate a finished run again)
 //
-// Each run copies template/ into its own git repository. The "with" arm loads this checkout with
+// A scenario (scenarios/<name>/) is a project and an epic for it: template/, epic.md and seed.sql. Each
+// run copies template/ into its own git repository. The "with" arm loads this checkout with
 // --plugin-dir and gets the epic from seed.sql (no model call); the "without" arm gets epic.md in the
 // prompt. Both arms turn off an installed roadmap@unclaude, so the only difference is this checkout.
 // Each arm first runs a one-word warm-up (see WARM), whose cost is left out of the table.
@@ -22,7 +23,7 @@ const REPO = resolve(HERE, '../..')
 const NO_REMOTE = 'This repo has no git remote: commit locally, but skip pushing and opening pull requests.'
 const PROMPTS = {
   with: () => `Implement E1 from the roadmap. ${NO_REMOTE}`,
-  without: () => `Implement this epic. Commit each task separately with its id in the message. ${NO_REMOTE}\n\n${readFileSync(join(HERE, 'epic.md'), 'utf8')}`,
+  without: () => `Implement this epic. Commit each task separately with its id in the message. ${NO_REMOTE}\n\n${readFileSync(join(SCENARIO, 'epic.md'), 'utf8')}`,
 }
 const SETTINGS = JSON.stringify({ enabledPlugins: { 'roadmap@unclaude': false } })
 
@@ -33,20 +34,22 @@ const { values: opt } = parseArgs({
     model: { type: 'string' },
     out: { type: 'string' },
     report: { type: 'string' },
+    scenario: { type: 'string', default: 'small' },
   },
 })
+const SCENARIO = join(HERE, 'scenarios', opt.scenario)
 
 const sh = (cmd, args, cwd, input) => spawnSync(cmd, args, { cwd, input, encoding: 'utf8' })
 
 /** A fresh copy of the template as a git repository, with the epic on its roadmap for the "with" arm. */
 function prepare(dir, arm) {
-  cpSync(join(HERE, 'template'), dir, { recursive: true })
+  cpSync(join(SCENARIO, 'template'), dir, { recursive: true })
   sh('git', ['init', '-q', '-b', 'main'], dir)
   sh('git', ['add', '-A'], dir)
   sh('git', ['-c', 'user.name=bench', '-c', 'user.email=bench@local', 'commit', '-qm', 'init'], dir)
   if (arm === 'with') {
     mkdirSync(join(dir, '.claude'))
-    const seeded = sh('sqlite3', [join(dir, '.claude/roadmap.db')], dir, readFileSync(join(HERE, 'seed.sql'), 'utf8'))
+    const seeded = sh('sqlite3', [join(dir, '.claude/roadmap.db')], dir, readFileSync(join(SCENARIO, 'seed.sql'), 'utf8'))
     if (seeded.status !== 0) throw new Error(`seeding failed: ${seeded.stderr}`)
   }
 }
@@ -137,10 +140,11 @@ function report(out) {
 if (opt.report) {
   report(resolve(opt.report))
 } else {
-  const out = resolve(opt.out ?? join(tmpdir(), `roadmap-bench-${new Date().toISOString().replace(/[:.]/g, '-')}`))
+  const out = resolve(opt.out ?? join(tmpdir(), `roadmap-bench-${opt.scenario}-${new Date().toISOString().replace(/[:.]/g, '-')}`))
   mkdirSync(out, { recursive: true })
   const arms = opt.arms.split(',').map(a => a.trim()).filter(a => a in PROMPTS)
-  console.error(`bench: ${arms.join(' + ')} x ${opt.runs} runs in ${out}`)
+  if (!existsSync(SCENARIO)) throw new Error(`no scenario ${opt.scenario}: ${readdirSync(join(HERE, 'scenarios')).join(', ')}`)
+  console.error(`bench: ${opt.scenario}, ${arms.join(' + ')} x ${opt.runs} runs in ${out}`)
   await Promise.all(arms.map(arm => launch(out, arm, 'warm', WARM, `${arm}-warm.log`)))
   const jobs = arms.flatMap(arm => Array.from({ length: Number(opt.runs) }, (_, i) => launch(out, arm, i + 1)))
   await Promise.all(jobs)
