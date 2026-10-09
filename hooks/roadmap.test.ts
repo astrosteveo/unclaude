@@ -169,6 +169,22 @@ test('the roadmap is found from the project root, wherever a shell cd took the s
   expect((context ?? []).join('\n')).not.toContain('old news')
 })
 
+test('the tool description fits the 2048 characters the model reads; each action is described on the action field', async ($, on) => {
+  let spec: { description: string; inputSchema: { properties: { action: { description: string } } } } | undefined
+  on('tool.register', ($, e) => ((spec = e as never), { value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('fs.stat', () => ({ deny: 'ENOENT' }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  expect(spec!.description.length).toBeLessThanOrEqual(2048)
+  for (const rule of ['claim a task before you start it', 'handoff note', 'blocked with a comment', 'approved: true', 'open its PR'])
+    expect(spec!.description).toContain(rule)
+  const actions = spec!.inputSchema.properties.action.description
+  for (const action of ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'])
+    expect(actions).toContain(`${action}:`)
+})
+
 test('subagents get stable, readable names', async () => {
   expect(agentName('Explore', 'Find auth handlers in src/')).toBe('explore:find-auth-handlers-in-src')
   expect(agentName('general-purpose', 'Refactor the very long module name that goes on and on')).toBe('general-purpose:refactor-the-very-long-module')
