@@ -137,12 +137,12 @@ test('the board draws on terminal and desktop, and a card opens and closes from 
       })
       expect(await ui.find({ key: 'col-todo-head' })).toBeDefined()
       expect((await ui.find({ key: 'card-T2' }))?.text).toContain('● 1')
-      expect((await ui.find({ text: /t p b d jump to a column/ }))).toBeDefined()
+      expect((await ui.find({ text: /t p b r d jump to a column/ }))).toBeDefined()
       await ui.press({ key: 'card-T2' })
       expect(await ui.find({ key: 'hand' })).toBeDefined()
       // The detail view stands in for the board, so it is never pushed off screen by a long column.
       expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
-      expect((await ui.find({ text: /1–4 status/ }))).toBeDefined()
+      expect((await ui.find({ text: /1–5 status/ }))).toBeDefined()
       await ui.press({ key: 'close' })
       expect(await ui.find({ key: 'hand' })).toBeUndefined()
       expect(await ui.find({ key: 'card-T2' })).toBeDefined()
@@ -482,4 +482,68 @@ test('labels and links: shown from both ends, in the outline, the detail and on 
   expect(await ui.find({ type: 'Text', text: /duplicated by ● T3/ })).toBeDefined()
   expect(await ui.find({ text: /#ui/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('review: an agent\'s done goes to review; only the person, or their approval passed on, closes it', async ($, on) => {
+  const some = [
+    item('T1', { status: 'in_progress', assignee: 'claude' }),
+    item('T2', { status: 'review', assignee: 'claude', checklist: [{ n: 1, text: 'works', done: true }] }),
+  ]
+  const scripts: string[] = []
+  let submitted = ''
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('prompt.submit', ($, e) => ((submitted = e.text), { text: e.text, origin: e.origin }))
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const wrote = (needle: string) => scripts.some(one => one.includes(needle))
+
+  const toReview = await call({ action: 'update', id: 'T1', status: 'done' })
+  expect(String(toReview.result)).toContain("waiting on the user's approval")
+  expect(wrote("status='review'")).toBe(true)
+  expect(wrote("status='done'")).toBe(false)
+  expect((await call({ action: 'update', id: 'T1', status: 'done', approved: true, agentId: 'a1' })).deny).toContain('Only the user approves')
+  expect((await call({ action: 'update', id: 'T1', status: 'done', as: 'user' })).deny).toContain('act as yourself')
+  expect((await call({ action: 'update', id: 'T1', status: 'in_progress', approved: true })).deny).toContain('approved goes with status: done')
+  const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true })
+  expect(String(approved.result)).toContain('approved by the user')
+  expect(wrote("status='done'")).toBe(true)
+
+  scripts.length = 0
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect(await ui.find({ key: 'col-review-head' })).toBeDefined()
+  expect(await ui.find({ key: 'card-T2' })).toBeDefined()
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ text: /a approve · c request changes/ })).toBeDefined()
+  await ui.press({ key: 'approve' })
+  expect(wrote("status='done'")).toBe(true)
+  await ui.press({ key: 'request' })
+  expect(await ui.find({ key: 'approve' })).toBeUndefined()
+  await ui.input({ key: 'changes', text: 'handle the empty state' } as never)
+  expect(wrote('Changes requested: handle the empty state')).toBe(true)
+  expect(wrote("status='in_progress'")).toBe(true)
+  expect(submitted).toContain('sent roadmap task T2 (T2 title) back from review: handle the empty state')
+  expect(await ui.find({ key: 'approve' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('review waits on the user: last in next, and listed apart in the brief', async () => {
+  const some = [
+    item('T1', { status: 'review', assignee: 'claude' }),
+    item('T2', { status: 'in_progress', assignee: 'claude' }),
+    item('E1', { kind: 'epic' }),
+    item('T3', { parent: 'E1', status: 'review' }),
+    item('T4', { parent: 'E1', status: 'done' }),
+  ]
+  expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T2', 'T1'])
+  expect(statusOf(some, some[2]!)).toBe('in_progress')
+  const text = brief({ items: some, activity: [], seen: {} }, 'claude', [])!
+  expect(text).toContain("Assigned to you (claude):\n- T2")
+  expect(text).not.toContain('Assigned to you (claude):\n- T1')
+  expect(text).toContain("Waiting on the user's review")
 })

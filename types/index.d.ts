@@ -1,5 +1,5 @@
 export type Kind = 'milestone' | 'epic' | 'task'
-export type Status = 'todo' | 'in_progress' | 'blocked' | 'done'
+export type Status = 'todo' | 'in_progress' | 'blocked' | 'review' | 'done'
 /** How urgent: p0 drops everything, p2 is the default, p3 can wait. */
 export type Priority = 'p0' | 'p1' | 'p2' | 'p3'
 /** What sort of work an item is, as Jira's issue type. */
@@ -61,6 +61,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean }
   }
 }

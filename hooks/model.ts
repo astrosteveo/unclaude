@@ -1,9 +1,9 @@
 import type { Activity, Commit, IssueType, Item, Kind, Pr, Priority, Refs, Snapshot, Status } from '../types'
 
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
-export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'done']
-export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', done: '●' }
-export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' }
+export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
+export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', review: '◉', done: '●' }
+export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', review: 'Review', done: 'Done' }
 export const PRIORITIES: Priority[] = ['p0', 'p1', 'p2', 'p3']
 export const TYPES: IssueType[] = ['feature', 'bug', 'chore']
 /** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
@@ -219,7 +219,8 @@ export function nextUp(items: Item[], actor: string): Item[] {
   const free = tasks
     .filter(task => !task.assignee && task.status === 'todo' && !isWaiting(task))
     .sort((a, b) => byPriority(a, b) || due(a).localeCompare(due(b)) || byId(a, b))
-  const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, done: 3 }
+  // Work in review waits on the user, so it comes after everything an agent can move on itself.
+  const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, review: 3, done: 4 }
   return [
     ...mine.sort((a, b) => Number(isWaiting(a)) - Number(isWaiting(b)) || rank[a.status] - rank[b.status] || byPriority(a, b)),
     ...free,
@@ -235,16 +236,18 @@ export function brief(snap: Snapshot, actor: string, news: Activity[]): string |
     some.slice(0, cap).map(item => `- ${line(items, item)}${item.parent ? ` [${item.parent}]` : ''}`).join('\n') +
     (some.length > cap ? `\n- …${some.length - cap} more` : '')
   const milestones = items.filter(item => item.kind === 'milestone' && statusOf(items, item) !== 'done').sort(byId)
-  const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done')
+  const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done' && task.status !== 'review')
   const blocked = tasks.filter(task => task.status === 'blocked')
+  const review = tasks.filter(task => task.status === 'review')
   const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor)
   const parts = [
-    'Project roadmap (roadmap tool; .claude/roadmap.db). Keep it current: claim a task before working on it, comment on progress and decisions, set done when finished.',
+    'Project roadmap (roadmap tool; .claude/roadmap.db). Keep it current: claim a task before working on it, comment on progress and decisions, set done when finished (it goes to review for the user to approve).',
   ]
   if (milestones.length) parts.push('Open milestones:\n' + list(milestones, 4))
   if (mine.length) parts.push(`Assigned to you (${actor}):\n` + list(mine))
   if (active.length) parts.push('In progress by others:\n' + list(active))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
+  if (review.length) parts.push("Waiting on the user's review (they approve on the board, or tell you to):\n" + list(review))
   if (news.length)
     parts.push(
       'Changes by the user since you last looked:\n' +
