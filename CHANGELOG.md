@@ -38,7 +38,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Handing work to Claude takes a confirm step (on a card or a backlog row), and the `h`, `m` and `u` keys are gone, so a stray key or an extra Enter no longer hands off or reassigns a task. A card never opens with focus on Hand to Claude, and a finished item doesn't offer it.
 
 - The board has five columns, and needs 100 columns of width to lay them side by side (90 before); narrower, they stack.
-- Agents can no longer act under the name `user`.
+- Agents can no longer act under the name `user`, in any case (`User`, `USER`).
 
 - The card detail's status and action buttons sit in one bar right under the title, in the same place on every card. The current status is marked in the accent color, and epics and milestones show their rolled-up status in the same spot.
 - A card reads as labelled sections: Description, Acceptance criteria (with a checked count), Dependencies, Links and Activity. Empty sections are left out, and comments read as messages, set apart from the tracker's own events.

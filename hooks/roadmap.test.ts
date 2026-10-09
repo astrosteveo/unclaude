@@ -519,6 +519,8 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   expect(wrote("status='done'")).toBe(false)
   expect((await call({ action: 'update', id: 'T1', status: 'done', approved: true, agentId: 'a1' })).deny).toContain('Only the user approves')
   expect((await call({ action: 'update', id: 'T1', status: 'done', as: 'user' })).deny).toContain('act as yourself')
+  expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: 'User' })).deny).toContain('act as yourself')
+  expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: ' USER ' })).deny).toContain('act as yourself')
   expect((await call({ action: 'update', id: 'T1', status: 'in_progress', approved: true })).deny).toContain('approved goes with status: done')
   const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true })
   expect(String(approved.result)).toContain('approved by the user')

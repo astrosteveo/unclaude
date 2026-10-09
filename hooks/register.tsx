@@ -780,7 +780,7 @@ export const register: Register = on => {
     const actor = await actorFor($, agentId === undefined ? undefined : String(agentId), a.as)
     try {
       // The person's name is theirs: what they do happens on the board, not through an agent's call.
-      if (actor === USER) fail(`"${USER}" is the person at the board; act as yourself`)
+      if (actor.toLowerCase() === USER) fail(`"${USER}" is the person at the board; act as yourself`)
       // Any call to the tracker is a sign of life for the caller's claims.
       await heartbeat($, actor, true).catch(() => undefined)
       const reply = await act($, actor, a, agentId !== undefined)
