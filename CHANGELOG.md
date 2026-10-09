@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the roadmap mod. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
+All notable changes to the roadmap mod. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). The major version stays at 0 until the first official release.
 
 ## [Unreleased]
 
@@ -18,7 +18,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - A card reads as labelled sections: Description, Acceptance criteria (with a checked count), Dependencies, Links and Activity. Empty sections are left out, and comments read as messages, set apart from the tracker's own events.
 - A card taller than the pane scrolls under its title and bar, with marks for what is above and below.
 
-## [1.0.0] - 2026-10-09
+## 0.4.0 - 2026-10-09
 
 ### Added
 
@@ -52,5 +52,4 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/astrosteveo/unclaude/releases/tag/v1.0.0
+[Unreleased]: https://github.com/astrosteveo/unclaude/commits/main
