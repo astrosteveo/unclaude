@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Activity, Item, Snapshot } from '../types'
 import { VERSION } from './db'
 import { paintPane } from './paint'
+import { columnWidths } from './pane'
 
 // Layout at the sizes people use: every view, with and without a card docked under it, drawn at narrow
 // and wide widths and short and tall heights, then laid out by `paint` and checked for what doesn't fit.
@@ -105,4 +106,44 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
       await ui.unmount()
     }
   expect(found).toEqual([])
+})
+
+test('side by side, an empty column takes its heading and the columns with cards share the rest', () => {
+  const widths = columnWidths({ todo: 0, in_progress: 15, blocked: 11, review: 0, done: 0 }, 120, 2)
+  expect(widths).toEqual({ todo: 28, in_progress: 15, blocked: 11, review: 28, done: 28 })
+  expect(Object.values(widths).reduce((sum, one) => sum + one, 0) + 8).toBeLessThanOrEqual(120)
+})
+
+test('wide board cards: one line where all fit, else a title line and a details line for every card of the column', async ($, on) => {
+  const snap = bigRoadmap()
+  // Two short tasks in progress fit on one line; Done holds long titles, so all its cards take two.
+  snap.items = snap.items.filter(one => one.kind !== 'task' || one.status === 'done')
+  snap.items.push(item('T90', { status: 'in_progress', title: 'Short' }), item('T91', { status: 'in_progress', title: 'Tiny', assignee: 'claude' }))
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  expect(problems).toEqual([])
+  const heads = lines.find(line => line.includes('○ Todo 0'))!
+  // Empty Todo, Blocked and Review keep to their headings; In progress and Done share the rest.
+  expect(heads.indexOf('◐ In progress')).toBeLessThan(12)
+  expect(heads.indexOf('● Done') - heads.indexOf('◐ In progress')).toBeGreaterThan(40)
+  const at = heads.indexOf('◐ In progress')
+  const progress = lines.slice(lines.indexOf(heads) + 2).map(line => line.slice(at, heads.indexOf('✗ Blocked')).trim())
+  expect(progress.slice(0, 2)).toEqual(['T90 Short', 'T91 Tiny @claude'])
+  const done = lines.slice(lines.indexOf(heads) + 2, lines.indexOf(heads) + 6).map(line => line.slice(heads.indexOf('● Done')).trim())
+  expect(done[0]).toMatch(/^T\d+ Make the board/)
+  expect(done[1]).not.toMatch(/^T\d+/)
+  expect(done[2]).toMatch(/^T\d+ Make the board/)
+  // The open card's id stands out.
+  await ui.press({ key: 'card-T90' })
+  const open = await ui.find({ key: 'card-T90' })
+  expect(JSON.stringify(open)).toContain('"inverse":true')
+  await ui.unmount()
 })
