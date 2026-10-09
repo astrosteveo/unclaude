@@ -516,3 +516,51 @@ test('undo of a removal restores the whole subtree exactly: items, timelines, ch
   revert(lastOp())
   assert.deepEqual(load().items.map(one => one.id), ['T3'])
 })
+
+test('export, then import into an empty roadmap, gives back the same roadmap; ids carry on where they left off', () => {
+  sql(db.insert('claude', { kind: 'milestone', title: 'v1', parent: null, due: '2026-12-01' }))
+  sql(db.insert('claude', { kind: 'epic', title: 'E', parent: 'M1' }))
+  sql(db.insert('user', { kind: 'task', title: "it's\n.tables", parent: 'E1', description: 'multi\nline', priority: 'p0', type: 'bug' }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: 'E1' }))
+  sql(db.insert('claude', { kind: 'task', title: 'gone', parent: null }))
+  sql(db.remove(['T3']))
+  sql(db.setChecklist('claude', item('T1'), ['x', 'y']).script)
+  sql(db.check('claude', item('T1'), [1], true).script)
+  sql(db.setLabels('claude', item('T1'), ['ui', 'api']).script)
+  sql(db.setBlockers('claude', item('T2'), ['T1']).script)
+  sql(db.setRelations('claude', item('T2'), 'relates', ['E1']).script)
+  sql(db.claim('explore:a', 'T2', false, null, 'todo'))
+  sql(db.comment('user', 'T1', 'a note'))
+  sql(db.comment('explore:a', 'T2', 'left off here', 'handoff'))
+  sql(db.markSeen('user', 'T1'))
+  const before = load()
+  const text = db.exportOf(JSON.parse(sql(db.dump())), '2026-10-09T12:00:00.000Z')
+  // Another checkout: a fresh database, brought to the current schema, then the import.
+  rmSync(join(dir, '.claude'), { recursive: true, force: true })
+  execFileSync('mkdir', ['-p', join(dir, '.claude')])
+  isMigrated = false
+  assert.equal(sql(db.COUNT), '0 0')
+  sql(db.importRows(db.importOf(text)))
+  const after = load()
+  const byId = list => [...list].sort((a, b) => String(a.id).localeCompare(String(b.id)))
+  assert.deepEqual(byId(after.items), byId(before.items))
+  assert.deepEqual(byId(after.activity), byId(before.activity))
+  assert.deepEqual(after.seen, before.seen)
+  // The counters came along: T3 was removed, so the next task is T4, never a reused T3.
+  assert.equal(sql(db.insert('claude', { kind: 'task', title: 'next', parent: null })), 'T4')
+  // Undo works on what was imported.
+  assert.ok(JSON.parse(sql(db.entries([load().activity.find(one => one.body === 'checked 1. x').id])))[0].undo)
+})
+
+test('an export from an older schema imports, its missing columns taking their defaults', () => {
+  const old = JSON.stringify({ roadmap: 'export', schema: 1, exported_at: '', tables: {
+    items: [{ id: 'T1', kind: 'task', title: 'old', status: 'todo', parent: null, description: null, assignee: null, due: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }],
+    activity: [{ id: 1, item_id: 'T1', author: 'claude', type: 'create', body: 'created task “old”', at: '2026-01-01T00:00:00Z' }],
+    counters: [{ prefix: 'T', n: 1 }],
+  } })
+  sql(db.importRows(db.importOf(old)))
+  assert.equal(item('T1').priority, 'p2')
+  assert.equal(item('T1').type, 'feature')
+  assert.throws(() => db.importOf(JSON.stringify({ roadmap: 'export', schema: db.VERSION + 1, tables: {} })), /newer roadmap mod/)
+  assert.throws(() => db.importOf('{"roadmap":"export","schema":1,"tables":{"secrets":[]}}'), /unknown table secrets/)
+})

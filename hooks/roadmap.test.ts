@@ -1623,3 +1623,85 @@ test('undo on the board: Undo (z) takes back the last change; a line on a card r
   expect(lastChange({ items: some, activity: [{ ...activity[1]!, undone: 9 }, activity[0]!, activity[2]!], seen: {} }, 'user').map(one => one.id)).toEqual([6])
   expect(lastChange({ items: some, activity: [activity[2]!], seen: {} }, 'user')).toEqual([])
 })
+
+test('export and import: the whole roadmap to a JSON file, and back only into an empty roadmap', async ($, on) => {
+  const written: Record<string, string> = {}
+  let count = '0 0'
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    if (stdin.startsWith('SELECT json_object(\'items\', (SELECT json_group_array(json_object(\'id\', id, \'kind\'')) {
+      if (stdin.includes('FROM counters')) return { value: { ...fakeSqlite('', null), stdout: JSON.stringify({ items: [{ id: 'T1', kind: 'task', title: 'kept' }], activity: [], counters: [{ prefix: 'T', n: 1 }] }) } }
+    }
+    if (stdin.startsWith('SELECT (SELECT count(*) FROM items)')) return { value: { ...fakeSqlite('', null), stdout: count } }
+    return { value: fakeSqlite(stdin, { items: [], activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.write', ($, e) => ((written[e.path] = e.text), { value: undefined }) as never)
+  on('fs.read', ($, e) => (written[e.path] === undefined ? { deny: 'ENOENT' } : { value: written[e.path] }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  expect(await call({ action: 'export' })).toBe('Exported 1 item(s) and 0 timeline entries to .claude/roadmap-export-2026-10-09.json. import (path) restores it into an empty roadmap.')
+  const file = JSON.parse(written['/work/project/.claude/roadmap-export-2026-10-09.json']!)
+  expect(file).toEqual({ roadmap: 'export', schema: VERSION, exported_at: '2026-10-09T12:00:00.000Z', tables: { items: [{ id: 'T1', kind: 'task', title: 'kept' }], activity: [], counters: [{ prefix: 'T', n: 1 }] } })
+  await call({ action: 'export', path: '~/saved.json' })
+  expect(written['/home/me/saved.json']).toBeDefined()
+  // Into a roadmap that holds anything, it is refused; into an empty one, it lands in one transaction.
+  count = '3 9'
+  expect(await call({ action: 'import', path: '~/saved.json' })).toContain('already holds 3 item(s) and 9 timeline entries')
+  count = '0 0'
+  expect(await call({ action: 'import', path: '~/saved.json' })).toBe('Imported 1 item(s) and 0 timeline entries from ~/saved.json.')
+  const landed = scripts.find(one => one.includes('INSERT OR IGNORE INTO items(id, kind, title)'))!
+  expect(landed.startsWith('BEGIN IMMEDIATE;')).toBe(true)
+  expect(landed).toContain("INSERT INTO counters(prefix, n) VALUES ('T', 1)")
+  // Not an export, or one from a newer build: refused, naming why.
+  written['/work/project/x.json'] = '{"hello": 1}'
+  expect(await call({ action: 'import', path: 'x.json' })).toBe('not a roadmap export')
+  written['/work/project/y.json'] = JSON.stringify({ roadmap: 'export', schema: VERSION + 1, exported_at: '', tables: {} })
+  expect(await call({ action: 'import', path: 'y.json' })).toContain('from a newer roadmap mod')
+  expect(await call({ action: 'import', path: 'nope.json' })).toBe('cannot read nope.json')
+})
+
+test('backups: on start, a JSON export outside the checkout when the roadmap changed, the newest twenty kept', async ($, on) => {
+  const written: string[] = []
+  const removed: string[][] = []
+  let stamp = '41'
+  let listed = Array.from({ length: 20 }, (_, i) => ({ name: `roadmap-2026-10-0${i < 9 ? i + 1 : 9}T00-00-${String(i).padStart(2, '0')}Z-a${i}.json`, kind: 'file' }))
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'rm') return (removed.push([...e.argv]), { value: { ...fakeSqlite('', null), stdout: '' } })
+    if (e.argv[0] !== 'sqlite3') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    const stdin = e.init?.stdin ?? ''
+    if (stdin.trim() === 'SELECT COALESCE(MAX(id), 0) FROM activity;') return { value: { ...fakeSqlite('', null), stdout: stamp } }
+    if (stdin.includes('FROM counters')) return { value: { ...fakeSqlite('', null), stdout: '{"items":[]}' } }
+    return { value: fakeSqlite(stdin, { items: [item('T1')], activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.list', () => ({ value: listed }) as never)
+  on('fs.write', ($, e) => (written.push(e.path), { value: undefined }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.get', () => ({ value: {} }) as never)
+  on('store.set', () => ({ value: undefined }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  expect(written).toEqual(['/home/me/.claude/roadmap-backups/-work-project/roadmap-2026-10-09T12-00-00-000Z-a41.json'])
+  // Twenty were there: the oldest goes.
+  expect(removed).toEqual([['rm', '-f', `/home/me/.claude/roadmap-backups/-work-project/${listed[0]!.name}`]])
+  // The newest backup already holds the roadmap as it stands: nothing new is written.
+  written.length = 0
+  stamp = '19'
+  listed = listed.slice(0, 20)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  expect(written).toEqual([])
+})

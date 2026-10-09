@@ -51,6 +51,12 @@ What Claude does with it:
 
 Everything lives in `.claude/roadmap.db` (SQLite) in your project, shared by every Claude Code session and agent working there. Writes are transactions, so concurrent agents don't lose each other's changes. The file is binary, so it belongs in `.gitignore`. If it isn't ignored, the board offers to add it once (press `g`), or you can turn the offer down. The schema is versioned: a newer build of the mod migrates older databases on first use, and an older build refuses a newer database instead of corrupting it.
 
+### Backups
+
+Because the database is ignored by git and lives in one checkout, deleting or re-cloning the folder would lose it. So the mod backs it up on its own: when the roadmap has changed, at most every 10 minutes while a session is open, it writes a JSON export to `~/.claude/roadmap-backups/<project path>/`, named by time, and keeps the newest 20. Set `ROADMAP_BACKUP_DIR` to keep them somewhere else (a synced folder, say), or to `off` to turn them off.
+
+To restore one, start from an empty roadmap (move `.claude/roadmap.db` aside if there is one) and ask Claude to *"import the roadmap from ~/.claude/roadmap-backups/…/roadmap-….json"*. You can also ask for an export at any time (`export`, to `.claude/roadmap-export-<date>.json` or a path you name). An export holds everything: items, checklists, labels, links, the whole timeline and read marks. Ids carry on where they left off.
+
 ## Development
 
 ```

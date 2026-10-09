@@ -376,14 +376,44 @@ export function restore(rows: Rows): string {
   for (const table of Object.keys(TABLES) as Table[]) {
     const cols = TABLES[table] as readonly string[]
     for (const row of rows[table] ?? []) {
-      const values = cols.map(col => q(row[col] ?? null)).join(', ')
+      // Only the columns the row has: one from an older schema leaves the newer ones to their defaults.
+      const has = cols.filter(col => col in row)
+      const values = has.map(col => q(row[col] ?? null)).join(', ')
       out.push(table === 'counters'
         ? `INSERT INTO counters(prefix, n) VALUES (${values}) ON CONFLICT(prefix) DO UPDATE SET n=MAX(n, excluded.n);`
-        : `INSERT OR IGNORE INTO ${table}(${cols.join(', ')}) VALUES (${values});`)
+        : `INSERT OR IGNORE INTO ${table}(${has.join(', ')}) VALUES (${values});`)
     }
   }
   return out.join('\n')
 }
+
+/** What a roadmap export holds: the schema version it was written at, when, and every row. */
+export type Export = { roadmap: 'export'; schema: number; exported_at: string; tables: Rows }
+
+/** An export of `rows` (a whole `dump`), as the text written to a file. */
+export const exportOf = (rows: Rows, at: string): string =>
+  `${JSON.stringify({ roadmap: 'export', schema: VERSION, exported_at: at, tables: rows } satisfies Export)}\n`
+
+/** The rows of an export's text, or throws saying why it can't be imported here. */
+export function importOf(text: string): Rows {
+  let data: Partial<Export>
+  try {
+    data = JSON.parse(text) as Partial<Export>
+  } catch {
+    throw new Error('not a roadmap export: the file is not JSON')
+  }
+  if (data?.roadmap !== 'export' || typeof data.tables !== 'object' || data.tables === null) throw new Error('not a roadmap export')
+  if (!Number.isInteger(data.schema) || data.schema! > VERSION)
+    throw new Error(`the export is from a newer roadmap mod (schema v${data.schema}; this one reads up to v${VERSION}). Update the mod first`)
+  for (const table of Object.keys(data.tables)) if (!(table in TABLES)) throw new Error(`not a roadmap export: unknown table ${table}`)
+  return data.tables
+}
+
+/** How many items and log entries a roadmap holds; an import goes only into one holding neither. */
+export const COUNT = `SELECT (SELECT count(*) FROM items) || ' ' || (SELECT count(*) FROM activity);`
+
+/** Writes an export's rows into an empty roadmap, in one transaction. */
+export const importRows = (rows: Rows) => `BEGIN IMMEDIATE;\n${restore(rows)}\nCOMMIT;`
 
 /** A logged entry as `entries` reads it: what undo needs. */
 export type Entry = { id: number; item_id: string; author: string; type: string; body: string; at: string; op: number | null; undo: string | null; redo: string | null; undone: number | null; reverts: number | null }

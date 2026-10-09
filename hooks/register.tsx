@@ -178,6 +178,12 @@ async function sql($: EngineInterface, script: string, t: Target = REAL): Promis
   return run($, script, t)
 }
 
+/** A path as given to export or import: absolute, from home (`~/`), or in the project. */
+async function fileAt($: EngineInterface, path: string): Promise<string> {
+  if (path.startsWith('~/')) return `${(await $.env.get('HOME')) ?? '~'}${path.slice(1)}`
+  return path.startsWith('/') ? path : inProject($, path)
+}
+
 /** Whether the project has a roadmap yet. Reads never make one: the database is created by the first write. */
 const hasDb = async ($: EngineInterface) => $.fs.stat(await inProject($, db.DB)).then(() => true, () => false)
 
@@ -245,6 +251,50 @@ async function dismissIgnore($: EngineInterface) {
   await update($, ignoreOffer, () => false)
 }
 
+// Automatic backups: a JSON export outside the checkout, when the roadmap changed, at most every
+// BACKUP_EVERY; the newest BACKUPS_KEPT are kept. The newest timeline entry names what a backup holds.
+const BACKUP_EVERY = 10 * 60_000
+const BACKUPS_KEPT = 20
+let backedAt = -Infinity
+let backedStamp = ''
+
+/**
+ * Where this project's backups go: ROADMAP_BACKUP_DIR when set ("off" turns them off), else
+ * ~/.claude/roadmap-backups/<the project's path, as Claude Code names its project folders>.
+ */
+async function backupDir($: EngineInterface): Promise<string | undefined> {
+  const set = (await $.env.get('ROADMAP_BACKUP_DIR'))?.trim()
+  if (set === 'off') return undefined
+  const project = (await root($)).replace(/[^A-Za-z0-9]/g, '-')
+  if (set) return `${set.replace(/\/+$/, '')}/${project}`
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude/roadmap-backups/${project}` : undefined
+}
+
+/** Backs the roadmap up when it changed since the last backup (this session's or an earlier one's). */
+async function backup($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now - backedAt < BACKUP_EVERY) return
+  backedAt = now
+  const stamp = await sql($, db.STAMP)
+  if (stamp === backedStamp) return
+  const dir = await backupDir($)
+  if (!dir) return
+  const names = (await $.fs.list(dir).catch(() => []))
+    .map(one => one.name)
+    .filter(name => /^roadmap-.*\.json$/.test(name))
+    .sort()
+  if (!names.at(-1)?.endsWith(`-a${stamp}.json`)) {
+    const at = new Date(now).toISOString()
+    const rows = JSON.parse(await sql($, db.dump())) as db.Rows
+    await $.fs.write(`${dir}/roadmap-${at.replace(/[:.]/g, '-')}-a${stamp}.json`, db.exportOf(rows, at))
+    names.push('new')
+  }
+  backedStamp = stamp
+  const old = names.slice(0, Math.max(0, names.length - BACKUPS_KEPT))
+  if (old.length) await $.process.run(['rm', '-f', ...old.map(name => `${dir}/${name}`)]).catch(() => undefined)
+}
+
 /** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
@@ -258,12 +308,14 @@ async function poll($: EngineInterface) {
   }
   // Without a roadmap there is nothing to link commits to, so git and gh aren't asked.
   if (stamps[0] === '-') return
+  // A backup that fails (no home, a full disk) never stops the board.
+  await backup($).catch(() => undefined)
   if (!isIgnoreChecked) await checkIgnore($)
   await refreshRefs($)
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import'
   id?: string
   ids?: string[] | string
   ref?: string
@@ -292,6 +344,7 @@ type Input = {
   approved?: boolean
   force?: boolean
   cascade?: boolean
+  path?: string
 }
 
 const fail = (message: string): never => {
@@ -574,6 +627,23 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         `Planned ${planned.length} item(s): ${planned.map(one => `${one.ref} → ${ids.get(one.ref)}`).join(', ')}`,
         ...roots.map(id => [line(final, find(final, id)!), outline(final, id)].filter(Boolean).join('\n')),
       ].join('\n')
+    }
+    case 'export': {
+      const at = new Date(await $.clock.now().catch(() => Date.now())).toISOString()
+      const path = a.path?.trim() || `.claude/roadmap-export-${at.slice(0, 10)}.json`
+      const rows = JSON.parse(await sql($, db.dump(), t)) as db.Rows
+      await $.fs.write(await fileAt($, path), db.exportOf(rows, at))
+      return `Exported ${rows.items?.length ?? 0} item(s) and ${rows.activity?.length ?? 0} timeline entries to ${path}. import (path) restores it into an empty roadmap.`
+    }
+    case 'import': {
+      if (!a.path?.trim()) fail('path is required: the export to restore')
+      const text = await $.fs.read(await fileAt($, a.path!.trim())).then(String, () => fail(`cannot read ${a.path}`))
+      const rows = db.importOf(text)
+      const [items, entries] = (await sql($, db.COUNT, t)).split(' ').map(Number)
+      if (items || entries)
+        fail(`the roadmap here already holds ${items} item(s) and ${entries} timeline entries; import goes only into an empty one (move ${db.DB} aside first)`)
+      await sql($, db.importRows(rows), t)
+      return `Imported ${rows.items?.length ?? 0} item(s) and ${rows.activity?.length ?? 0} timeline entries from ${a.path!.trim()}.`
     }
     case 'remove': {
       const it = need()
@@ -879,7 +949,7 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import'],
             description: [
               'show: the whole tree, or one item (id) with its activity and linked commits and PRs.',
               'next: your open tasks, then unassigned ones by priority and due date.',
@@ -894,6 +964,8 @@ export const register: Register = on => {
               'comment: id, body. check: id, items (checklist entry numbers). remove: id; cascade for children.',
               'batch: ops, a list of these actions ({ action, ...fields }) run in order as one: every op is checked first and',
               'nothing is written unless all pass. An add op may carry a ref that later ops use in place of its id.',
+              'export: path (default .claude/roadmap-export-<date>.json): the whole roadmap as JSON.',
+              'import: path: restores an export into an empty roadmap. The mod also backs up to ~/.claude/roadmap-backups on its own.',
             ].join(' '),
           },
           id: { type: 'string', description: 'Item id, e.g. T12' },
@@ -940,6 +1012,7 @@ export const register: Register = on => {
           approved: { type: 'boolean', description: 'update with status done: the user has explicitly approved this work in chat, so it skips review. Never on your own judgment.' },
           force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
           cascade: { type: 'boolean', description: 'remove: also remove everything under the item' },
+          path: { type: 'string', description: 'export, import: the JSON file; relative to the project, absolute, or ~/…' },
         },
         required: ['action'],
       },
