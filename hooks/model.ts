@@ -484,6 +484,27 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   return `<roadmap>\n${parts.join('\n\n')}\n</roadmap>`
 }
 
+/**
+ * The turn that tells the agent who did `item` how the person's Approve on the board went: merged (or
+ * approved without a merge), so it brings the checkout up to date; or a merge that failed, so it finds out why.
+ */
+export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): string {
+  const what = `roadmap ${item.kind} ${item.id} (${item.title})`
+  if (pr && failure !== undefined)
+    return (
+      `The user approved ${what} on the board, but merging PR #${pr.number} (branch ${pr.branch}) failed: ${failure || 'no reason given'}. ` +
+      `${item.id} stays in review. Find out why (failing checks, a conflict with its base, branch protection), fix what you can on ${pr.branch}, ` +
+      'and tell the user what you found and whether it is ready to approve again.'
+    )
+  if (pr)
+    return (
+      `The user approved ${what} on the board and merged PR #${pr.number} (branch ${pr.branch}). Bring the checkout up to date: ` +
+      `switch to main and pull, delete the local branch ${pr.branch}, and make sure any open PR that was based on ${pr.branch} now targets main. ` +
+      'Then say in a line or two what is next on the roadmap.'
+    )
+  return `The user approved ${what} on the board; it is done. No pull request was merged with it. Say in a line or two what is next on the roadmap.`
+}
+
 /** Lowercase words joined by hyphens, cut at a word boundary to at most `cap` characters. */
 function slug(text: string, cap: number): string {
   const full = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -569,7 +590,7 @@ export function parsePrs(out: string): Pr[] {
   return list
     .map(pr => ({
       number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
-      ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup),
+      ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup), branch: pr.headRefName,
     }))
     .filter(pr => pr.ids.length > 0)
 }

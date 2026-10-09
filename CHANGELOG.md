@@ -6,6 +6,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Added
 
+- Approving an agent's work on the board tells it at once, in a turn of its own: that its pull request was merged, so it brings the checkout up to date (switches to main, pulls, deletes the merged branch, checks stacked PRs); or that the merge failed, with gh's reason, so it finds out why. Approving your own work stays quiet.
 - Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.
 - Review acts on the pull request. A card shows its PRs with their checks (running, passed or failing). Approving an item whose PR is open asks whether to merge it (`gh pr merge --merge`) or approve only; if the merge fails, the item stays in review. Request changes also posts the note on the PR. Nothing is merged or posted without the person's press.
 - The board's header wraps instead of squeezing its counts when the filter and buttons crowd it.
