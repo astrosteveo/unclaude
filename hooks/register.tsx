@@ -1,13 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Draft, IssueType, Item, Kind, Pr, PlanNode, Priority, Query, Refs, Snapshot, Status, View } from '../types'
+import type { Draft, IssueType, Item, Kind, Pr, PlanNode, Priority, Query, Refs, Section, Snapshot, Status, View } from '../types'
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, lastChange, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
-  parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
+  agentName, approvalNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
 const PANE = 'roadmap'
@@ -34,6 +34,8 @@ const editing = atom({ plugin: 'roadmap', key: 'editing' } as const, false)
 const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as string | null)
 // The item waiting on a yes before it is approved and its pull request merged.
 const merging = atom({ plugin: 'roadmap', key: 'merging' } as const, null as string | null)
+// The task just set done on the board, whose card asks for its release note.
+const noting = atom({ plugin: 'roadmap', key: 'noting' } as const, null as string | null)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -315,7 +317,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog'
   id?: string
   ids?: string[] | string
   ref?: string
@@ -345,6 +347,8 @@ type Input = {
   force?: boolean
   cascade?: boolean
   path?: string
+  note?: string
+  section?: string
 }
 
 const fail = (message: string): never => {
@@ -457,6 +461,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
       const tags = a.labels === undefined ? [] : idList(a.labels)
       const parent = checkParent(snap.items, a.kind!, a.parent)
+      const { note, section } = noteOf(a)
+      if ((note || section) && a.kind !== 'task') fail('Only tasks carry a release note')
       const id = await sql($, db.insert(actor, {
         kind: a.kind!,
         title: a.title!.trim(),
@@ -468,8 +474,9 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         priority: a.priority || undefined,
         type: a.type || undefined,
       }), t)
-      if (blockers.length || checklist.length || related.length || original.length || tags.length) {
+      if (blockers.length || checklist.length || related.length || original.length || tags.length || note || section) {
         const created = find((await refresh($, t)).items, id) as Item
+        if (note || section) await sql($, db.change(actor, created, { note, section }).script, t)
         if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script, t)
         if (checklist.length) await sql($, db.setChecklist(actor, created, checklist).script, t)
         if (tags.length) await sql($, db.setLabels(actor, created, tags).script, t)
@@ -491,6 +498,14 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (a.approved && actor === USER) a.approved = undefined
       if (a.approved && isSubagent) fail('Only the user approves work; a subagent sets done and it goes to review.')
       if (a.approved && a.status !== 'done') fail('approved goes with status: done')
+      const { note, section } = noteOf(a)
+      if ((note !== undefined || section !== undefined) && it.kind !== 'task') fail('Only tasks carry a release note')
+      // An agent's done asks for the task's line in the CHANGELOG, unless it has one.
+      if (a.status === 'done' && it.kind === 'task' && actor !== USER && !(note ?? it.note))
+        fail(
+          `${it.id} has no release note. Send status done again with note: one line for the CHANGELOG, saying what changed for ` +
+            `whoever uses the project (and section: ${SECTIONS.join(', ')}; ${sectionFor(it)} by default); or note: "-" when the work needs no line (tests, refactors).`,
+        )
       // An agent's done waits on the user's approval in review; the person's own is final. Inside a
       // milestone or epic handed over whole, a task's done is final too: the review comes once, on that.
       const scope = it.kind === 'task' ? handedScope(snap.items, it) : undefined
@@ -514,6 +529,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         ...(a.assignee === '' && a.status === undefined && it.assignee ? { status: letGo(it).status } : {}),
         priority: a.priority || undefined,
         type: a.type || undefined,
+        note,
+        section,
         parent,
       })
       // One script, one transaction: the update lands whole or not at all.
@@ -645,6 +662,19 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       await sql($, db.importRows(rows), t)
       return `Imported ${rows.items?.length ?? 0} item(s) and ${rows.activity?.length ?? 0} timeline entries from ${a.path!.trim()}.`
     }
+    case 'changelog': {
+      // Merged work: what a merged PR (or none, on the main line) shipped; never what is still open.
+      const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
+      const notes = mergedNotes(snap.items, known).map(task => ({ section: sectionFor(task), note: task.note! }))
+      const path = a.path?.trim() || 'CHANGELOG.md'
+      const file = await fileAt($, path)
+      const text = await $.fs.read(file).then(String, () => undefined)
+      const out = withNotes(text, notes)
+      if (out.added.length === 0)
+        return notes.length ? `${path} already has the notes of all merged work.` : 'No merged work has a release note yet.'
+      await $.fs.write(file, out.text.replace(/\n*$/, '\n'))
+      return `Wrote ${out.added.length} note(s) into ${path} under [Unreleased]:\n${out.added.map(one => `- ${one}`).join('\n')}`
+    }
     case 'remove': {
       const it = need()
       const ids = subtree(snap.items, it.id)
@@ -691,6 +721,13 @@ async function undo($: EngineInterface, actor: string, ids: number[], t: Target 
     fail(db.guardReason(message) ?? message)
   }
   return `Undid ${[...found].sort((a, b) => a.id - b.id).map(one => `${one.item_id}: ${one.body}`).join('; ')}`
+}
+
+/** A release note and section as sent: `-` or `none` for no line needed, empty to clear; the section checked. */
+function noteOf(a: Input): { note?: string | null; section?: Section | null } {
+  const note = a.note === undefined ? undefined : ['-', 'none'].includes(a.note.trim().toLowerCase()) ? db.NO_NOTE : a.note.trim() || null
+  const section = a.section === undefined ? undefined : a.section.trim() === '' ? null : sectionOf(a.section) ?? fail(`section must be one of ${SECTIONS.join(', ')}`)
+  return { note, section }
 }
 
 /** The snapshot with `id`'s whole timeline in place of the recent part it carries. */
@@ -819,6 +856,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, editing, () => false)
   await update($, handing, () => null)
   await update($, merging, () => null)
+  await update($, noting, () => null)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -949,16 +987,16 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog'],
             description: [
               'show: the whole tree, or one item (id) with its activity and linked commits and PRs.',
               'next: your open tasks, then unassigned ones by priority and due date.',
               'find: any of kind, status, assignee ("none" for unassigned), priority, type, labels, under (an id: its subtree), text (title, description, comments).',
               'pr: the branch, title and body for the pull request of the unit an item ships in.',
-              'add: kind, title; optional parent, description, due, status, assignee, priority, type, labels, checklist, blocked_by, relates_to, duplicates.',
+              'add: kind, title; optional parent, description, due, status, assignee, priority, type, labels, checklist, blocked_by, relates_to, duplicates, note, section.',
               'plan: tree (optional parent): a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
               "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
-              'update: id plus any field; empty string clears.',
+              'update: id plus any field; empty string clears. Setting a task done takes its release note (note, section) when it has none.',
               'claim: id; takes a task and starts it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks.',
               'release: id; body leaves a handoff note for whoever picks it up next.',
               'comment: id, body. check: id, items (checklist entry numbers). remove: id; cascade for children.',
@@ -966,6 +1004,7 @@ export const register: Register = on => {
               'nothing is written unless all pass. An add op may carry a ref that later ops use in place of its id.',
               'export: path (default .claude/roadmap-export-<date>.json): the whole roadmap as JSON.',
               'import: path: restores an export into an empty roadmap. The mod also backs up to ~/.claude/roadmap-backups on its own.',
+              'changelog: writes the release notes of merged work into CHANGELOG.md under [Unreleased] (path for another file).',
             ].join(' '),
           },
           id: { type: 'string', description: 'Item id, e.g. T12' },
@@ -1012,7 +1051,12 @@ export const register: Register = on => {
           approved: { type: 'boolean', description: 'update with status done: the user has explicitly approved this work in chat, so it skips review. Never on your own judgment.' },
           force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
           cascade: { type: 'boolean', description: 'remove: also remove everything under the item' },
-          path: { type: 'string', description: 'export, import: the JSON file; relative to the project, absolute, or ~/…' },
+          path: { type: 'string', description: 'export, import: the JSON file; changelog: the CHANGELOG (CHANGELOG.md). Relative to the project, absolute, or ~/…' },
+          note: {
+            type: 'string',
+            description: "A task's release note (add/update): one line for the CHANGELOG, saying what changed for whoever uses the project; \"-\" when none is needed. The pr body and changelog are written from it.",
+          },
+          section: { type: 'string', enum: SECTIONS, description: "The CHANGELOG section of the task's note; by default Fixed for a bug, Changed for a chore, else Added" },
         },
         required: ['action'],
       },
@@ -1161,6 +1205,7 @@ export const register: Register = on => {
       isEditing: await read($, editing),
       handing: await read($, handing),
       merging: await read($, merging),
+      noting: await read($, noting),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
@@ -1186,6 +1231,7 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
+      setNoting: id => void update($, noting, () => id).then(() => focusOn($, id ? 'note' : 'close')),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),
     }

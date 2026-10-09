@@ -564,3 +564,14 @@ test('an export from an older schema imports, its missing columns taking their d
   assert.throws(() => db.importOf(JSON.stringify({ roadmap: 'export', schema: db.VERSION + 1, tables: {} })), /newer roadmap mod/)
   assert.throws(() => db.importOf('{"roadmap":"export","schema":1,"tables":{"secrets":[]}}'), /unknown table secrets/)
 })
+
+test('v5: a release note and its section are written, logged and undone like any field', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.change('claude', item('T1'), { note: "Cards don't flicker\nany more", section: 'Fixed' }).script)
+  assert.deepEqual([item('T1').note, item('T1').section], ["Cards don't flicker\nany more", 'Fixed'])
+  assert.deepEqual(log('T1').slice(1), ["claude: release note: Cards don't flicker\nany more", 'claude: section → Fixed'])
+  revert(lastOp())
+  assert.deepEqual([item('T1').note, item('T1').section], [null, null])
+  sql(db.change('claude', item('T1'), { note: db.NO_NOTE }).script)
+  assert.deepEqual(log('T1').at(-1), 'claude: no release note needed')
+})

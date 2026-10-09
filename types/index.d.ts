@@ -4,6 +4,8 @@ export type Status = 'todo' | 'in_progress' | 'blocked' | 'review' | 'done'
 export type Priority = 'p0' | 'p1' | 'p2' | 'p3'
 /** What sort of work an item is, as Jira's issue type. */
 export type IssueType = 'feature' | 'bug' | 'chore'
+/** A CHANGELOG section a task's release note goes under. */
+export type Section = 'Added' | 'Changed' | 'Fixed'
 /** A link other than blocked-by: this item relates to, or duplicates, item `id`. */
 export type Relation = { type: 'relates' | 'duplicates'; id: string }
 
@@ -18,6 +20,10 @@ export type Item = {
   due: string | null
   priority: Priority
   type: IssueType
+  /** The task's line for the CHANGELOG, as the person using the project reads it; `-` for none needed. */
+  note: string | null
+  /** The CHANGELOG section the note goes under. */
+  section: Section | null
   /** When the holder last showed signs of life; a claim gone quiet too long can be taken over. */
   lease_at: string | null
   /** Free-form tags, sorted. */
@@ -122,6 +128,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null }
   }
 }

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, lastChange, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -47,6 +47,8 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   due: null,
   priority: 'p2',
   type: 'feature',
+  note: null,
+  section: null,
   lease_at: null,
   labels: [],
   relations: [],
@@ -644,7 +646,7 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   const wrote = (needle: string) => scripts.some(one => one.includes(needle))
 
-  const toReview = await call({ action: 'update', id: 'T1', status: 'done' })
+  const toReview = await call({ action: 'update', id: 'T1', status: 'done', note: '-' })
   expect(String(toReview.result)).toContain("waiting on the user's approval")
   expect(wrote("status='review'")).toBe(true)
   expect(wrote("status='done'")).toBe(false)
@@ -653,7 +655,7 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: 'User' })).deny).toContain('act as yourself')
   expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: ' USER ' })).deny).toContain('act as yourself')
   expect((await call({ action: 'update', id: 'T1', status: 'in_progress', approved: true })).deny).toContain('approved goes with status: done')
-  const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true })
+  const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true, note: '-' })
   expect(String(approved.result)).toContain('approved by the user')
   expect(wrote("status='done'")).toBe(true)
 
@@ -1089,10 +1091,10 @@ test('review at the level handed over: tasks in a handed epic close as they go; 
   on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
-  const inScope = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  const inScope = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
   expect(inScope).toContain('closed as part of E1')
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='T2'"))).toBe(true)
-  expect(String((await call({ action: 'update', id: 'T3', status: 'done' })).result)).toContain("waiting on the user's approval")
+  expect(String((await call({ action: 'update', id: 'T3', status: 'done', note: '-' })).result)).toContain("waiting on the user's approval")
   expect((await call({ action: 'update', id: 'E1', status: 'done' })).deny).toContain('closes when its tasks are done')
 })
 
@@ -1492,7 +1494,7 @@ test('branch and pull request per unit of work: named from the unit, body from i
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   expect(String((await call({ action: 'claim', id: 'T1' })).result)).toContain("Work on branch e1-agent-coordination (E1's, which this task ships in)")
   expect(String((await call({ action: 'claim', id: 'T2' })).result)).toContain('Work on branch t2-lone-fix:')
-  const done = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  const done = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
   expect(done).toContain('Now open its pull request')
   expect(done).toContain('gh pr create --title "T2: Lone fix"')
   const pr = String((await call({ action: 'pr', id: 'T1' })).result)
@@ -1704,4 +1706,108 @@ test('backups: on start, a JSON export outside the checkout when the roadmap cha
   listed = listed.slice(0, 20)
   await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
   expect(written).toEqual([])
+})
+
+test('release notes: an agent sets a task done with its note; the PR body lists the notes by section', async ($, on) => {
+  const some = [item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', type: 'bug', status: 'in_progress' }), item('T2', { parent: 'E1' })]
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  // Done without a note is asked for one, naming the section its type suggests, and writes nothing.
+  scripts.length = 0
+  const asked = await call({ action: 'update', id: 'T1', status: 'done' })
+  expect(asked).toContain('T1 has no release note')
+  expect(asked).toContain('Fixed by default')
+  expect(scripts.some(one => one.startsWith('BEGIN'))).toBe(false)
+  expect(await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'nope' })).toContain('section must be one of Added, Changed, Fixed')
+  const done = await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'fixed' })
+  expect(done).toContain('release note: Cards no longer flicker')
+  expect(done).toContain('section → Fixed')
+  expect(scripts.some(one => one.startsWith('BEGIN') && one.includes("note='Cards no longer flicker'"))).toBe(true)
+  // "none" or "-": the work needs no line.
+  expect(await call({ action: 'update', id: 'T2', note: 'none' })).toBe('T2: no release note needed')
+  expect(await call({ action: 'update', id: 'E1', note: 'x' })).toBe('Only tasks carry a release note')
+  // The PR body: notes by section, with their task; a "-" or missing note is left out.
+  const noted = [
+    some[0]!, { ...some[1]!, note: 'Cards no longer flicker', section: 'Fixed' as const },
+    { ...some[2]!, note: 'Undo on the board' }, item('T3', { parent: 'E1', note: '-' }), item('T4', { parent: 'E1', type: 'chore', note: 'Faster tests' }),
+  ]
+  expect(pullRequest(noted, noted[0]!).body).toContain('### Release notes\n\nAdded:\n- Undo on the board (T2)\n\nChanged:\n- Faster tests (T4)\n\nFixed:\n- Cards no longer flicker (T1)')
+  expect(pullRequest([item('T9')], item('T9')).body).not.toContain('Release notes')
+})
+
+test('changelog: merged notes go under [Unreleased], each in its section, newest first; nothing twice', async ($, on) => {
+  const file = [
+    '# Changelog', '', 'Intro.', '', '## [Unreleased]', '', '### Added', '', '- Older thing.', '', '### Fixed', '', '- Old fix.', '', '## 0.4.0 - 2026-10-09', '', '### Added', '', '- Install.', '',
+  ].join('\n')
+  const out = withNotes(file, [{ section: 'Added', note: 'Undo.' }, { section: 'Changed', note: 'Faster.' }, { section: 'Fixed', note: 'Old fix.' }, { section: 'Fixed', note: 'New fix.' }])
+  expect(out.added).toEqual(['Undo.', 'Faster.', 'New fix.'])
+  expect(out.text).toBe([
+    '# Changelog', '', 'Intro.', '', '## [Unreleased]', '', '### Added', '', '- Undo.', '- Older thing.', '', '### Changed', '', '- Faster.', '', '### Fixed', '', '- New fix.', '- Old fix.', '', '## 0.4.0 - 2026-10-09', '', '### Added', '', '- Install.', '',
+  ].join('\n'))
+  expect(withNotes(out.text, [{ section: 'Added', note: 'Undo.' }])).toEqual({ text: out.text, added: [] })
+  // No [Unreleased] yet: made above the newest version. No file: made from scratch.
+  expect(withNotes('# Changelog\n\n## 0.4.0\n\n- x\n', [{ section: 'Fixed', note: 'y' }]).text).toBe('# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- y\n\n## 0.4.0\n\n- x\n')
+  expect(withNotes(undefined, [{ section: 'Added', note: 'First.' }]).text.replace(/\n*$/, '\n')).toBe('# Changelog\n\n## [Unreleased]\n\n### Added\n\n- First.\n')
+
+  // Merged work only: an open PR holds its notes back; a merged one, or none at all, lets them through.
+  const some = [
+    item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done', note: 'In an open PR' }),
+    item('E2', { assignee: 'claude' }), item('T2', { parent: 'E2', status: 'done', note: 'Merged' }),
+    item('T3', { status: 'done', note: 'Straight to main', type: 'bug' }), item('T4', { status: 'review', note: 'Not done' }), item('T5', { status: 'done', note: '-' }),
+  ]
+  const prs = parsePrs(JSON.stringify([
+    { number: 1, title: 'E1: a', headRefName: 'e1-a', state: 'OPEN', url: '' }, { number: 2, title: 'E2: b', headRefName: 'e2-b', state: 'MERGED', url: '' },
+  ]))
+  expect(mergedNotes(some, { commits: [], prs }).map(one => one.id)).toEqual(['T3', 'T2'])
+
+  const written: Record<string, string> = {}
+  on('process.run', ($, e) =>
+    e.argv[0] === 'gh' ? { value: { ...fakeSqlite('', null), stdout: JSON.stringify([{ number: 2, title: 'E2: b', headRefName: 'e2-b', state: 'MERGED', url: '' }, { number: 1, title: 'E1: a', headRefName: 'e1-a', state: 'OPEN', url: '' }]) } }
+    : e.argv[0] === 'git' ? { value: { ...fakeSqlite('', null), stdout: '' } }
+    : { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('fs.read', ($, e) => (written[e.path] === undefined ? { deny: 'ENOENT' } : { value: written[e.path] }) as never)
+  on('fs.write', ($, e) => ((written[e.path] = e.text), { value: undefined }) as never)
+  written['/work/project/CHANGELOG.md'] = '# Changelog\n\n## [Unreleased]\n\n## 0.4.0\n'
+  const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'changelog' } as never)
+  expect(reply.result).toBe('Wrote 2 note(s) into CHANGELOG.md under [Unreleased]:\n- Straight to main\n- Merged')
+  expect(written['/work/project/CHANGELOG.md']).toBe('# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Merged\n\n### Fixed\n\n- Straight to main\n\n## 0.4.0\n')
+  expect((await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'changelog' } as never)).result).toBe('CHANGELOG.md already has the notes of all merged work.')
+})
+
+test('release notes on the board: setting a task done asks for its note; the card shows it', async ($, on) => {
+  const some = [item('T1', { status: 'in_progress' }), item('T2', { note: 'Shown on the card', section: 'Changed' })]
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'set-done' })
+  // The person's done is final at once; the card then asks for the CHANGELOG line, Added for a feature.
+  expect(scripts.some(one => one.includes("status='done'"))).toBe(true)
+  expect((await ui.find({ key: 'note' }))?.props.label).toBe('Release note (Added)')
+  await ui.input({ key: 'note', text: 'Something new' } as never)
+  expect(scripts.some(one => one.includes("note='Something new'"))).toBe(true)
+  expect(await ui.find({ key: 'note' })).toBeUndefined()
+  await ui.press({ key: 'set-done' })
+  await ui.press({ key: 'note-none' })
+  expect(scripts.some(one => one.includes("note='-'"))).toBe(true)
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ type: 'Text', text: /Release note {2}\(Changed\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Shown on the card/ })).toBeDefined()
+  await ui.unmount()
 })

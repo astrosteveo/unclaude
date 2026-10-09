@@ -1,4 +1,4 @@
-import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
+import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Section, Snapshot, Status } from '../types'
 
 // The person at the board, and the main loop's agent; subagents go by names from agentName.
 export const USER = 'user'
@@ -9,6 +9,19 @@ export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', 
 export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', review: 'Review', done: 'Done' }
 export const PRIORITIES: Priority[] = ['p0', 'p1', 'p2', 'p3']
 export const TYPES: IssueType[] = ['feature', 'bug', 'chore']
+export const SECTIONS: Section[] = ['Added', 'Changed', 'Fixed']
+// The order Keep a Changelog puts its sections in, those this mod writes among them.
+const SECTION_ORDER = ['Added', 'Changed', 'Deprecated', 'Removed', 'Fixed', 'Security']
+
+/** A section as given (`fixed`, `Fixed`), or undefined when it is none of them. */
+export const sectionOf = (text: string | undefined): Section | undefined =>
+  SECTIONS.find(one => one.toLowerCase() === text?.trim().toLowerCase())
+
+/** The section a task's note goes under: its own, else what its type suggests (a bug is a fix). */
+export const sectionFor = (item: Item): Section => item.section ?? (item.type === 'bug' ? 'Fixed' : item.type === 'chore' ? 'Changed' : 'Added')
+
+/** Whether a task has a note worth a CHANGELOG line (not none, and not `-`, none needed). */
+export const hasNote = (item: Item) => Boolean(item.note && item.note !== '-')
 /** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
 export const marks = (item: Item) =>
   [item.priority && item.priority !== 'p2' ? item.priority : '', item.type && item.type !== 'feature' ? item.type : ''].filter(Boolean)
@@ -555,6 +568,13 @@ export function pullRequest(items: Item[], item: Item): { branch: string; title:
       .join('\n')
       .trim(),
   )
+  // The tasks' release notes, as they will read in the CHANGELOG.
+  const noted = tasks.filter(hasNote)
+  if (noted.length)
+    parts.push(['### Release notes', ...SECTIONS.flatMap(section => {
+      const some = noted.filter(task => sectionFor(task) === section)
+      return some.length ? ['', `${section}:`, ...some.map(task => `- ${task.note} (${task.id})`)] : []
+    })].join('\n'))
   parts.push(`Tracked on the roadmap as ${item.id}${item.parent ? `, in ${path(items, item)}` : ''}.`)
   return { branch: branchFor(item), title: `${item.id}: ${item.title}`, body: parts.filter(Boolean).join('\n\n') }
 }
@@ -675,4 +695,69 @@ export function withIgnore(text: string | undefined): string {
   const base = text ?? ''
   const gap = base === '' || base.endsWith('\n') ? '' : '\n'
   return `${base}${gap}# The roadmap tracker's database (binary, per checkout).\n${IGNORE_LINE}\n`
+}
+
+/**
+ * The release notes of merged work: done tasks with a note whose unit of work has no open pull request,
+ * and has a merged one or none at all (work committed straight to the main line).
+ */
+export function mergedNotes(items: Item[], refs: Refs): Item[] {
+  return rows(items)
+    .map(row => row.item)
+    .filter(task => task.kind === 'task' && task.status === 'done' && hasNote(task))
+    .filter(task => {
+      const unit = unitOf(items, task)
+      const prs = refs.prs.filter(pr => pr.ids.includes(unit.id))
+      return !prs.some(pr => pr.state === 'open') && (prs.length === 0 || prs.some(pr => pr.state === 'merged'))
+    })
+    // Newest first, as a CHANGELOG reads.
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || Number(b.id.slice(1)) - Number(a.id.slice(1)))
+}
+
+/**
+ * A CHANGELOG's text with `notes` added under `## [Unreleased]`, each in its section, newest first, as
+ * Keep a Changelog lays it out; the heading and sections are made when missing. A note already in the
+ * file is left out. Answers the text and the notes that went in.
+ */
+export function withNotes(text: string | undefined, notes: { section: Section; note: string }[]): { text: string; added: string[] } {
+  const before = text ?? ''
+  const fresh = notes.filter((one, i) => !before.includes(one.note) && notes.findIndex(other => other.note === one.note) === i)
+  if (fresh.length === 0) return { text: before, added: [] }
+  const lines = (before || '# Changelog\n').replace(/\r\n/g, '\n').split('\n')
+  let start = lines.findIndex(line => /^## \[?unreleased\]?/i.test(line))
+  if (start < 0) {
+    // Above the newest version, set off by blank lines.
+    const first = lines.findIndex(line => line.startsWith('## '))
+    let at = first < 0 ? lines.length : first
+    while (at > 0 && lines[at - 1]!.trim() === '') at--
+    lines.splice(at, 0, '', '## [Unreleased]', ...(first < 0 ? [] : ['']))
+    start = at + 1
+    while (start + 2 < lines.length && lines[start + 2]!.trim() === '' && lines[start + 1]!.trim() === '') lines.splice(start + 2, 1)
+  }
+  for (const section of SECTION_ORDER.filter(one => fresh.some(note => note.section === one))) {
+    const bullets = fresh.filter(one => one.section === section).map(one => `- ${one.note}`)
+    const next = lines.findIndex((line, i) => i > start && line.startsWith('## '))
+    const end = next < 0 ? lines.length : next
+    const head = lines.findIndex((line, i) => i > start && i < end && line.trim() === `### ${section}`)
+    if (head >= 0) {
+      let at = head + 1
+      while (at < end && lines[at]!.trim() === '') at++
+      if (at < end && lines[at]!.startsWith('- ')) lines.splice(at, 0, ...bullets)
+      else lines.splice(head + 1, 0, '', ...bullets)
+      continue
+    }
+    const later = lines.findIndex((line, i) => i > start && i < end && line.startsWith('### ') &&
+      SECTION_ORDER.indexOf(line.slice(4).trim()) > SECTION_ORDER.indexOf(section))
+    if (later >= 0) lines.splice(later, 0, `### ${section}`, '', ...bullets, '')
+    else {
+      let at = end
+      while (at - 1 > start && lines[at - 1]!.trim() === '') at--
+      const block = ['', `### ${section}`, '', ...bullets]
+      lines.splice(at, 0, ...block)
+      // A blank line between it and whatever follows (the next version's heading).
+      const after = at + block.length
+      if (after < lines.length && lines[after]!.trim() !== '') lines.splice(after, 0, '')
+    }
+  }
+  return { text: lines.join('\n'), added: fresh.map(one => one.note) }
 }

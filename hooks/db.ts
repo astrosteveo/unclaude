@@ -48,6 +48,9 @@ ALTER TABLE activity ADD COLUMN redo TEXT;
 ALTER TABLE activity ADD COLUMN op INTEGER;
 ALTER TABLE activity ADD COLUMN undone INTEGER;
 ALTER TABLE activity ADD COLUMN reverts INTEGER;`,
+  // v5: release notes. A task's line for the CHANGELOG, and the section it goes under.
+  `ALTER TABLE items ADD COLUMN note TEXT;
+ALTER TABLE items ADD COLUMN section TEXT;`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -175,7 +178,7 @@ export const RECENT = 20
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
         'parent', parent, 'description', description, 'assignee', assignee, 'due', due,
-        'priority', priority, 'type', type, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
+        'priority', priority, 'type', type, 'note', note, 'section', section, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
         'labels', json((SELECT json_group_array(label) FROM (SELECT label FROM labels WHERE item_id=items.id ORDER BY label))),
         'relations', json((SELECT json_group_array(json_object('type', type, 'id', b)) FROM relations WHERE a=items.id)),
         'blocked_by', json((SELECT json_group_array(blocker) FROM links WHERE blocked=items.id)),
@@ -243,7 +246,7 @@ SELECT ${id};
 COMMIT;`
 }
 
-export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due' | 'priority' | 'type'>>
+export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section'>>
 
 /** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
@@ -260,6 +263,7 @@ export function change(actor: string, item: Item, changes: Changes): { script: s
       log('assign', value === null ? `unassigned ${item.assignee}` : value === actor ? 'claimed' : `assigned to ${value}`)
     else if (field === 'parent') log('edit', value === null ? 'moved to top level' : `moved under ${value}`)
     else if (field === 'description') log('edit', value ? 'description updated' : 'description cleared')
+    else if (field === 'note') log('edit', value === null ? 'release note cleared' : value === NO_NOTE ? 'no release note needed' : `release note: ${value}`)
     else log('edit', value === null ? `${field} cleared` : `${field} → ${value}`)
   }
   if (sets.length === 0) return { script: '', notes }
@@ -330,7 +334,7 @@ export function remove(ids: string[], log?: { actor: string; body: string; rows:
 
 /** Every table's columns, as `dump` reads and `restore` writes them. */
 export const TABLES = {
-  items: ['id', 'kind', 'title', 'status', 'parent', 'description', 'assignee', 'due', 'priority', 'type', 'lease_at', 'created_at', 'updated_at'],
+  items: ['id', 'kind', 'title', 'status', 'parent', 'description', 'assignee', 'due', 'priority', 'type', 'note', 'section', 'lease_at', 'created_at', 'updated_at'],
   activity: ['id', 'item_id', 'author', 'type', 'body', 'at', 'undo', 'redo', 'op', 'undone', 'reverts'],
   links: ['blocker', 'blocked'],
   checks: ['item_id', 'n', 'text', 'done'],
@@ -485,6 +489,9 @@ COMMIT;`,
     notes,
   }
 }
+
+/** The note of a task whose work needs no line in the CHANGELOG. */
+export const NO_NOTE = '-'
 
 /** A label as stored: lowercase, words joined by hyphens, no leading `#`. */
 export const label = (text: string) => text.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-')

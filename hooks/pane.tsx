@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, lastChange, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, lastChange, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -64,6 +64,8 @@ export type PaneState = {
   handing: string | null
   /** The item waiting on a yes before it is approved and its pull request merged. */
   merging: string | null
+  /** The task whose card asks for its release note, having just been set done. */
+  noting: string | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -96,6 +98,8 @@ export type PaneActions = {
   setEditing: (isOn: boolean) => void
   /** Takes back the person's last change, or the logged entries `ids`. */
   undo: (ids?: number[]) => void
+  /** Asks for a task's release note on its card (null drops the question). */
+  setNoting: (id: string | null) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -133,7 +137,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -398,6 +402,8 @@ export function drawPane(
             field('edit-labels', 'Labels', item.labels.join(', '), v => save({ labels: v ? v.split(',') : [] }), 'ui, auth'),
             choice('edit-priority', 'Priority', item.priority, PRIORITIES.map(one => ({ value: one })), v => save({ priority: v })),
             choice('edit-type', 'Type', item.type, TYPES.map(one => ({ value: one })), v => save({ type: v })),
+            field('edit-note', 'Release note', item.note ?? '', v => save({ note: v }), 'one line for the CHANGELOG; - for none; empty clears'),
+            choice('edit-section', 'Section', sectionFor(item), SECTIONS.map(one => ({ value: one })), v => save({ section: v })),
             // The checklist as written: reword an entry in place, empty it to drop it, or add one at the end.
             // An entry left as it was keeps its tick.
             ...item.checklist.map(c => field(`edit-check-${c.n}`, `Criterion ${c.n}`, c.text, v => save({
@@ -419,6 +425,8 @@ export function drawPane(
     if (!isEditing) section('description', 'Description', item.description
       ? wrap(item.description, inner - 2).map((line, i) => ({ key: `desc-${i}`, rows: 1, node: <Text key={`desc-${i}`}>  {line}</Text> }))
       : [])
+    if (!isEditing && item.note && item.note !== '-') section('note', `Release note  (${sectionFor(item)})`, wrap(item.note, inner - 2)
+      .map((line, i) => ({ key: `note-${i}`, rows: 1, node: <Text key={`note-${i}`}>  {line}</Text> })))
     const checks = item.checklist ?? []
     section('criteria', `Acceptance criteria  ${checks.filter(c => c.done).length}/${checks.length}`, checks.map(c => ({
       key: `check-${c.n}`, rows: wrap(c.text, inner - 2).length, node: (
@@ -574,7 +582,7 @@ export function drawPane(
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
@@ -635,7 +643,11 @@ export function drawPane(
             {STATUSES.map((one, i) => (
               <Button key={`set-${one}`} label={item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]}
                 hotkey={String(i + 1)} variant={item.status === one ? 'primary' : 'secondary'}
-                onPress={() => act.userAct({ action: 'update', id: item.id, status: one })} />
+                onPress={() => {
+                  act.userAct({ action: 'update', id: item.id, status: one })
+                  // Done, and nothing for the CHANGELOG yet: the card asks for its line.
+                  if (one === 'done' && !item.note && Input) act.setNoting(item.id)
+                }} />
             ))}
           </Box>
         ) : (
@@ -650,7 +662,17 @@ export function drawPane(
             </Text>
           </Box>
         )}
-        {handing === item.id ? (
+        {noting === item.id && Input ? (
+          <Box key="note-row" flexDirection="row" columnGap={1}>
+            <Input key="note" label={`Release note (${sectionFor(item)})`} placeholder="One line for the CHANGELOG; Enter saves it" autoFocus submitLabel="save"
+              onSubmit={(value: string) => {
+                if (value.trim()) act.userAct({ action: 'update', id: item.id, note: value.trim() })
+                act.setNoting(null)
+              }} />
+            <Button key="note-none" label="None needed" onPress={() => (act.userAct({ action: 'update', id: item.id, note: '-' }), act.setNoting(null))} />
+            <Button key="note-skip" label="Later" onPress={() => act.setNoting(null)} />
+          </Box>
+        ) : handing === item.id ? (
           confirmHand(item)
         ) : merging === item.id && reviewPr ? (
           <Box key="merge-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
