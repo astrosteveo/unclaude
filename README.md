@@ -43,7 +43,7 @@ What Claude does with it:
 - Plans a whole breakdown in one call (`plan`): milestones, epics and tasks nested as a tree, with checklists, labels and dependencies between the new tasks. The tree is checked in full before anything is written.
 - Searches with `find`: by status, assignee (`none` for unassigned), priority, type, labels, a subtree (`under`) or words in titles, descriptions and comments.
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
-- Puts task ids in commit messages (`T12: ...`). Commits and PRs that name a task show up on it.
+- Puts task ids in commit messages (`T12: ...`) and epic or milestone ids in PR titles and branches (`E9: ...`, `e9-agent-coordination`). Commits and PRs show up on the items they name.
 
 ## How it's stored
 

@@ -448,9 +448,12 @@ export function agentName(type: string, description: string, teammateId?: string
   return task ? `${slug(type, 24) || 'agent'}:${task}` : slug(type, 24) || 'agent'
 }
 
-/** Task ids a text names, as written in a commit or a PR title: `T12`, `t12`, `[T12]`, `T12:`. */
+/**
+ * Roadmap ids a text names, as written in a commit, a PR title or a branch: `T12`, `[T12]`, `E9:`,
+ * `M4`, `e9-agent-coordination`. A word that only starts like one (`e2e`, `t3a`) is not one.
+ */
 export function idsIn(text: string): string[] {
-  const found = (text.match(/\b[Tt]\d+\b/g) ?? []).map(id => id.toUpperCase())
+  const found = (text.match(/\b[TtEeMm]\d+\b/g) ?? []).map(id => id.toUpperCase())
   return [...new Set(found)]
 }
 
@@ -474,12 +477,17 @@ export function parsePrs(out: string): Pr[] {
     .filter(pr => pr.ids.length > 0)
 }
 
-/** The commits and pull requests that name `item`, or any task under it. */
+/**
+ * The commits and pull requests that name `item` or anything under it; and the pull requests of what
+ * it sits in, since a task handed over inside an epic ships in the epic's PR.
+ */
 export function refsFor(items: Item[], refs: Refs, item: Item): Refs {
-  const ids = new Set(subtree(items, item.id).filter(id => id.startsWith('T')))
+  const ids = new Set(subtree(items, item.id))
+  const above = new Set<string>()
+  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined)) above.add(at.id)
   return {
     commits: refs.commits.filter(commit => commit.ids.some(id => ids.has(id))),
-    prs: refs.prs.filter(pr => pr.ids.some(id => ids.has(id))),
+    prs: refs.prs.filter(pr => pr.ids.some(id => ids.has(id) || above.has(id))),
   }
 }
 

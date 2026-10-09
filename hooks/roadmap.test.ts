@@ -1023,3 +1023,17 @@ test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done
   expect(await ui.find({ key: 'hand' })).toBeUndefined()
   await ui.unmount()
 })
+
+test('epic and milestone ids link too: a scope\'s PR shows on it, on what it sits in, and on its tasks', async () => {
+  expect(idsIn('E9: agent coordination (M4), branch e9-agent-coordination; e2e tests, t3a, ME4')).toEqual(['E9', 'M4'])
+  const some = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' }), item('T2')]
+  const prs = parsePrs(JSON.stringify([{ number: 9, title: 'E1: Auth', headRefName: 'e1-auth', state: 'OPEN', url: 'https://x/9' }]))
+  const commits = parseGitLog('aaa1111\x1fAda\x1f2026-10-09\x1fE1: wire it up\n\x1e\n')
+  const on = (id: string) => refsFor(some, { commits, prs }, some.find(one => one.id === id)!)
+  expect(on('E1').prs.map(pr => pr.number)).toEqual([9])
+  expect(on('M1').prs.map(pr => pr.number)).toEqual([9])
+  expect(on('T1').prs.map(pr => pr.number)).toEqual([9])
+  expect(on('T1').commits).toEqual([])
+  expect(on('M1').commits.map(c => c.hash)).toEqual(['aaa1111'])
+  expect(on('T2')).toEqual({ commits: [], prs: [] })
+})
