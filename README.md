@@ -22,9 +22,9 @@ Answer `y` to add the marketplace, then pick a scope (user scope makes it availa
 
 Ask Claude to plan something, for example *"plan the v2 release as milestones, epics and tasks, with a checklist on each task"*, and then:
 
-- **`/roadmap`** opens the board. Columns are Todo, In progress, Blocked, Review and Done, and a Tree tab shows the full hierarchy.
+- **`/roadmap`** opens the board (see [The board](#the-board) below). Columns are Todo, In progress, Blocked, Review and Done, and a Tree tab shows the full hierarchy.
 - **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `e` edits it, `x` closes it, `n` adds an item, `f` filters, and `v` steps through board, tree, backlog and timeline. Hand to Claude, Assign me and Unassign have no keys on purpose: Tab to them and press Enter (Hand to Claude then asks you to confirm).
-- **Timeline** (fourth tab) lists milestones by due date, each followed by its epics, with a progress bar and how it stands: *in 11 days*, or *4 days late, 1 open* in red. Tasks past their due date (their own or one above them) are marked `⚠late` on the board, and Claude's brief lists what is overdue.
+- **Timeline** (fourth tab) lists milestones by due date, each followed by its epics, with the dates, progress bars and counts lined up in columns and how each stands: *in 11 days*, or *4 days late, 1 open* in red. Tasks past their due date (their own or one above them) are marked `⚠late` on the board, and Claude's brief lists what is overdue.
 - **Backlog** (third tab) is for triage: todo tasks nobody holds, those without an epic first, then by priority. Each row has a priority picker and a `→ Claude` button.
 - **New items:** `n` opens a form (kind, priority, type, where it goes, then the title; Enter creates it). On an open epic or milestone, `n` adds under it.
 - **Edit** a card with `e`: Tab into its title, description (one line; ask Claude for longer text), due date, labels, priority, type and parent, and press Enter on a field to save it. On a task, edit mode also lists the checklist (reword an entry, or empty it to drop it), an Add criterion field, and Blocked by (task ids, comma-separated). `e` again leaves edit mode.
@@ -37,6 +37,49 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 - **Labels and links:** tasks can carry labels (`#ui`, `#auth`), relate to other items (shown on both), or be marked a duplicate of another, which closes them. They show in the card's Links section.
 - **Run tasks at once:** tick rows in the Backlog (☐) and press *Run N at once…*, or press *Run its tasks at once…* on an epic or milestone. Each task gets its own git worktree (`.claude/worktrees/<branch>`), on its own branch named for the task, made from the main line, and its own agent, started by Claude. Agents claim their tasks, commit, open their PRs and set them done with release notes, side by side. A task waiting on another starts by itself once that one is done (approved). Up to four run at once; the rest wait their turn.
 - **The band** above the prompt shows what an agent is working on (with several at once, each one's task and checklist). Press it to open that task.
+
+### The board
+
+The board lays itself out for the width of its pane.
+
+In a **narrow pane** (under 100 columns) the columns stack. Empty columns fold into one line at the top, and each card's details (priority and type, checklist, assignee, unread comments) line up down the list, so the titles read first:
+
+```
+ Board   Tree  v:  Backlog   Timeline   ███████░ 83/86 done  ● 2 unread
+[ Mark all read ] [ Filter ] [ Undo ] [ New ]
+b: ✗ Blocked 0 · r: ◉ Review 0
+
+t: ○ Todo 2
+T96 README: the board at narrow and wide widths, folding…    ☑1/3
+T27 Official 1.0.0 release: tag and publish on GitHub        ☑0/5 @user
+
+p: ◐ In progress 1
+T95 Heavier epic in the token bench                 chore    ☑0/3 @claude
+
+d: ● Done 83 · show all
+T88 Tree and timeline open on what's still going on          ☑4/4 @claude
+T87 Header and key hints that fit: views as tabs, a…         ☑4/4 @claude ● 1
+…80 older
+Enter opens · Tab/↑↓ move · v tree · t p b r d jump to a column · n new · f filter
+```
+
+In a **wide pane** it's a Kanban board. An empty column shrinks to its heading, the others share the width, and a card takes one line, or its title and then its details when the column is narrow. In a column where any card needs two lines, every card gets two, so the column lines up:
+
+```
+ Board   Tree  v:  Backlog   Timeline   ███████░ 83/86 done  ● 2 unread   [ Mark all read ] [ Filter ] [ New ]
+t: ○ Todo 2                  p: ◐ In progress 1           b: ✗ Blocked 0  r: ◉ Review 0  d: ● Done 83 · show all
+───────────────────────────  ───────────────────────────  ──────────────  ─────────────  ───────────────────────────
+T96 README: the board at n…  T95 Heavier epic in the t…                                  T88 Tree and timeline open…
+☑1/3                         chore ☑0/3 @claude                                          ☑4/4 @claude
+T27 Official 1.0.0 release…                                                              T87 Header and key hints t…
+☑0/5 @user                                                                               ☑4/4 @claude ● 1
+                                                                                         …80 older
+```
+
+- **Done** shows what was finished in the last week (at least three tasks, at most eight). *· show all* beside its heading lists the rest, as many as the pane has room for; *· recent only* goes back.
+- **The header:** the views read as tabs, the one showing highlighted, beside a progress bar of tasks done and the unread count; the actions sit in a group of their own. It's one row on a wide pane and two on a narrow one. The key hints at the bottom fit the width, the most useful first.
+- **An open card** sits under the board (the board keeps the top part of the pane), with its id highlighted on the board.
+- **Tree and Timeline** lead with open work. Finished milestones and epics are folded to one line: the `▸` before one opens it (Tab to it and press Enter, or click it), and `▾` folds it again, open ones too. A filter unfolds everything, so every match shows, and whatever holds the open card stays unfolded.
 
 What Claude does with it:
 
