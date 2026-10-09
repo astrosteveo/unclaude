@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, commentNote, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -1810,4 +1810,59 @@ test('release notes on the board: setting a task done asks for its note; the car
   expect(await ui.find({ type: 'Text', text: /Release note {2}\(Changed\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Shown on the card/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s card reaches it at once when set to, else with the next prompt', async ($, on) => {
+  const some = [item('T1', { assignee: 'claude', status: 'in_progress', title: 'Parser' }), item('T2', { title: 'Free' })]
+  const activity: Activity[] = []
+  const filled: string[] = []
+  const submitted: string[] = []
+  const contexts: string[] = []
+  const stored: Record<string, unknown> = {}
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    // A comment written lands in the timeline the next read sees.
+    const said = /'user', 'comment', '([^']*)'/.exec(stdin)?.[1]
+    if (stdin.startsWith('BEGIN') && said) activity.push({ id: 100 + activity.length, item_id: 'T1', author: 'user', type: 'comment', body: said, at: '2026-10-09T10:00:00Z' })
+    return { value: fakeSqlite(stdin, { items: some, activity, seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.get', ($, e) => ({ value: stored[e.key] }) as never)
+  on('store.set', ($, e) => ((stored[e.key] = e.value), { value: undefined }) as never)
+  on('prompt.fill', ($, e) => (filled.push(e.text), { isFilled: true, text: e.text, cursor: e.text.length }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), contexts.push((e.context ?? []).join('\n')), { text: e.text, origin: e.origin }))
+  // The first prompt takes the session's opening brief; news comes after.
+  await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'ask' })
+  expect(filled).toEqual(['About roadmap task T1 (Parser): '])
+  // Off by default: the comment waits, and Claude reads it in the brief of the person's next prompt.
+  expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('Waits for your prompt')
+  await ui.input({ key: 'comment', text: 'use the new lexer' } as never)
+  expect(submitted.length).toBe(1)
+  await $.prompt.submit({ text: 'next thing', wait: false, origin: { kind: 'composer' } })
+  expect(contexts.at(-1)).toContain('- T1: use the new lexer')
+  // On: the next comment starts a turn of its own, and the setting is kept.
+  await ui.press({ key: 'comment-turns' })
+  expect(stored.commentTurns).toBe(true)
+  expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('Tells it now')
+  await ui.input({ key: 'comment', text: 'and skip comments' } as never)
+  expect(submitted.at(-1)).toBe('The user commented on roadmap task T1 (Parser), which you hold: "and skip comments". Read it with the roadmap tool (show T1) and act on it, commenting back there.')
+  // A card nobody holds has no one to tell: no toggle, and no turn.
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ key: 'comment-turns' })).toBeUndefined()
+  const before = submitted.length
+  await ui.input({ key: 'comment', text: 'just a note' } as never)
+  expect(submitted.length).toBe(before)
+  await ui.unmount()
+  expect(commentNote(item('T5', { assignee: 'explore:a', title: 'X' }), 'hi')).toContain('which explore:a holds: "hi". If explore:a is still running, pass it on (SendMessage)')
 })

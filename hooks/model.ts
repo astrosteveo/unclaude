@@ -536,6 +536,17 @@ export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): 
   return `The user approved ${what} on the board; it is done. No pull request was merged with it. Say in a line or two what is next on the roadmap.`
 }
 
+/** The prompt Ask Claude puts in the box for the person to finish: which item, by id and title. */
+export const askAbout = (item: Item) => `About roadmap ${item.kind} ${item.id} (${item.title}): `
+
+/** The turn a comment starts when the person sends it to the agent holding the item. */
+export function commentNote(item: Item, body: string): string {
+  const what = `roadmap ${item.kind} ${item.id} (${item.title})`
+  return item.assignee === CLAUDE
+    ? `The user commented on ${what}, which you hold: "${body}". Read it with the roadmap tool (show ${item.id}) and act on it, commenting back there.`
+    : `The user commented on ${what}, which ${item.assignee} holds: "${body}". If ${item.assignee} is still running, pass it on (SendMessage); otherwise act on it yourself. Comment back on ${item.id}.`
+}
+
 /** Lowercase words joined by hyphens, cut at a word boundary to at most `cap` characters. */
 function slug(text: string, cap: number): string {
   const full = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')

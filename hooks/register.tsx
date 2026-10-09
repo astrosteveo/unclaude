@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, askAbout, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -36,6 +36,8 @@ const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as str
 const merging = atom({ plugin: 'roadmap', key: 'merging' } as const, null as string | null)
 // The task just set done on the board, whose card asks for its release note.
 const noting = atom({ plugin: 'roadmap', key: 'noting' } as const, null as string | null)
+// Whether a comment on an agent's card starts a turn at once; the person's setting, kept across sessions.
+const commentTurns = atom({ plugin: 'roadmap', key: 'commentTurns' } as const, false)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
 const scrolled = atom({ plugin: 'roadmap', key: 'scrolled' } as const, 0)
 // The furthest the open card can scroll, as last drawn.
@@ -834,6 +836,23 @@ async function userUndo($: EngineInterface, ids?: number[]) {
   await refresh($)
 }
 
+/** Posts the person's comment; with comments set to start turns, the agent holding the item hears at once. */
+async function postComment($: EngineInterface, item: Item, body: string) {
+  const text = body.trim()
+  if (!text) return
+  await userAct($, { action: 'comment', id: item.id, body: text })
+  if ((await read($, commentTurns)) && isAgent(item.assignee))
+    await $.prompt.submit({ text: commentNote(item, text) }).catch(() => undefined)
+}
+
+/** Ask Claude: a prompt about the item in the box, for the person to finish and send. */
+async function askClaude($: EngineInterface, item: Item) {
+  const filled = await $.prompt.fill({ text: askAbout(item), mode: 'insert' }).catch(() => undefined)
+  $.ui.toast(filled?.isFilled === false
+    ? `roadmap: the prompt box is busy; ask about ${item.id} there`
+    : `roadmap: the prompt asks about ${item.id}; press Esc to finish it there`)
+}
+
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
@@ -1140,6 +1159,8 @@ export const register: Register = on => {
   on('command.run', { command: 'roadmap' }, async $ => {
     // The pane shows what went wrong, so a failed read still opens it.
     await refresh($).catch(() => undefined)
+    const turns = await $.store.get('commentTurns').catch(() => undefined)
+    await update($, commentTurns, () => turns === true)
     // Asks for the keys, so the board is driven from the keyboard at once (granted from an empty prompt).
     await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
     return { text: 'Roadmap opened.' }
@@ -1205,6 +1226,7 @@ export const register: Register = on => {
       isEditing: await read($, editing),
       handing: await read($, handing),
       merging: await read($, merging),
+      commentTurns: await read($, commentTurns),
       noting: await read($, noting),
       scrolledTo: await read($, scrolled),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
@@ -1231,6 +1253,9 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
+      comment: (item, body) => void postComment($, item, body),
+      askClaude: item => void askClaude($, item),
+      setCommentTurns: isOn => void update($, commentTurns, () => isOn).then(() => $.store.set('commentTurns', isOn)).then(() => focusOn($, 'comment-turns')),
       setNoting: id => void update($, noting, () => id).then(() => focusOn($, id ? 'note' : 'close')),
       addIgnore: () => void addIgnore($),
       dismissIgnore: () => void dismissIgnore($),

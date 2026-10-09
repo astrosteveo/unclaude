@@ -64,6 +64,8 @@ export type PaneState = {
   handing: string | null
   /** The item waiting on a yes before it is approved and its pull request merged. */
   merging: string | null
+  /** Whether a comment on an agent's card starts a turn at once. */
+  commentTurns: boolean
   /** The task whose card asks for its release note, having just been set done. */
   noting: string | null
   /** How far the open card is scrolled, as asked. */
@@ -98,6 +100,12 @@ export type PaneActions = {
   setEditing: (isOn: boolean) => void
   /** Takes back the person's last change, or the logged entries `ids`. */
   undo: (ids?: number[]) => void
+  /** Posts the person's comment on an item (starting a turn when set to). */
+  comment: (item: Item, body: string) => void
+  /** Puts a prompt about an item in the prompt box. */
+  askClaude: (item: Item) => void
+  /** Sets whether comments on an agent's card start a turn. */
+  setCommentTurns: (isOn: boolean) => void
   /** Asks for a task's release note on its card (null drops the question). */
   setNoting: (id: string | null) => void
   /** Moves the keyboard ring to an element of the pane. */
@@ -137,7 +145,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -493,8 +501,16 @@ export function drawPane(
     section('activity', 'Activity', [
       ...(Input
         ? [{ key: 'comment', rows: 1, node: (
-            <Input key="comment" label="Comment" placeholder="A note for Claude; Enter posts it"
-              onSubmit={(value: string) => (value.trim() && act.userAct({ action: 'comment', id: item.id, body: value }))} />
+            <Box key="comment-row" flexDirection="row" columnGap={1}>
+              <Input key="comment" label="Comment"
+                placeholder={isAgent(item.assignee) && commentTurns ? `${item.assignee} hears it at once; Enter posts it` : 'A note for Claude; Enter posts it'}
+                onSubmit={(value: string) => act.comment(item, value)} />
+              {/* Held by an agent: whether it hears now, or with the person's next prompt. */}
+              {isAgent(item.assignee) && (
+                <Button key="comment-turns" label={commentTurns ? 'Tells it now' : 'Waits for your prompt'}
+                  variant={commentTurns ? 'primary' : 'secondary'} onPress={() => act.setCommentTurns(!commentTurns)} />
+              )}
+            </Box>
           ) }]
         : []),
       // Comments and handoff notes read as messages, author over body; what the tracker did reads as one dim line.
@@ -582,7 +598,7 @@ export function drawPane(
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id || noting === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
@@ -705,6 +721,7 @@ export function drawPane(
               onPress={() => act.setRequesting(true)} />
           )}
           {isHandable && <Button key="hand" label="Hand to Claude" onPress={() => act.askHand(item.id)} />}
+          <Button key="ask" label="Ask Claude" onPress={() => act.askClaude(item)} />
           {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
           {(Input || Select) && (
             <Button key="edit" label={isEditing ? 'Done editing' : 'Edit'} hotkey="e" variant={isEditing ? 'primary' : 'secondary'}
