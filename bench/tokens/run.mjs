@@ -7,6 +7,7 @@
 // Each run copies template/ into its own git repository. The "with" arm loads this checkout with
 // --plugin-dir and gets the epic from seed.sql (no model call); the "without" arm gets epic.md in the
 // prompt. Both arms turn off an installed roadmap@unclaude, so the only difference is this checkout.
+// Each arm first runs a one-word warm-up (see WARM), whose cost is left out of the table.
 // Runs go in parallel and spend real tokens on your own credential.
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -50,21 +51,26 @@ function prepare(dir, arm) {
   }
 }
 
-function launch(out, arm, n) {
+// A warm-up says one word per arm first. A session's first turn reads the tools and system prompt from
+// the prompt cache when an earlier session left them there; without it, runs started together all pay
+// to write that prefix, and an arm whose tools just changed (this checkout's) pays where the other doesn't.
+const WARM = 'Reply with the single word ok.'
+
+function launch(out, arm, n, prompt = PROMPTS[arm](), file = `${arm}-${n}.jsonl`) {
   const name = `${arm}-${n}`
   const dir = join(out, name)
   prepare(dir, arm)
   const args = ['-p', '--dangerously-skip-permissions', '--no-session-persistence', '--verbose', '--output-format', 'stream-json', '--settings', SETTINGS]
   if (arm === 'with') args.push('--plugin-dir', REPO)
   if (opt.model) args.push('--model', opt.model)
-  args.push(PROMPTS[arm]())
+  args.push(prompt)
   return new Promise(done => {
     const child = spawn('claude', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
     const lines = []
     child.stdout.on('data', chunk => lines.push(chunk))
     child.stderr.on('data', chunk => process.stderr.write(`[${name}] ${chunk}`))
     child.on('close', code => {
-      writeFileSync(join(out, `${name}.jsonl`), Buffer.concat(lines))
+      writeFileSync(join(out, file), Buffer.concat(lines))
       console.error(`[${name}] finished (exit ${code})`)
       done()
     })
@@ -135,6 +141,7 @@ if (opt.report) {
   mkdirSync(out, { recursive: true })
   const arms = opt.arms.split(',').map(a => a.trim()).filter(a => a in PROMPTS)
   console.error(`bench: ${arms.join(' + ')} x ${opt.runs} runs in ${out}`)
+  await Promise.all(arms.map(arm => launch(out, arm, 'warm', WARM, `${arm}-warm.log`)))
   const jobs = arms.flatMap(arm => Array.from({ length: Number(opt.runs) }, (_, i) => launch(out, arm, i + 1)))
   await Promise.all(jobs)
   report(out)
