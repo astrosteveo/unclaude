@@ -487,10 +487,10 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
 
 /**
  * The task in a milestone or epic for `actor` to start next: one they already have under way, else
- * the first free todo task that waits on nothing unfinished, as next orders them.
+ * the first free todo task that waits on nothing unfinished, as next orders them; never `besides`.
  */
-export function readyIn(items: Item[], unit: Item, actor: string): Item | undefined {
-  const under = new Set(subtree(items, unit.id))
+export function readyIn(items: Item[], unit: Item, actor: string, besides?: string): Item | undefined {
+  const under = new Set(subtree(items, unit.id).filter(id => id !== besides))
   return nextUp(items, actor).find(
     task => under.has(task.id) && (task.status === 'todo' || task.status === 'in_progress') && !waitingOn(items, task).length,
   )

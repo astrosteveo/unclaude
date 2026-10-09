@@ -601,7 +601,15 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     case 'update': {
       const it = need()
       if (a.checklist !== undefined && it.kind !== 'task') fail('Only tasks carry a checklist')
-      const list = a.checklist === undefined ? it.checklist : db.setChecklistPreview(it, texts(a.checklist))
+      // Done can tick the entries it finishes in the same call: one write closes the task.
+      const ticks = a.items === undefined ? [] : numbers(a.items)
+      if (ticks.length && (a.status !== 'done' || a.checklist !== undefined))
+        fail('items goes with status done (to tick entries as the task closes); use check to tick them otherwise')
+      const strays = ticks.filter(n => !it.checklist.some(c => c.n === n))
+      if (strays.length) fail(`${it.id} has no checklist entry ${strays.join(', ')}`)
+      const list = (a.checklist === undefined ? it.checklist : db.setChecklistPreview(it, texts(a.checklist))).map(c =>
+        ticks.includes(c.n) ? { ...c, done: true } : c,
+      )
       const open = list.filter(c => !c.done)
       if (a.status === 'done' && open.length && !a.force)
         fail(
@@ -648,6 +656,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       })
       // One script, one transaction: the update lands whole or not at all.
       const parts = [
+        ticks.length ? db.check(actor, it, ticks, true) : undefined,
         a.checklist === undefined ? undefined : db.setChecklist(actor, it, texts(a.checklist)),
         blockers === undefined ? undefined : db.setBlockers(actor, it, blockers),
         a.labels === undefined ? undefined : db.setLabels(actor, it, idList(a.labels)),
@@ -665,6 +674,22 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
           `Now open its pull request, if it has none: push branch ${pr.branch}, then gh pr create --title "${pr.title}" ` +
             `with the body from the pr action (pr ${it.id}); base it on main, or on the branch it was built on when that isn't merged yet`,
         )
+      }
+      else if (scope && a.status === 'done' && actor !== USER && scope.assignee === actor) {
+        // Working through a unit they hold, the agent goes straight on to its next ready task.
+        const after = await refresh($, t)
+        const unit = find(after.items, scope.id) ?? scope
+        const task = readyIn(after.items, unit, actor, it.id)
+        if (task) return `${it.id}: ${notes.join('; ')}\nNext in ${unit.id}: ${await claimTask($, actor, after, task, false, t)}`
+        const left = progress(after.items, unit)
+        if (left.done < left.total) notes.push(`nothing else in ${unit.id} is ready: its open tasks are held by others or wait on unfinished work`)
+        else {
+          const pr = pullRequest(after.items, unit)
+          notes.push(
+            `that was the last task in ${unit.id}, which now waits on the user's review. Open its pull request, if it has none: push branch ${pr.branch}, ` +
+              `then gh pr create --title "${pr.title}" with the body from the pr action (pr ${unit.id})`,
+          )
+        }
       }
       else if (scope && a.status === 'done' && actor !== USER)
         notes.push(`closed as part of ${scope.id}, which the user reviews as a whole once all its tasks are done`)
@@ -1360,7 +1385,7 @@ export const register: Register = on => {
         'Milestone and epic status roll up from their tasks. Each action and what it takes is listed on the action field.',
         'Working rules: claim a task before you start it (claim names the branch to work on); comment on decisions and findings;',
         'release it with a handoff note if you stop before it is done; mark it blocked with a comment saying why.',
-        "Acceptance criteria: a task's checklist. Give each task you plan one; tick entries with check. A task cannot be set done while any is unchecked.",
+        "Acceptance criteria: a task's checklist. Give each task you plan one; tick entries with check, or with items on the update that sets it done. A task cannot be set done while any is unchecked.",
         'Review: the user reviews what they handed you, once. A task you set done goes to review. When they hand you a whole epic or milestone',
         '("implement E27"), claim the epic or milestone: you hold it, so its tasks close as you go, and it claims its first ready task.',
         "Pass approved: true with status done only when the user has told you in this conversation that the work is approved; subagents can't.",
@@ -1383,7 +1408,8 @@ export const register: Register = on => {
               'add: kind, title; optional parent, description, due, status, assignee, priority, type, labels, checklist, blocked_by, relates_to, duplicates, note, section.',
               'plan: tree (optional parent): a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
               "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
-              'update: id plus any field; empty string clears. Setting a task done takes its release note (note, section) when it has none.',
+              'update: id plus any field; empty string clears. Setting a task done takes its release note (note, section) when it has none,',
+              'and items ticks its checklist in the same call. In an epic or milestone you hold, done claims and shows the next ready task.',
               'claim: id; takes a task and starts it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks.',
               'On an epic or milestone handed to you, takes it whole and claims its first ready task, answering with every task in it.',
               'release: id; body leaves a handoff note for whoever picks it up next.',
@@ -1413,7 +1439,7 @@ export const register: Register = on => {
             type: 'array', items: { type: 'string' },
             description: 'Acceptance criteria for a task (add/update); replaces the list, keeping ticks on unchanged entries; [] clears.',
           },
-          items: { type: 'array', items: { type: 'integer' }, description: 'check: the 1-based checklist entries to tick' },
+          items: { type: 'array', items: { type: 'integer' }, description: 'check, or update with status done: the 1-based checklist entries to tick' },
           done: { type: 'boolean', description: 'check: false unticks instead' },
           blocked_by: {
             type: 'array', items: { type: 'string' },

@@ -1115,7 +1115,8 @@ test('review at the level handed over: tasks in a handed epic close as they go; 
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   const inScope = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
-  expect(inScope).toContain('closed as part of E1')
+  // Nothing else in E1 to start, so the answer stops at the close.
+  expect(inScope).toContain('T2: status in_progress → done; no release note needed; nothing else in E1 is ready')
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='T2'"))).toBe(true)
   expect(String((await call({ action: 'update', id: 'T3', status: 'done', note: '-' })).result)).toContain("waiting on the user's approval")
   expect((await call({ action: 'update', id: 'E1', status: 'done' })).deny).toContain('closes when its tasks are done')
@@ -1738,7 +1739,7 @@ test('backups: on start, a JSON export outside the checkout when the roadmap cha
 })
 
 test('release notes: an agent sets a task done with its note; the PR body lists the notes by section', async ($, on) => {
-  const some = [item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', type: 'bug', status: 'in_progress' }), item('T2', { parent: 'E1' })]
+  const some = [item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', type: 'bug', status: 'in_progress' }), item('T2', { parent: 'E1', assignee: 'explore:x' })]
   const scripts: string[] = []
   on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
