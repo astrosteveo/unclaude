@@ -1220,8 +1220,12 @@ test('edit a card\'s checklist and blockers: reword, drop, add, and set what it 
   await ui.unmount()
 })
 
-test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work', async ($, on) => {
-  const some = [item('T1'), item('T2', { status: 'done' })]
+test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work or work in review', async ($, on) => {
+  const some = [
+    item('T1'), item('T2', { status: 'done' }), item('T3', { status: 'review', assignee: 'claude' }),
+    item('T4', { status: 'blocked' }), item('T5', { status: 'in_progress', assignee: 'claude' }),
+    item('E1', { assignee: 'claude' }), item('T6', { parent: 'E1', status: 'done' }),
+  ]
   let submitted = ''
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -1247,6 +1251,19 @@ test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done
   await ui.press({ key: 'close' })
   await ui.press({ key: 'card-T2' })
   expect(await ui.find({ key: 'hand' })).toBeUndefined()
+  // In review the card approves or asks for changes; handing it over again would only repeat the first ask.
+  for (const id of ['T3', 'E1']) {
+    await ui.press({ key: 'close' })
+    await ui.press({ key: `card-${id}` })
+    expect(await ui.find({ key: 'hand' })).toBeUndefined()
+    expect(await ui.find({ key: 'approve' })).toBeDefined()
+    expect(await ui.find({ key: 'request' })).toBeDefined()
+  }
+  for (const id of ['T4', 'T5']) {
+    await ui.press({ key: 'close' })
+    await ui.press({ key: `card-${id}` })
+    expect(await ui.find({ key: 'hand' })).toBeDefined()
+  }
   await ui.unmount()
 })
 

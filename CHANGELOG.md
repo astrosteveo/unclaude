@@ -36,6 +36,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Changed
 
+- A card in review offers Approve and Request changes, and no longer Hand to Claude, which only resent the first ask.
 - Status roll-ups and item lookups are indexed once per snapshot, so a board of a couple of thousand items draws in milliseconds. Before, each roll-up walked the whole roadmap again.
 - An `update` that sets several things (fields, checklist, blockers, labels, links) is written as one transaction in one sqlite3 run: it lands whole or not at all.
 - Handing work to Claude takes a confirm step (on a card or a backlog row), and the `h`, `m` and `u` keys are gone, so a stray key or an extra Enter no longer hands off or reassigns a task. A card never opens with focus on Hand to Claude, and a finished item doesn't offer it.
