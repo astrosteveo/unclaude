@@ -28,6 +28,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 ### Fixed
 
 - A project that never uses the roadmap is left alone: no `.claude/roadmap.db` is created until the first write, and git and gh aren't run there. Before, a user-scope install made an empty database in every folder Claude Code opened.
+- A milestone or epic up for review shows in the board's Review column, so its Approve (and the merge of its pull request) is a press away. Before, the board listed tasks only, and it was reachable only from the Tree.
 
 ### Changed
 

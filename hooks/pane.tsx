@@ -136,7 +136,8 @@ export function drawPane(
     const waits = waitingOn(items, item).map(one => one.id)
     const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
     const list = item.checklist ?? []
-    const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
+    const part = item.kind === 'task' ? undefined : progress(items, item)
+    const ticks = part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
     const tags = marks(item)
     const tag = tags.length ? ` ${tags.join(' ')}` : ''
     const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + 1
@@ -198,11 +199,13 @@ export function drawPane(
   )
 
   const tasks = items.filter(item => item.kind === 'task' && isShown(item)).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+  // A milestone or epic handed over whole is reviewed as one: it waits in Review, where its card approves and merges it.
+  const scopes = items.filter(item => item.kind !== 'task' && isAgent(item.assignee) && statusOf(items, item) === 'review' && isShown(item))
   const colWidth = Math.floor((width - (STATUSES.length - 1)) / STATUSES.length)
   const board = (
     <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? 1 : 0}>
       {STATUSES.map(status => {
-        const column = tasks.filter(task => task.status === status)
+        const column = [...(status === 'review' ? scopes : []), ...tasks.filter(task => task.status === status)]
         const shown = column.slice(0, status === 'done' ? 8 : 15)
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? colWidth : undefined} marginBottom={isWide ? 0 : 1}>
