@@ -14,7 +14,7 @@ const HEIGHTS = [30, 50]
 const SHOW = ''
 
 const item = (id: string, over: Partial<Item> = {}): Item => ({
-  id, kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task', title: `${id} title`, status: 'todo', parent: null,
+  id, kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task', title: `${id} title`, status: 'todo', parent: null, milestone: null,
   description: null, assignee: null, due: null, priority: 'p2', type: 'feature', note: null, section: null, resolution: null, lease_at: null,
   labels: [], relations: [], blocked_by: [], checklist: [], created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
   ...over,

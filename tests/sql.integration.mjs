@@ -291,6 +291,21 @@ test('a database from before versioning adopts the schema with its data kept', (
   assert.equal(item('T1').title, 'kept')
 })
 
+test('v7: what sat under a milestone targets it instead; a task in an epic keeps its epic', () => {
+  // A database at v6, as milestones held epics and tasks.
+  for (const one of db.MIGRATIONS.slice(0, 6)) raw(one)
+  raw('PRAGMA user_version=6;')
+  raw(`INSERT INTO items(id, kind, title, parent) VALUES ('M1', 'milestone', 'v1', NULL), ('E1', 'epic', 'Auth', 'M1'),
+    ('T1', 'task', 'In the epic', 'E1'), ('T2', 'task', 'Straight under M1', 'M1'), ('E2', 'epic', 'Loose', NULL);`)
+  raw(db.migrate(6))
+  assert.equal(Number(raw(db.READ_VERSION)), db.VERSION)
+  const at = id => `${item(id).parent ?? '-'} ${item(id).milestone ?? '-'}`
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), 'E1 -')
+  assert.equal(at('T2'), '- M1')
+  assert.equal(at('E2'), '- -')
+})
+
 test('a database from a newer build is refused, and an unusable version is named', () => {
   raw(db.migrate(0))
   raw(`PRAGMA user_version=${db.VERSION + 1};`)
@@ -532,7 +547,7 @@ test('undo of a removal restores the whole subtree exactly: items, timelines, ch
 
 test('export, then import into an empty roadmap, gives back the same roadmap; ids carry on where they left off', () => {
   sql(db.insert('claude', { kind: 'milestone', title: 'v1', parent: null, due: '2026-12-01' }))
-  sql(db.insert('claude', { kind: 'epic', title: 'E', parent: 'M1' }))
+  sql(db.insert('claude', { kind: 'epic', title: 'E', parent: null, milestone: 'M1' }))
   sql(db.insert('user', { kind: 'task', title: "it's\n.tables", parent: 'E1', description: 'multi\nline', priority: 'p0', type: 'bug' }))
   sql(db.insert('claude', { kind: 'task', title: 'b', parent: 'E1' }))
   sql(db.insert('claude', { kind: 'task', title: 'gone', parent: null }))
@@ -587,6 +602,17 @@ test('v5: a release note and its section are written, logged and undone like any
   assert.deepEqual([item('T1').note, item('T1').section], [null, null])
   sql(db.change('claude', item('T1'), { note: db.NO_NOTE }).script)
   assert.deepEqual(log('T1').at(-1), 'claude: no release note needed')
+})
+
+test('v7: a target is written, logged and undone like any field; a move out of an epic onto a milestone comes back whole', () => {
+  sql(db.insert('claude', { kind: 'milestone', title: 'v1', parent: null }))
+  sql(db.insert('claude', { kind: 'epic', title: 'E', parent: null, milestone: 'M1' }))
+  sql(db.insert('claude', { kind: 'task', title: 't', parent: 'E1' }))
+  sql(db.change('claude', item('T1'), { parent: null, milestone: 'M1' }).script)
+  assert.deepEqual([item('T1').parent, item('T1').milestone], [null, 'M1'])
+  assert.deepEqual(log('T1').slice(1), ['claude: out of its epic', 'claude: targets M1'])
+  revert(lastOp())
+  assert.deepEqual([item('T1').parent, item('T1').milestone], ['E1', null])
 })
 
 test('mark all seen: every item read up to its newest entry, and a comment after counts again', () => {

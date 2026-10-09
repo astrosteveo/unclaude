@@ -10,6 +10,9 @@ const NOW = `strftime('%Y-%m-%dT%H:%M:%SZ','now')`
  * has shipped. A database made before versioning (the tables there, version 0) runs entry 0 harmlessly,
  * every statement of it being IF NOT EXISTS.
  */
+/** Moves epics and tasks parented to a milestone onto it as their target (v7, and imports from before). */
+const RETARGET = `UPDATE items SET milestone=parent, parent=NULL WHERE kind IN ('epic', 'task') AND parent IN (SELECT id FROM items WHERE kind='milestone');`
+
 export const MIGRATIONS: string[] = [
   `CREATE TABLE IF NOT EXISTS items(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'todo',
@@ -53,6 +56,9 @@ ALTER TABLE activity ADD COLUMN reverts INTEGER;`,
 ALTER TABLE items ADD COLUMN section TEXT;`,
   // v6: a task closed as won't do: done, but dropped rather than finished.
   `ALTER TABLE items ADD COLUMN resolution TEXT;`,
+  // v7: milestones are targets, not containers: what sat under a milestone targets it instead.
+  `ALTER TABLE items ADD COLUMN milestone TEXT;
+${RETARGET}`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -183,7 +189,7 @@ export const RECENT = 20
 /** Loads the roadmap, with what `reader` has seen of each item. */
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
-        'parent', parent, 'description', description, 'assignee', assignee, 'due', due,
+        'parent', parent, 'milestone', milestone, 'description', description, 'assignee', assignee, 'due', due,
         'priority', priority, 'type', type, 'note', note, 'section', section, 'resolution', resolution, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
         'labels', json((SELECT json_group_array(label) FROM (SELECT label FROM labels WHERE item_id=items.id ORDER BY label))),
         'relations', json((SELECT json_group_array(json_object('type', type, 'id', b)) FROM relations WHERE a=items.id)),
@@ -224,6 +230,7 @@ export type NewItem = {
   kind: Kind
   title: string
   parent: string | null
+  milestone?: string | null
   description?: string
   due?: string
   status?: Status
@@ -244,15 +251,15 @@ export function insert(actor: string, item: NewItem): string {
 INSERT INTO counters(prefix, n) VALUES (${q(prefix)},
   COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM items WHERE SUBSTR(id, 1, 1)=${q(prefix)}), 0) + 1)
   ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
-INSERT INTO items(id, kind, title, status, parent, description, assignee, due, priority, type) VALUES (${id}, ${q(item.kind)},
-  ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.description || null)},
+INSERT INTO items(id, kind, title, status, parent, milestone, description, assignee, due, priority, type) VALUES (${id}, ${q(item.kind)},
+  ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.milestone ?? null)}, ${q(item.description || null)},
   ${q(item.assignee || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
 INSERT INTO activity(item_id, author, type, body, op) VALUES (${id}, ${q(actor)}, 'create', ${q(created)}, (SELECT n FROM op));
 SELECT ${id};
 COMMIT;`
 }
 
-export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
+export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'milestone' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
 
 /** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
@@ -267,7 +274,8 @@ export function change(actor: string, item: Item, changes: Changes): { script: s
     if (field === 'status') log('status', `status ${item.status} → ${value}`)
     else if (field === 'assignee')
       log('assign', value === null ? `unassigned ${item.assignee}` : value === actor ? 'claimed' : `assigned to ${value}`)
-    else if (field === 'parent') log('edit', value === null ? 'moved to top level' : `moved under ${value}`)
+    else if (field === 'parent') log('edit', value === null ? 'out of its epic' : `moved under ${value}`)
+    else if (field === 'milestone') log('edit', value === null ? 'no longer targets a milestone' : `targets ${value}`)
     else if (field === 'description') log('edit', value ? 'description updated' : 'description cleared')
     else if (field === 'note') log('edit', value === null ? 'release note cleared' : value === NO_NOTE ? 'no release note needed' : `release note: ${value}`)
     else if (field === 'resolution') log('edit', value === null ? "no longer won't do" : "closed as won't do")
@@ -341,7 +349,7 @@ export function remove(ids: string[], log?: { actor: string; body: string; rows:
 
 /** Every table's columns, as `dump` reads and `restore` writes them. */
 export const TABLES = {
-  items: ['id', 'kind', 'title', 'status', 'parent', 'description', 'assignee', 'due', 'priority', 'type', 'note', 'section', 'resolution', 'lease_at', 'created_at', 'updated_at'],
+  items: ['id', 'kind', 'title', 'status', 'parent', 'milestone', 'description', 'assignee', 'due', 'priority', 'type', 'note', 'section', 'resolution', 'lease_at', 'created_at', 'updated_at'],
   activity: ['id', 'item_id', 'author', 'type', 'body', 'at', 'undo', 'redo', 'op', 'undone', 'reverts'],
   links: ['blocker', 'blocked'],
   checks: ['item_id', 'n', 'text', 'done'],
@@ -424,7 +432,7 @@ export function importOf(text: string): Rows {
 export const COUNT = `SELECT (SELECT count(*) FROM items) || ' ' || (SELECT count(*) FROM activity);`
 
 /** Writes an export's rows into an empty roadmap, in one transaction. */
-export const importRows = (rows: Rows) => `BEGIN IMMEDIATE;\n${restore(rows)}\nCOMMIT;`
+export const importRows = (rows: Rows) => `BEGIN IMMEDIATE;\n${restore(rows)}\n${RETARGET}\nCOMMIT;`
 
 /** A logged entry as `entries` reads it: what undo needs. */
 export type Entry = { id: number; item_id: string; author: string; type: string; body: string; at: string; op: number | null; undo: string | null; redo: string | null; undone: number | null; reverts: number | null }

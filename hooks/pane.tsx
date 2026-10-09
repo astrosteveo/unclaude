@@ -4,7 +4,7 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -83,6 +83,9 @@ export function fitHints(hints: string[], width: number, rows: number): string[]
   }
   return hints.slice(0, 1)
 }
+
+// An item with nothing above it, for walks that start from one that may be missing.
+const EMPTY = { parent: null, milestone: null } as Item
 
 // The space between board columns side by side.
 const COLUMN_GAP = 2
@@ -557,7 +560,7 @@ export function drawPane(
   const hasKids = (item: Item) => item.kind !== 'task' && childrenOf(items, item.id).length > 0
   // What holds the open card stays unfolded, so the card's row is always there to return to.
   const holdsPick = new Set<string>()
-  for (let at = find(items, pick ?? undefined)?.parent; at; at = find(items, at)?.parent ?? null) holdsPick.add(at)
+  for (let at = upOf(find(items, pick ?? undefined) ?? EMPTY); at; at = upOf(find(items, at) ?? EMPTY)) holdsPick.add(at)
   const isFolded = (item: Item) =>
     !query && hasKids(item) && !holdsPick.has(item.id) && (statusOf(items, item) === 'done') !== flipped.includes(item.id)
   // The timeline shows epics under milestones, not tasks: there, only a milestone with epics folds.
@@ -629,7 +632,7 @@ export function drawPane(
   const triageAll = backlog(items).filter(isShown)
   // Docked, as many rows as fit above the card, each as tall as its title wraps beside the picker and hand-off.
   const triageRows = (task: Item) => {
-    const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
+    const where = upOf(task) ? ` [${upOf(task)}]` : ' (no epic)'
     const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
     return rowsOf(`${task.id} ${task.title}${where}${tags ? ` ${tags}` : ''}`, Math.max(10, width - BACKLOG_EDGES))
   }
@@ -646,7 +649,7 @@ export function drawPane(
       ))}
       {triage.length < triageAll.length && <Text key="backlog-more" dimColor>…{triageAll.length - triage.length} more (close the card to see them all)</Text>}
       {triage.map(task => {
-        const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
+        const where = upOf(task) ? ` [${upOf(task)}]` : ' (no epic)'
         const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
         const row = (
           <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
@@ -808,7 +811,7 @@ export function drawPane(
         : []),
       ...(item.kind === 'milestone'
         ? []
-        : [choice('edit-parent', 'Under', item.parent ?? '', [
+        : [choice('edit-parent', 'Under', upOf(item) ?? '', [
             { value: '', label: '(top level)' },
             ...homesFor(items, item.kind).filter(one => !own.has(one.id)).map(one => ({ value: one.id, label: `${one.id} ${one.title}`.slice(0, 40) })),
           ], v => save({ parent: v }))]),
@@ -1225,7 +1228,7 @@ export function drawPane(
   // Where a new item goes by default: under the open card, when it can hold one.
   function newDraft(under: Item | null): Draft {
     const kind = under?.kind === 'milestone' ? 'epic' : 'task'
-    return fitDraft({ kind, priority: 'p2', type: 'feature', parent: under && under.kind !== 'task' ? under.id : under?.parent ?? '' })
+    return fitDraft({ kind, priority: 'p2', type: 'feature', parent: under && under.kind !== 'task' ? under.id : (under && upOf(under)) || '' })
   }
   // A parent the chosen kind can't sit under is dropped.
   function fitDraft(next: Draft): Draft {
@@ -1318,7 +1321,7 @@ export function drawBand(els: Elements[keyof Elements], e: EventOf['ui.render'],
   }
   const milestone = (() => {
     let at: Item | undefined = task
-    while (at && at.kind !== 'milestone') at = find(snap.items, at.parent ?? undefined)
+    while (at && at.kind !== 'milestone') at = find(snap.items, upOf(at) ?? undefined)
     return at
   })()
   const list = task.checklist ?? []

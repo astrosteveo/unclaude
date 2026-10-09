@@ -50,13 +50,27 @@ function indexOf(items: Item[]): Index {
     for (const item of items) {
       const key = item.id.toUpperCase()
       if (!index.byId.has(key)) index.byId.set(key, item)
-      const siblings = index.children.get(item.parent)
+      const up = upOf(item)
+      const siblings = index.children.get(up)
       if (siblings) siblings.push(item)
-      else index.children.set(item.parent, [item])
+      else index.children.set(up, [item])
     }
     indexes.set(items, index)
   }
   return index
+}
+
+/**
+ * What an item sits under in the tree: a task its epic, else (a task in no epic, or an epic) the milestone it
+ * targets. A milestone is a target, not a container, but the tree shows what targets it beneath it.
+ */
+export const upOf = (item: Item): string | null => item.parent ?? item.milestone ?? null
+
+/** The milestone a task or epic targets: its own, else (a task) its epic's; a milestone is its own. */
+export function targetOf(items: Item[], item: Item): string | null {
+  if (item.kind === 'milestone') return item.id
+  if (item.milestone) return item.milestone
+  return item.kind === 'task' && item.parent ? find(items, item.parent)?.milestone ?? null : null
 }
 
 export const find = (items: Item[], id: string | undefined) =>
@@ -64,6 +78,26 @@ export const find = (items: Item[], id: string | undefined) =>
 
 /** An item's children, as a list of the caller's own (free to sort). */
 export const childrenOf = (items: Item[], id: string | null): Item[] => [...(indexOf(items).children.get(id) ?? [])]
+
+/**
+ * Where "under X" puts an item: under an epic, `parent` is the epic (and a task's own target goes, so it
+ * follows its epic's); under a milestone, `milestone` is it and there is no epic; under nothing, neither.
+ */
+export function placeOf(items: Item[], kind: Kind, under: string | undefined, self?: string): { parent: string | null; milestone: string | null } {
+  const at = checkParent(items, kind, under, self)
+  const found = at ? find(items, at) : undefined
+  return found?.kind === 'milestone' ? { parent: null, milestone: found.id } : { parent: at, milestone: null }
+}
+
+/** The milestone a target names, or throws: only epics and tasks target, and only milestones are targets. */
+export function checkTarget(items: Item[], kind: Kind, milestone: string): string | null {
+  if (milestone === '') return null
+  if (kind === 'milestone') throw new Error('A milestone targets nothing; epics and tasks target milestones')
+  const found = find(items, milestone)
+  if (!found) throw new Error(`No item ${milestone}`)
+  if (found.kind !== 'milestone') throw new Error(`${found.id} is a ${found.kind}; a target is a milestone`)
+  return found.id
+}
 
 /** The parent id to store, or throws when the nesting is not allowed. */
 export function checkParent(items: Item[], kind: Kind, parent: string | undefined, self?: string): string | null {
@@ -300,7 +334,7 @@ export const isAgent = (who: string | null | undefined) => Boolean(who) && who !
  */
 export function handedScope(items: Item[], item: Item): Item | undefined {
   let scope: Item | undefined
-  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined))
+  for (let at = find(items, upOf(item) ?? undefined); at; at = find(items, upOf(at) ?? undefined))
     if (at.kind !== 'task' && isAgent(at.assignee)) scope = at
   return scope
 }
@@ -355,7 +389,7 @@ export function rows(items: Item[], root: string | null = null): { item: Item; d
 /** The item's ancestors, root first, as `M1 v1 launch › E2 Billing`. */
 export const path = (items: Item[], item: Item): string => {
   const chain: Item[] = []
-  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined)) chain.unshift(at)
+  for (let at = find(items, upOf(item) ?? undefined); at; at = find(items, upOf(at) ?? undefined)) chain.unshift(at)
   return chain.map(one => `${one.id} ${one.title}`).join(' › ')
 }
 
@@ -462,7 +496,7 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
 export const backlog = (items: Item[]): Item[] =>
   items
     .filter(item => item.kind === 'task' && item.status === 'todo' && !item.assignee)
-    .sort((a, b) => Number(a.parent !== null) - Number(b.parent !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
+    .sort((a, b) => Number(upOf(a) !== null) - Number(upOf(b) !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
 
 /**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
@@ -474,7 +508,7 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done')
   const due = (task: Item) => {
     let at: Item | undefined = task
-    while (at && !at.due) at = find(items, at.parent ?? undefined)
+    while (at && !at.due) at = find(items, upOf(at) ?? undefined)
     return at?.due ?? '9999'
   }
   const isWaiting = (task: Item) => waitingOn(items, task).length > 0
@@ -508,7 +542,7 @@ export const dateOf = (now: number) => new Date(now).toISOString().slice(0, 10)
 /** When an item is due: its own date, else the nearest one above it. */
 export function dueOf(items: Item[], item: Item): string | undefined {
   let at: Item | undefined = item
-  while (at && !at.due) at = find(items, at.parent ?? undefined)
+  while (at && !at.due) at = find(items, upOf(at) ?? undefined)
   return at?.due ?? undefined
 }
 
@@ -547,16 +581,16 @@ export function treeRows(items: Item[], isFolded: (item: Item) => boolean): { it
 /** The timeline's rows: `timelineOf`'s, open work first, a milestone's epics left out while it is folded. */
 export function timelineRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
   const all = timelineOf(items)
-  const tops = openFirst(items, all.filter(one => !find(items, one.parent ?? undefined)))
+  const tops = openFirst(items, all.filter(one => !find(items, upOf(one) ?? undefined)))
   return tops.flatMap(top => [
     { item: top, depth: 0 },
-    ...(isFolded(top) ? [] : openFirst(items, all.filter(one => one.parent === top.id)).map(item => ({ item, depth: 1 }))),
+    ...(isFolded(top) ? [] : openFirst(items, all.filter(one => upOf(one) === top.id)).map(item => ({ item, depth: 1 }))),
   ])
 }
 
 export function timelineOf(items: Item[]): Item[] {
   const byDue = (list: Item[]) => [...list].sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999') || byId(a, b))
-  const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, one.parent ?? undefined)))
+  const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, upOf(one) ?? undefined)))
   return top.flatMap(one => [one, ...(one.kind === 'milestone' ? byDue(childrenOf(items, one.id).filter(child => child.kind === 'epic')) : [])])
 }
 
@@ -566,7 +600,7 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   const items = snap.items
   const tasks = items.filter(item => item.kind === 'task')
   const list = (some: Item[], cap = 8) =>
-    some.slice(0, cap).map(item => `- ${line(items, item)}${item.parent ? ` [${item.parent}]` : ''}`).join('\n') +
+    some.slice(0, cap).map(item => `- ${line(items, item)}${upOf(item) ? ` [${upOf(item)}]` : ''}`).join('\n') +
     (some.length > cap ? `\n- …${some.length - cap} more` : '')
   const milestones = items.filter(item => item.kind === 'milestone' && statusOf(items, item) !== 'done').sort(byId)
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done' && task.status !== 'review')
@@ -726,7 +760,7 @@ export function pullRequest(items: Item[], item: Item): { branch: string; title:
       const some = noted.filter(task => sectionFor(task) === section)
       return some.length ? ['', `${section}:`, ...some.map(task => `- ${task.note} (${task.id})`)] : []
     })].join('\n'))
-  parts.push(`Tracked on the roadmap as ${item.id}${item.parent ? `, in ${path(items, item)}` : ''}.`)
+  parts.push(`Tracked on the roadmap as ${item.id}${upOf(item) ? `, in ${path(items, item)}` : ''}.`)
   return { branch: branchFor(item), title: `${item.id}: ${item.title}`, body: parts.filter(Boolean).join('\n\n') }
 }
 
@@ -845,7 +879,7 @@ export const isMainLine = (branch: string) => branch === 'main' || branch === 'm
 export function refsFor(items: Item[], refs: Refs, item: Item): Refs {
   const ids = new Set(subtree(items, item.id))
   const above = new Set<string>()
-  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined)) above.add(at.id)
+  for (let at = find(items, upOf(item) ?? undefined); at; at = find(items, upOf(at) ?? undefined)) above.add(at.id)
   return {
     commits: refs.commits.filter(commit => commit.ids.some(id => ids.has(id))),
     prs: refs.prs.filter(pr => pr.ids.some(id => ids.has(id) || above.has(id))),

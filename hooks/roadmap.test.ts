@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -43,6 +43,7 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   title: `${id} title`,
   status: 'todo',
   parent: null,
+  milestone: null,
   description: null,
   assignee: null,
   due: null,
@@ -528,6 +529,15 @@ for (const [label, exitCode, isOffered] of [['not ignored', 1, true], ['ignored'
     await ui.unmount()
   })
 }
+
+test('targets: a task takes its own milestone, else its epic\'s; the tree puts it under its epic, else its milestone', () => {
+  const some = [
+    item('M1'), item('M2'), item('E1', { milestone: 'M1' }),
+    item('T1', { parent: 'E1' }), item('T2', { parent: 'E1', milestone: 'M2' }), item('T3', { milestone: 'M2' }), item('T4'),
+  ]
+  expect(['E1', 'T1', 'T2', 'T3', 'T4', 'M1'].map(id => targetOf(some, find(some, id)!))).toEqual(['M1', 'M1', 'M2', 'M2', null, 'M1'])
+  expect(['E1', 'T1', 'T2', 'T3', 'T4'].map(id => upOf(find(some, id)!))).toEqual(['M1', 'E1', 'E1', 'M2', null])
+})
 
 test('a roadmap is started only at a repository top; a refusal points at the roadmaps below', () => {
   expect(ancestors('/home/me/Projects/')).toEqual(['/home/me/Projects', '/home/me', '/home', '/'])

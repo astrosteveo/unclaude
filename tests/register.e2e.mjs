@@ -125,7 +125,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
 /** What the database holds, read straight from it. */
 const query = sql => execFileSync('sqlite3', ['-batch', '-noheader', '-list', join(dir, '.claude/roadmap.db'), sql], { encoding: 'utf8' }).trim()
-const everything = () => query("SELECT group_concat(id || ' ' || kind || ' ' || status || ' ' || COALESCE(parent, '-') || ' ' || COALESCE(assignee, '-'), '; ') FROM (SELECT * FROM items ORDER BY id);") +
+const everything = () => query("SELECT group_concat(id || ' ' || kind || ' ' || status || ' ' || COALESCE(parent, milestone, '-') || ' ' || COALESCE(assignee, '-'), '; ') FROM (SELECT * FROM items ORDER BY id);") +
   ` | ${query('SELECT count(*) FROM activity;')} | ${query("SELECT group_concat(blocker || '>' || blocked) FROM links;")}`
 
 const ok = async (input, agentId) => {
@@ -325,4 +325,44 @@ test("won't do: a reason closes a task as dropped, not finished; no ticks or not
   // Back to work, it is no longer won't do.
   await ok({ action: 'update', id: 'T2', status: 'todo' })
   assert.equal(query("SELECT status || ' ' || COALESCE(resolution, '-') FROM items WHERE id='T2';"), 'todo -')
+})
+
+test('milestones are targets: under a milestone an epic or task targets it; under an epic a task joins it; old exports map the same', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1' })
+  await ok({ action: 'add', kind: 'epic', title: 'Auth', parent: 'M1' })
+  await ok({ action: 'add', kind: 'task', title: 'Login', parent: 'E1' })
+  await ok({ action: 'add', kind: 'task', title: 'Loose', parent: 'M1' })
+  await ok({ action: 'plan', parent: 'M1', tree: [{ ref: 'e', kind: 'epic', title: 'Billing', children: [{ ref: 't', kind: 'task', title: 'Invoice' }] }] })
+  const at = id => query(`SELECT COALESCE(parent, '-') || ' ' || COALESCE(milestone, '-') FROM items WHERE id='${id}';`)
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), 'E1 -')
+  assert.equal(at('T2'), '- M1')
+  assert.equal(at('E2'), '- M1')
+  assert.equal(at('T3'), 'E2 -')
+  // Moved into an epic, a task follows the epic's target; out to a milestone, it targets that and leaves its epic.
+  await ok({ action: 'update', id: 'T2', parent: 'E1' })
+  assert.equal(at('T2'), 'E1 -')
+  await ok({ action: 'update', id: 'T1', parent: 'M1' })
+  assert.equal(at('T1'), '- M1')
+  // The tree still reads milestone > epic > task.
+  assert.match(await ok({ action: 'show' }), /M1 .*\n  E1 .*\n    T2 /)
+  // Undo takes a move back whole.
+  await call({ action: 'show' })
+  const undoId = query("SELECT max(op) FROM activity WHERE item_id='T1';")
+  assert.ok(undoId)
+  // An export from before targets (epics parented to milestones) imports mapped the same.
+  const old = { roadmap: 'export', schema: 6, exported_at: '2026-10-01T00:00:00Z', tables: {
+    items: [
+      { id: 'M1', kind: 'milestone', title: 'v1', status: 'todo', parent: null, created_at: 'x', updated_at: 'x' },
+      { id: 'E1', kind: 'epic', title: 'Auth', status: 'todo', parent: 'M1', created_at: 'x', updated_at: 'x' },
+      { id: 'T1', kind: 'task', title: 'Loose', status: 'todo', parent: 'M1', created_at: 'x', updated_at: 'x' },
+    ],
+    counters: [{ prefix: 'M', n: 1 }, { prefix: 'E', n: 1 }, { prefix: 'T', n: 1 }],
+  } }
+  writeFileSync(join(dir, 'old.json'), JSON.stringify(old))
+  rmSync(join(dir, '.claude'), { recursive: true, force: true })
+  await load(dir)
+  await ok({ action: 'import', path: 'old.json' })
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), '- M1')
 })

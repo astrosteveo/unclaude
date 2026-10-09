@@ -7,7 +7,7 @@ import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
   agentName, approvalNote, askAbout, readyIn, timeline, isMessage, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
-  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere,
+  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere, placeOf, upOf, targetOf, checkTarget,
 } from './model'
 
 const PANE = 'roadmap'
@@ -555,7 +555,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const cap = 40
       return [
         `${found.length} match${found.length === 1 ? '' : 'es'}:`,
-        ...found.slice(0, cap).map(one => `${line(snap.items, one)}${one.parent ? ` [${one.parent}]` : ''}`),
+        ...found.slice(0, cap).map(one => `${line(snap.items, one)}${upOf(one) ? ` [${upOf(one)}]` : ''}`),
         ...(found.length > cap ? [`…${found.length - cap} more; narrow the search`] : []),
       ].join('\n')
     }
@@ -585,13 +585,13 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
       const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
       const tags = a.labels === undefined ? [] : idList(a.labels)
-      const parent = checkParent(snap.items, a.kind!, a.parent)
+      const place = placeOf(snap.items, a.kind!, a.parent)
       const { note, section } = noteOf(a)
       if ((note || section) && a.kind !== 'task') fail('Only tasks carry a release note')
       const id = await sql($, db.insert(actor, {
         kind: a.kind!,
         title: a.title!.trim(),
-        parent,
+        ...place,
         description: a.description,
         due: a.due,
         status: a.status,
@@ -657,7 +657,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         fail(`${it.id} closes when its tasks are done; finish those (they close as you go when ${it.id} is assigned to you)`)
       // Every argument checked before the first write, so a call that fails changes nothing.
       if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks wait on other tasks')
-      const parent = a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id)
+      const place = a.parent === undefined ? undefined : placeOf(snap.items, it.kind, a.parent, it.id)
       const blockers = a.blocked_by === undefined ? undefined : checkBlockers(snap.items, it.id, idList(a.blocked_by))
       const related = a.relates_to === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.relates_to))
       const original = a.duplicates === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.duplicates))
@@ -673,7 +673,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         type: a.type || undefined,
         note,
         section,
-        parent,
+        ...(place ?? {}),
         // Back to work (todo, in progress, blocked), a dropped task is no longer won't do.
         resolution: wontdo !== undefined ? 'wontdo' : it.resolution && a.status && !['done', 'review'].includes(a.status) ? null : undefined,
       })
@@ -767,10 +767,14 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const ids = new Map<string, string>()
       for (const one of planned) {
         const n = one.node
+        // Under a milestone (new or not), an item targets it rather than sitting in it.
+        const under = one.parentRef ? ids.get(one.parentRef)! : one.parentId
+        const isTarget = one.parentRef ? planned.find(other => other.ref === one.parentRef)!.node.kind === 'milestone' : find(snap.items, one.parentId ?? undefined)?.kind === 'milestone'
         const id = await sql($, db.insert(actor, {
           kind: n.kind,
           title: n.title.trim(),
-          parent: one.parentRef ? ids.get(one.parentRef)! : one.parentId,
+          parent: isTarget ? null : under,
+          milestone: isTarget ? under : null,
           description: n.description,
           due: n.due,
           assignee: n.assignee,

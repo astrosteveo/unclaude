@@ -14,7 +14,10 @@ export type Item = {
   kind: Kind
   title: string
   status: Status
+  /** The epic a task belongs to; null for an epic, a milestone, or a task in no epic. */
   parent: string | null
+  /** The milestone an epic or task targets; a task without one takes its epic's. */
+  milestone: string | null
   description: string | null
   assignee: string | null
   due: string | null
