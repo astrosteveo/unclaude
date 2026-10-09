@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, openPrOf, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -15,6 +15,8 @@ const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
+// Checks as one mark after a PR number on a board row.
+const CHECK_MARK: Record<Checks, string> = { none: '', pending: ' …', pass: ' ✓', fail: ' ✗' }
 export const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', review: 'r', done: 'd' }
 
 /** What the pane draws from, read by the hooks module. */
@@ -102,7 +104,7 @@ export function wrap(text: string, width: number): string[] {
 export function drawPane(
   els: Elements[keyof Elements], e: EventOf['ui.render'], state: PaneState, act: PaneActions,
 ): { node: RenderElement; scrollMax: number } {
-  const { Box, Text, Button } = els
+  const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
   const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging } = state
@@ -140,7 +142,10 @@ export function drawPane(
     const ticks = part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
     const tags = marks(item)
     const tag = tags.length ? ` ${tags.join(' ')}` : ''
-    const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + 1
+    // Work in review shows the pull request an Approve would merge.
+    const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
+    const prTag = pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : ''
+    const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
     const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
     return (
       <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
@@ -149,6 +154,7 @@ export function drawPane(
           {tag}
         </Text>
         <Text dimColor>{ticks}</Text>
+        <Text color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{prTag}</Text>
         <Text color="yellow" dimColor>
           {wait}
         </Text>
@@ -491,6 +497,13 @@ export function drawPane(
   const isHandable = status !== 'done' && status !== 'review'
   // The pull request the item under review ships in, which Approve can merge.
   const reviewPr = isReview && item ? openPrOf(known, item) : undefined
+  // The card's pull request, held under the bar with the buttons that act on it; and the one it is stacked on.
+  const cardPr = item ? openPrOf(known, item) : undefined
+  const under = cardPr && stackedOn(known, cardPr)
+  const prText = cardPr
+    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  stacked on #${under.number}: merge that first` : ''}`
+    : ''
+  const prRows = cardPr ? tall(prText) : 0
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
@@ -506,7 +519,7 @@ export function drawPane(
     .join(' · ')
   // The footer is as wide as the pane, not the panel inside it.
   const footerRows = Math.max(1, Math.ceil(footer.length / Math.max(1, width)))
-  const fixed = (isCompact ? 0 : headerRows) + 2 + titleRows + barRows + (isCompact ? 0 : tall(info)) + footerRows + 1
+  const fixed = (isCompact ? 0 : headerRows) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   const total = sections.reduce((sum, row) => sum + row.rows, 0)
   const isScrolling = space < total
@@ -568,10 +581,15 @@ export function drawPane(
           confirmHand(item)
         ) : merging === item.id && reviewPr ? (
           <Box key="merge-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
-            <Text color={reviewPr.checks === 'fail' ? 'red' : 'yellow'}>
-              Merge PR #{reviewPr.number}{reviewPr.checks === 'pass' ? '' : ` (checks: ${reviewPr.checks})`}?
-            </Text>
-            <Button key="merge-yes" label="Approve and merge" onPress={() => act.approve(item, reviewPr)} />
+            {under ? (
+              // Stacked: merged now it would land in the branch below, not main. That PR goes first.
+              <Text color="yellow">PR #{reviewPr.number} is stacked on #{under.number}; merge #{under.number} first.</Text>
+            ) : (
+              <Text color={reviewPr.checks === 'fail' ? 'red' : 'yellow'}>
+                Merge PR #{reviewPr.number} into {reviewPr.base || 'its base'}{reviewPr.checks === 'pass' ? '' : ` (checks: ${reviewPr.checks})`}?
+              </Text>
+            )}
+            {!under && <Button key="merge-yes" label="Approve and merge" onPress={() => act.approve(item, reviewPr)} />}
             <Button key="merge-no" label="Approve only" onPress={() => act.approve(item)} />
             <Button key="merge-cancel" label="Cancel" onPress={() => act.askMerge(null)} />
           </Box>
@@ -603,6 +621,18 @@ export function drawPane(
         </Box>
         )}
       </Box>
+      {cardPr && (
+        <Box key="pr-line">
+        <Text>
+          <Link href={cardPr.url}>PR #{cardPr.number}</Link>
+          <Text color="green"> [open]</Text>
+          <Text color={CHECKS_COLOR[cardPr.checks]}> {CHECKS[cardPr.checks]}</Text>
+          <Text dimColor> {cardPr.branch} → </Text>
+          <Text>{cardPr.base || '?'}</Text>
+          {under && <Text color="yellow">  stacked on #{under.number}: merge that first</Text>}
+        </Text>
+        </Box>
+      )}
       {!isCompact && (
         <Text>
           <Text dimColor>assignee </Text>

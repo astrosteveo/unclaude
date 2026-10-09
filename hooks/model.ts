@@ -496,10 +496,16 @@ export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): 
       `${item.id} stays in review. Find out why (failing checks, a conflict with its base, branch protection), fix what you can on ${pr.branch}, ` +
       'and tell the user what you found and whether it is ready to approve again.'
     )
+  if (pr && pr.base && !isMainLine(pr.base))
+    return (
+      `The user approved ${what} on the board and merged PR #${pr.number} (branch ${pr.branch}) into ${pr.base}, not into main. ` +
+      `Its work reaches main only when ${pr.base} does. Pull ${pr.base}, delete the local branch ${pr.branch}, keep the checkout on the ` +
+      'top of what is still open (the user runs the mod from it), and say what is left to merge, in order.'
+    )
   if (pr)
     return (
-      `The user approved ${what} on the board and merged PR #${pr.number} (branch ${pr.branch}). Bring the checkout up to date: ` +
-      `switch to main and pull, delete the local branch ${pr.branch}, and make sure any open PR that was based on ${pr.branch} now targets main. ` +
+      `The user approved ${what} on the board and merged PR #${pr.number} (branch ${pr.branch}) into ${pr.base || 'main'}. Bring the checkout up to date: ` +
+      `switch to ${pr.base || 'main'} and pull, delete the local branch ${pr.branch}, and make sure any open PR that was based on ${pr.branch} now targets ${pr.base || 'main'}. ` +
       'Then say in a line or two what is next on the roadmap.'
     )
   return `The user approved ${what} on the board; it is done. No pull request was merged with it. Say in a line or two what is next on the roadmap.`
@@ -584,13 +590,13 @@ export function checksOf(rollup: CheckEntry[] | null | undefined): Checks {
   return 'pass'
 }
 
-/** Pull requests from `gh pr list --json number,title,headRefName,state,url,statusCheckRollup` that name a roadmap id. */
+/** Pull requests from `gh pr list --json number,title,headRefName,baseRefName,state,url,statusCheckRollup` that name a roadmap id. */
 export function parsePrs(out: string): Pr[] {
-  const list = JSON.parse(out) as { number: number; title: string; headRefName: string; state: string; url: string; statusCheckRollup?: CheckEntry[] }[]
+  const list = JSON.parse(out) as { number: number; title: string; headRefName: string; baseRefName?: string; state: string; url: string; statusCheckRollup?: CheckEntry[] }[]
   return list
     .map(pr => ({
       number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
-      ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup), branch: pr.headRefName,
+      ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup), branch: pr.headRefName, base: pr.baseRefName ?? '',
     }))
     .filter(pr => pr.ids.length > 0)
 }
@@ -598,6 +604,16 @@ export function parsePrs(out: string): Pr[] {
 /** The open pull request a unit of work ships in: the one naming the unit itself. */
 export const openPrOf = (refs: Refs, item: Item): Pr | undefined =>
   refs.prs.find(pr => pr.state === 'open' && pr.ids.includes(item.id))
+
+/**
+ * The open pull request `pr` is stacked on: the one whose branch it merges into. Merging `pr` first would
+ * land it in that branch, not in main, so that one goes first.
+ */
+export const stackedOn = (refs: Refs, pr: Pr): Pr | undefined =>
+  pr.base ? refs.prs.find(one => one.state === 'open' && one.number !== pr.number && one.branch === pr.base) : undefined
+
+/** Whether a branch is the repository's main line, where a merged pull request's work is done. */
+export const isMainLine = (branch: string) => branch === 'main' || branch === 'master'
 
 /**
  * The commits and pull requests that name `item` or anything under it; and the pull requests of what

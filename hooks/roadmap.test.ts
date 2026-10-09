@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -1242,6 +1242,64 @@ test("approving the person's own work starts no turn; an agent's approvals each 
   await ui.unmount()
 })
 
+test('pull requests on the board: a tag on the row, a line under the bar, and a stacked one waits for the one below', async ($, on) => {
+  const some = [
+    item('T1', { status: 'review', assignee: 'claude', title: 'Top' }),
+    item('T2', { status: 'review', assignee: 'claude', title: 'Bottom' }),
+  ]
+  const ghList = JSON.stringify([
+    { number: 12, title: 'T1: Top', headRefName: 't1-top', baseRefName: 't2-bottom', state: 'OPEN', url: 'https://x/12', statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    { number: 11, title: 'T2: Bottom', headRefName: 't2-bottom', baseRefName: 'main', state: 'OPEN', url: 'https://x/11', statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+  ])
+  const ran: string[][] = []
+  const submitted: string[] = []
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    if (e.argv[0] === 'gh' && e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
+    if (e.argv[0] === 'gh' || e.argv[0] === 'git') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    return { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'T1' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  // The rows say which PR each Approve would merge.
+  expect(await ui.find({ type: 'Text', text: /PR #12 ✓/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /PR #11 ✓/ })).toBeDefined()
+  // The top of the stack: its line says where it merges and what goes first; Approve won't merge it.
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ key: 'pr-line' })).toBeDefined()
+  expect((await ui.find({ type: 'Link' }))?.props.href).toBe('https://x/12')
+  expect(await ui.find({ type: 'Text', text: /stacked on #11: merge that first/ })).toBeDefined()
+  await ui.press({ key: 'approve' })
+  expect(await ui.find({ type: 'Text', text: /PR #12 is stacked on #11; merge #11 first/ })).toBeDefined()
+  expect(await ui.find({ key: 'merge-yes' })).toBeUndefined()
+  expect(await ui.find({ key: 'merge-no' })).toBeDefined()
+  await ui.press({ key: 'merge-cancel' })
+  await ui.press({ key: 'close' })
+  // The bottom one merges into main, and says so.
+  await ui.press({ key: 'card-T2' })
+  await ui.press({ key: 'approve' })
+  expect(await ui.find({ type: 'Text', text: /Merge PR #11 into main\?/ })).toBeDefined()
+  await ui.press({ key: 'merge-yes' })
+  expect(ran.some(argv => argv.join(' ') === 'gh pr merge 11 --merge')).toBe(true)
+  expect(ran.some(argv => argv.join(' ') === 'gh pr merge 12 --merge')).toBe(false)
+  expect(submitted.at(-1)).toContain('merged PR #11 (branch t2-bottom) into main')
+  await ui.unmount()
+  // A PR merged into a branch other than main is said to be so, with no "switch to main".
+  const note = approvalNote(some[0]!, { number: 12, title: '', state: 'open', url: '', ids: ['T1'], checks: 'pass', branch: 't1-top', base: 't2-bottom' })
+  expect(note).toContain('into t2-bottom, not into main')
+  expect(note).not.toContain('switch to main')
+})
+
 test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work or work in review', async ($, on) => {
   const some = [
     item('T1'), item('T2', { status: 'done' }), item('T3', { status: 'review', assignee: 'claude' }),
@@ -1349,7 +1407,7 @@ test('review with a pull request: checks on the card; Approve offers to merge an
 
   const some = [item('E1', { assignee: 'claude', status: 'review' }), item('T1', { parent: 'E1', status: 'done' }), item('T2', { status: 'review', assignee: 'claude' })]
   const ghList = JSON.stringify([
-    { number: 8, title: 'E1: Things', headRefName: 'e1-things', state: 'OPEN', url: 'https://x/8', statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }] },
+    { number: 8, title: 'E1: Things', headRefName: 'e1-things', baseRefName: 'main', state: 'OPEN', url: 'https://x/8', statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }] },
   ])
   const ran: string[][] = []
   const scripts: string[] = []
@@ -1383,7 +1441,7 @@ test('review with a pull request: checks on the card; Approve offers to merge an
   // A merge that fails leaves it in review.
   await ui.press({ key: 'approve' })
   expect(wrote("status='done'")).toBe(false)
-  expect(await ui.find({ type: 'Text', text: /Merge PR #8 \(checks: fail\)\?/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Merge PR #8 into main \(checks: fail\)\?/ })).toBeDefined()
   await ui.press({ key: 'merge-yes' })
   expect(ran.some(argv => argv.join(' ') === 'gh pr merge 8 --merge')).toBe(true)
   expect(wrote("status='done'")).toBe(false)

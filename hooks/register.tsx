@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -78,7 +78,7 @@ async function refreshRefs($: EngineInterface, isForced = false) {
   }
   if (isForced || now - ghAskedAt > GH_EVERY) {
     ghAskedAt = now
-    const ran = await runAt($, ['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
+    const ran = await runAt($, ['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,baseRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
       .catch(() => undefined)
     try {
       prs = ran && ran.exitCode === 0 ? parsePrs(ran.stdout) : []
@@ -638,6 +638,13 @@ async function showItem($: EngineInterface, id: string) {
  */
 async function approve($: EngineInterface, item: Item, pr?: Pr) {
   await update($, merging, () => null)
+  const under = pr && stackedOn(await read($, refs), pr)
+  if (pr && under) {
+    // Merged now, it would land in #under's branch, not main: that one goes first.
+    $.ui.toast(`roadmap: PR #${pr.number} is stacked on #${under.number}; merge that first. ${item.id} stays in review.`)
+    await focusOn($, 'close')
+    return
+  }
   if (pr) {
     const ran = await runAt($, ['gh', 'pr', 'merge', String(pr.number), '--merge'], { timeoutMs: 60_000 }).catch(
       (err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }),

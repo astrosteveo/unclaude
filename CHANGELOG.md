@@ -6,6 +6,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Added
 
+- An item's pull request is easy to see. A row in review shows its PR and checks (`PR #12 ✓`); the card holds a line under its buttons with the PR (a link to open it), its checks, and where it merges (`head → base`).
 - Approving an agent's work on the board tells it at once, in a turn of its own: that its pull request was merged, so it brings the checkout up to date (switches to main, pulls, deletes the merged branch, checks stacked PRs); or that the merge failed, with gh's reason, so it finds out why. Approving your own work stays quiet.
 - Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.
 - Review acts on the pull request. A card shows its PRs with their checks (running, passed or failing). Approving an item whose PR is open asks whether to merge it (`gh pr merge --merge`) or approve only; if the merge fails, the item stays in review. Request changes also posts the note on the PR. Nothing is merged or posted without the person's press.
@@ -27,6 +28,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Fixed
 
+- Approve and merge no longer merges a stacked pull request into the branch under it. The card says which PR is under it and to merge that first, and offers Approve only until then; the merge confirm names where a PR merges. Claude's follow-up names the branch it merged into, and says to switch to main only when that is where it went.
 - The roadmap tool's description fits the 2048 characters the model reads. It ran to 2598, so the model never saw the pull request guidance or the working rules (claim before starting, comment on decisions, say why something is blocked). What each action takes now sits on the `action` field.
 - The roadmap is found from the project root, however far a shell `cd` moved the session. Before, the database, git and gh were looked for from the session's current directory, so after a `cd` into a subfolder the tool failed ("unable to open database") and the board read as empty. Coming back, the next brief replayed old changes as new; it no longer does.
 - Old activity no longer drops out of view. The board's snapshot was the newest 500 entries across the whole roadmap, so past that, older items lost their timeline and handoff notes, and `find` stopped matching their comments. The snapshot now carries each item's newest 20 entries and its latest handoff note; `show` and `claim` read the item's whole timeline, and `find` searches every comment ever written.
