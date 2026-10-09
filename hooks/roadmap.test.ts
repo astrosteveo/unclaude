@@ -311,7 +311,7 @@ test('a card reads as labelled sections, and a tall one scrolls under its fixed 
 })
 
 test('the .gitignore offer stands only in a repo that does not ignore the database, until turned down', async () => {
-  expect(ignoreState(0)).toBe('ignored')
+  expect(ignoreState(0)).toBe('BROKEN')
   expect(ignoreState(1)).toBe('not-ignored')
   expect(ignoreState(128)).toBe('no-repo')
   expect(shouldOfferIgnore('ignored', undefined)).toBe(false)
