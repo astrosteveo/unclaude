@@ -569,7 +569,7 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   const stale = now === undefined ? [] : tasks.filter(task => task.assignee !== actor && isStale(task, now))
   const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor && !stale.includes(task))
   const parts = [
-    'Project roadmap (roadmap tool; .claude/roadmap.db). Keep it current: claim a task before working on it, comment on progress and decisions, set done when finished (it goes to review for the user to approve).',
+    'Project roadmap (roadmap tool). Claim before you start; keep it current as you go.',
   ]
   if (milestones.length) parts.push('Open milestones:\n' + list(milestones, 4))
   if (mine.length) parts.push(`Assigned to you (${actor}):\n` + list(mine))

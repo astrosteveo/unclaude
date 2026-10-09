@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, askAbout, readyIn, timeline, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, askAbout, readyIn, timeline, isMessage, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere,
 } from './model'
 
@@ -448,6 +448,13 @@ const idList = (value: unknown) => listOf(value, /,/)
 /** `check` entry numbers. */
 const numbers = (value: unknown) => listOf(value, /,/).map(Number)
 
+/** A change's notes as its caller reads them back: entries ticked by number, since the caller just named them. */
+function said(notes: string[]): string[] {
+  const ticked = notes.flatMap(one => /^checked (\d+)\. /.exec(one)?.[1] ?? [])
+  const rest = notes.filter(one => !/^checked \d+\. /.test(one)).map(one => (one.startsWith('release note: ') ? 'release note set' : one))
+  return [...(ticked.length ? [`checked ${ticked.join(', ')}`] : []), ...rest]
+}
+
 /**
  * Claims task `it` for `actor`, answering with all it takes to start cold: the task as it stands, its
  * notes and the work already committed. Inside a unit taken whole, `unit` answers with that unit's
@@ -467,11 +474,13 @@ async function claimTask($: EngineInterface, actor: string, snap: Snapshot, it: 
   const linked = refsText(refsFor(after.items, known, now))
   const home = unitOf(after.items, now)
   const where = `\nWork on branch ${branchFor(home)}${home.id === it.id ? '' : ` (${home.id}'s, which this task ships in)`}: switch to it, or create it from the branch you're building on. Commit as "${it.id}: …".`
-  if (!unit) return `${it.id} is yours (${actor}), in progress.${tookOver}${where}\n\n${detail(after, now, 10)}${linked ? `\n${linked}` : ''}`
+  // Of the history, only what people said matters to starting: who created it and when is the board's.
+  const spoken = { ...after, activity: after.activity.filter(isMessage) }
+  if (!unit) return `${it.id} is yours (${actor}), in progress.${tookOver}${where}\n\n${detail(spoken, now, 10)}${linked ? `\n${linked}` : ''}`
   // The unit's detail carries the task's description and checklist; only a handoff note is the task's own.
   const handoff = timeline(after.activity, it.id).filter(one => one.type === 'handoff').at(-1)
   const note = handoff ? `\nHandoff on ${it.id} from ${handoff.author}: ${handoff.body}` : ''
-  return `${it.id} is yours, in progress.${tookOver}${where}${note}${linked ? `\n${linked}` : ''}\n\n${detail(after, find(after.items, unit.id) ?? unit, 5)}`
+  return `${it.id} is yours, in progress.${tookOver}${where}${note}${linked ? `\n${linked}` : ''}\n\n${detail(spoken, find(after.items, unit.id) ?? unit, 5)}`
 }
 
 /**
@@ -492,7 +501,7 @@ async function takeUnit($: EngineInterface, actor: string, snap: Snapshot, unit:
   if (task) return `${head}\n${await claimTask($, actor, held, task, false, t, now)}`
   const left = progress(held.items, now)
   const why = left.done === left.total ? 'all its tasks are done' : 'its open tasks are held by others or wait on unfinished work'
-  return `${head} Nothing in it to start: ${why}.\n\n${detail(held, now, 5)}`
+  return `${head} Nothing in it to start: ${why}.\n\n${detail({ ...held, activity: held.activity.filter(isMessage) }, now, 5)}`
 }
 
 /**
@@ -680,7 +689,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         const after = await refresh($, t)
         const unit = find(after.items, scope.id) ?? scope
         const task = readyIn(after.items, unit, actor, it.id)
-        if (task) return `${it.id}: ${notes.join('; ')}\nNext in ${unit.id}: ${await claimTask($, actor, after, task, false, t)}`
+        if (task) return `${it.id}: ${said(notes).join('; ')}\nNext in ${unit.id}: ${await claimTask($, actor, after, task, false, t)}`
         const left = progress(after.items, unit)
         if (left.done < left.total) notes.push(`nothing else in ${unit.id} is ready: its open tasks are held by others or wait on unfinished work`)
         else {
@@ -694,7 +703,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       else if (scope && a.status === 'done' && actor !== USER)
         notes.push(`closed as part of ${scope.id}, which the user reviews as a whole once all its tasks are done`)
       else if (a.approved) notes.push('approved by the user')
-      return notes.length ? `${it.id}: ${notes.join('; ')}` : `${it.id}: nothing changed`
+      return notes.length ? `${it.id}: ${said(notes).join('; ')}` : `${it.id}: nothing changed`
     }
     case 'claim': {
       const it = need()
@@ -718,7 +727,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const { script, notes } = db.check(actor, it, ns, a.done !== false)
       if (script) await sql($, script, t)
       const left = it.checklist.filter(c => !(ns.includes(c.n) ? a.done !== false : c.done)).length
-      return `${it.id}: ${notes.length ? notes.join('; ') : 'nothing changed'}. ${left ? `${left} left to check.` : 'All checked.'}`
+      return `${it.id}: ${notes.length ? said(notes).join('; ') : 'nothing changed'}. ${left ? `${left} left to check.` : 'All checked.'}`
     }
     case 'comment': {
       const it = need()
@@ -1378,21 +1387,17 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'roadmap',
       isDeferred: false,
-      // The model reads only the first 2048 characters of this; what each action takes is on `action` below.
+      // Every session carries this on every turn, so it stays short: the paths an agent takes most, and
+      // each action's fields on `action` below. The model reads only the first 2048 characters of it.
       description: [
-        "The project's shared tracker (.claude/roadmap.db), a lightweight Jira that you, the user and other agents all work from.",
-        'Milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
-        'Milestone and epic status roll up from their tasks. Each action and what it takes is listed on the action field.',
-        'Working rules: claim a task before you start it (claim names the branch to work on); comment on decisions and findings;',
-        'release it with a handoff note if you stop before it is done; mark it blocked with a comment saying why.',
-        "Acceptance criteria: a task's checklist. Give each task you plan one; tick entries with check, or with items on the update that sets it done. A task cannot be set done while any is unchecked.",
-        'Review: the user reviews what they handed you, once. A task you set done goes to review. When they hand you a whole epic or milestone',
-        '("implement E27"), claim the epic or milestone: you hold it, so its tasks close as you go, and it claims its first ready task.',
-        "Pass approved: true with status done only when the user has told you in this conversation that the work is approved; subagents can't.",
-        'Branches and PRs: one per unit handed over (the epic or milestone, or a task given alone). When the unit goes to review, push its branch',
-        'and open its PR (pr: id gives the branch, title and body). Name ids in commit messages, PR titles and branches ("T12: ...", "E9: ...");',
-        'show lists the commits and PRs that name an item. Subagents are named from their type and task automatically.',
-        'Several changes at once: batch (ops), one call, all or nothing; or ids for the same change to several items.',
+        "The project's shared tracker (.claude/roadmap.db) for you, the user and other agents. Milestone > epic > task (M1, E1, T1); milestone and epic status roll up from their tasks.",
+        'Handed an epic or milestone ("implement E27"): claim it. You hold it, its first ready task is yours, and the answer shows every task.',
+        'Per task: do the work, commit as "T12: ...", then update status done with items (the checklist entries to tick) and note (its CHANGELOG line, "-" for none).',
+        "That claims and shows the next ready task; after the last, the unit goes to the user's review and the answer gives its PR step.",
+        'Claim any task before you start it; a task handed alone goes to review when you set it done. A task cannot close with entries unticked or without a note.',
+        'Comment on decisions; release with a handoff note if you stop; set blocked with a comment saying why.',
+        'approved: true only when the user said so in this conversation. One branch and PR per unit handed over (claim names the branch, pr gives title and body).',
+        'batch runs several actions as one call, all or nothing; ids applies one change to several items.',
       ].join(' '),
       inputSchema: {
         type: 'object',
@@ -1401,79 +1406,53 @@ export const register: Register = on => {
             type: 'string',
             enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship'],
             description: [
-              'show: the whole tree, or one item (id) with its activity and linked commits and PRs.',
-              'next: your open tasks, then unassigned ones by priority and due date.',
-              'find: any of kind, status, assignee ("none" for unassigned), priority, type, labels, under (an id: its subtree), text (title, description, comments).',
-              'pr: the branch, title and body for the pull request of the unit an item ships in.',
-              'add: kind, title; optional parent, description, due, status, assignee, priority, type, labels, checklist, blocked_by, relates_to, duplicates, note, section.',
-              'plan: tree (optional parent): a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
-              "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
-              'update: id plus any field; empty string clears. Setting a task done takes its release note (note, section) when it has none,',
-              'and items ticks its checklist in the same call. In an epic or milestone you hold, done claims and shows the next ready task.',
-              'claim: id; takes a task and starts it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks.',
-              'On an epic or milestone handed to you, takes it whole and claims its first ready task, answering with every task in it.',
-              'release: id; body leaves a handoff note for whoever picks it up next.',
-              'comment: id, body. check: id, items (checklist entry numbers). remove: id; cascade for children.',
-              'batch: ops, a list of these actions ({ action, ...fields }) run in order as one: every op is checked first and',
-              'nothing is written unless all pass. An add op may carry a ref that later ops use in place of its id.',
-              'export: path (default .claude/roadmap-export-<date>.json): the whole roadmap as JSON.',
-              'import: path: restores an export into an empty roadmap. The mod also backs up to ~/.claude/roadmap-backups on its own.',
-              'changelog: writes the release notes of merged work into CHANGELOG.md under [Unreleased] (path for another file).',
-              'ship: version; bumps the manifests, cuts CHANGELOG [Unreleased] as that version and opens its PR; once merged, again with approved',
-              '(the user said so) tags it and publishes the GitHub release. Only when the user asks for a release.',
+              'show: the tree, or id: one item with its tasks, activity, commits and PRs. next: what to pick up.',
+              'find: kind, status, assignee ("none"), priority, type, labels, under (an id), text.',
+              'pr: branch, title and body for the PR of the unit an item ships in. add: kind, title, any field below.',
+              "plan: tree, a whole breakdown in one call (nodes take add's fields, ref and children; blocked_by may name refs).",
+              'update: id and fields; empty string clears. claim: id, a task or a handed epic/milestone. release: id, body.',
+              'comment: id, body. check: id, items. remove: id (cascade for what is under it).',
+              'batch: ops, each { action, ...fields }; an add may carry a ref for later ops. export, import (into an empty roadmap): path.',
+              'changelog: merged notes into CHANGELOG.md. ship: version, only when the user asks for a release; again with approved once merged, to tag.',
             ].join(' '),
           },
-          id: { type: 'string', description: 'Item id, e.g. T12' },
-          ids: { type: 'array', items: { type: 'string' }, description: 'In place of id: the same change to each of these items, all or nothing' },
+          id: { type: 'string' },
+          ids: { type: 'array', items: { type: 'string' }, description: 'In place of id: the same change to each' },
           ops: {
             type: 'array',
-            description: 'batch: the actions to run, in order, each { action, ...its fields }; one op may not be a batch',
             items: { type: 'object', properties: { action: { type: 'string' }, ref: { type: 'string' } }, required: ['action'] },
           },
           kind: { type: 'string', enum: KINDS },
           title: { type: 'string' },
           description: { type: 'string' },
           status: { type: 'string', enum: STATUSES },
-          parent: { type: 'string', description: 'Parent id; empty string moves to top level' },
-          checklist: {
-            type: 'array', items: { type: 'string' },
-            description: 'Acceptance criteria for a task (add/update); replaces the list, keeping ticks on unchanged entries; [] clears.',
-          },
-          items: { type: 'array', items: { type: 'integer' }, description: 'check, or update with status done: the 1-based checklist entries to tick' },
-          done: { type: 'boolean', description: 'check: false unticks instead' },
-          blocked_by: {
-            type: 'array', items: { type: 'string' },
-            description: 'Tasks this task waits on (add/update); replaces the list, [] clears. Claiming waits for them; next skips it.',
-          },
-          assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
-          due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
-          under: { type: 'string', description: 'find: only items under this milestone or epic' },
-          text: { type: 'string', description: 'find: words that must all appear in the title, description or comments' },
+          parent: { type: 'string', description: 'Empty string: top level' },
+          checklist: { type: 'array', items: { type: 'string' }, description: "A task's acceptance criteria; replaces the list, keeping ticks on unchanged entries" },
+          items: { type: 'array', items: { type: 'integer' }, description: 'check, or update with status done: 1-based checklist entries to tick' },
+          done: { type: 'boolean', description: 'check: false unticks' },
+          blocked_by: { type: 'array', items: { type: 'string' }, description: 'Tasks this one waits on; replaces the list' },
+          assignee: { type: 'string', description: `"${USER}", "${CLAUDE}" or an agent's name; empty string unassigns` },
+          due: { type: 'string', description: 'YYYY-MM-DD' },
+          under: { type: 'string' },
+          text: { type: 'string' },
           tree: {
             type: 'array',
-            description: 'plan: new items, each { ref?, kind, title, description?, due?, assignee?, priority?, type?, labels?, checklist?, blocked_by?, children? }',
             items: { type: 'object', properties: { ref: { type: 'string' }, kind: { type: 'string', enum: KINDS }, title: { type: 'string' }, children: { type: 'array' } }, required: ['kind', 'title'] },
           },
-          labels: { type: 'array', items: { type: 'string' }, description: 'Tags such as "ui" or "auth" (add/update); replaces the list, [] clears.' },
-          relates_to: {
-            type: 'array', items: { type: 'string' },
-            description: 'Items this one is related to, shown on both (add/update); replaces the list, [] clears.',
-          },
-          duplicates: { type: 'string', description: 'The item this one duplicates (add/update); closes this task as done. Empty string clears.' },
-          priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3 can wait; p2 is the default. next picks higher priority first.' },
-          type: { type: 'string', enum: TYPES, description: 'What sort of work: feature (default), bug or chore' },
-          body: { type: 'string', description: 'Comment text (comment), or a handoff note (release): where you got to and what is left' },
-          as: { type: 'string', description: `Who is acting, to override the default: "${CLAUDE}", or a subagent's name from its type and task.` },
-          approved: { type: 'boolean', description: 'update with status done: the user has explicitly approved this work in chat, so it skips review. Never on your own judgment.' },
-          force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: set done with unchecked items' },
-          cascade: { type: 'boolean', description: 'remove: also remove everything under the item' },
-          path: { type: 'string', description: 'export, import: the JSON file; changelog: the CHANGELOG (CHANGELOG.md). Relative to the project, absolute, or ~/…' },
-          note: {
-            type: 'string',
-            description: "A task's release note (add/update): one line for the CHANGELOG, saying what changed for whoever uses the project; \"-\" when none is needed. The pr body and changelog are written from it.",
-          },
-          version: { type: 'string', description: 'ship: the version to release, as 1.2.3' },
-          section: { type: 'string', enum: SECTIONS, description: "The CHANGELOG section of the task's note; by default Fixed for a bug, Changed for a chore, else Added" },
+          labels: { type: 'array', items: { type: 'string' } },
+          relates_to: { type: 'array', items: { type: 'string' } },
+          duplicates: { type: 'string', description: 'The item this one duplicates; closes it' },
+          priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3; p2 by default' },
+          type: { type: 'string', enum: TYPES },
+          body: { type: 'string' },
+          as: { type: 'string', description: 'Act as another name (a subagent)' },
+          approved: { type: 'boolean', description: 'With status done: the user approved it in chat. Never on your own judgment' },
+          force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: done with entries unticked' },
+          cascade: { type: 'boolean' },
+          path: { type: 'string' },
+          note: { type: 'string', description: "A task's CHANGELOG line, saying what changed for its users; \"-\" for none" },
+          version: { type: 'string', description: '1.2.3' },
+          section: { type: 'string', enum: SECTIONS, description: 'Of the note; by default Fixed for a bug, Changed for a chore, else Added' },
         },
         required: ['action'],
       },
@@ -1555,8 +1534,7 @@ export const register: Register = on => {
         const open = snap.items.filter(item => item.kind === 'task' && item.assignee === CLAUDE && item.status === 'in_progress')
         if (open.length)
           context.push(
-            `<roadmap-reminder>You have in-progress roadmap tasks: ${open.map(t => `${t.id} ${t.title}`).join('; ')}. ` +
-              'If your recent work moved any of them, comment or update its status with the roadmap tool.</roadmap-reminder>',
+            `<roadmap-reminder>In progress: ${open.map(t => t.id).join(', ')}. If your work moved them, update the roadmap.</roadmap-reminder>`,
           )
       }
       // Never backwards: a read that found no database (or an older copy of it) must not replay old news.

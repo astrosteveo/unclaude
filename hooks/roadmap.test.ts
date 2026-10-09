@@ -182,7 +182,7 @@ test('the tool description fits the 2048 characters the model reads; each action
   on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
   await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
   expect(spec!.description.length).toBeLessThanOrEqual(2048)
-  for (const rule of ['claim a task before you start it', 'handoff note', 'blocked with a comment', 'approved: true', 'open its PR'])
+  for (const rule of ['claim it', 'Claim any task before you start it', 'status done with items', 'handoff note', 'blocked with a comment', 'approved: true', 'PR step'])
     expect(spec!.description).toContain(rule)
   const actions = spec!.inputSchema.properties.action.description
   for (const action of ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'])
@@ -1755,7 +1755,7 @@ test('release notes: an agent sets a task done with its note; the PR body lists 
   expect(scripts.some(one => one.startsWith('BEGIN'))).toBe(false)
   expect(await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'nope' })).toContain('section must be one of Added, Changed, Fixed')
   const done = await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'fixed' })
-  expect(done).toContain('release note: Cards no longer flicker')
+  expect(done).toContain('release note set')
   expect(done).toContain('section → Fixed')
   expect(scripts.some(one => one.startsWith('BEGIN') && one.includes("note='Cards no longer flicker'"))).toBe(true)
   // "none" or "-": the work needs no line.
