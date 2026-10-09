@@ -23,7 +23,9 @@ Answer `y` to add the marketplace, then pick a scope (user scope makes it availa
 Ask Claude to plan something, for example *"plan the v2 release as milestones, epics and tasks, with a checklist on each task"*, and then:
 
 - **`/roadmap`** opens the board. Columns are Todo, In progress, Blocked, Review and Done, and a Tree tab shows the full hierarchy.
-- **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `h` hands it to Claude, `m`/`u` assign it to you or unassign it, `x` closes it, and `v` switches between board and tree.
+- **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `h` hands it to Claude, `m`/`u` assign it to you or unassign it, `x` closes it, and `v` steps through board, tree and backlog, and `f` filters.
+- **Backlog** (third tab) is for triage: todo tasks nobody holds, those without an epic first, then by priority. Each row has a priority picker and a `→ Claude` button.
+- **Filter** with `f`: type words to search, or narrow with `@claude` (`@none` for unassigned), `#label`, `p0`–`p3`, `bug`/`feature`/`chore`, a status (`todo`, `wip`, `blocked`, `review`, `done`) or `under:E3`. The filter applies to the board, tree and backlog; Clear removes it.
 - **Comments** you post on a card reach Claude with your next prompt. A `● N` badge marks cards with comments you haven't read yet.
 - **Review:** when Claude or a subagent finishes a task, it goes to Review, not Done. Open the card and press `a` to approve it, or `c` to send it back with what needs changing (Claude picks it up again). You can also tell Claude in chat that it's approved.
 - **Priority and type:** each task has a priority (`p0` urgent to `p3` can wait, `p2` by default) and a type (feature, bug or chore). Cards show them when they differ from the defaults, with `p0` in red and `p1` in yellow.
@@ -37,6 +39,7 @@ What Claude does with it:
 - Can't mark a task done until every item on its checklist is checked, and its done goes to Review for you to approve.
 - Leaves a handoff note when it lets a task go (`release` with a note). The next agent to claim the task gets the note first, along with the task's description, checklist, recent activity and linked commits, so it can pick up where the last one stopped.
 - Plans a whole breakdown in one call (`plan`): milestones, epics and tasks nested as a tree, with checklists, labels and dependencies between the new tasks. The tree is checked in full before anything is written.
+- Searches with `find`: by status, assignee (`none` for unassigned), priority, type, labels, a subtree (`under`) or words in titles, descriptions and comments.
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Puts task ids in commit messages (`T12: ...`). Commits and PRs that name a task show up on it.
 

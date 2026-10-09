@@ -1,5 +1,8 @@
-import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Refs, Snapshot, Status } from '../types'
+import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
 
+// The person at the board, and the main loop's agent; subagents go by names from agentName.
+export const USER = 'user'
+export const CLAUDE = 'claude'
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
 export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
 export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', review: '◉', done: '●' }
@@ -97,6 +100,58 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
   }
   for (const one of out) visit(one.ref)
   return out
+}
+
+// Words a query reads as a status; the rest of the words are searched for.
+const STATUS_WORDS: Record<string, Status> = {
+  todo: 'todo', 'in-progress': 'in_progress', in_progress: 'in_progress', wip: 'in_progress', blocked: 'blocked', review: 'review', done: 'done',
+}
+
+/**
+ * A query as typed on the board: `@claude` (assignee; `@none` for unassigned), `#ui` (label), `p0`–`p3`,
+ * `bug`/`feature`/`chore`, a status word (`todo`, `wip`, `blocked`, `review`, `done`), `under:E3`, and
+ * any other words, which must all appear in the text. Repeats of a kind widen it: `p0 p1` is either.
+ * Undefined when there is nothing to look for.
+ */
+export function parseQuery(text: string): Query | undefined {
+  const q: Query = {}
+  const add = <K extends 'status' | 'assignee' | 'priority' | 'type' | 'labels'>(key: K, value: NonNullable<Query[K]>[number]) =>
+    ((q[key] as unknown[] | undefined) ??= []).push(value)
+  const words: string[] = []
+  for (const word of text.trim().split(/\s+/).filter(Boolean)) {
+    const low = word.toLowerCase()
+    if (low.startsWith('@') && low.length > 1) add('assignee', low.slice(1))
+    else if (low.startsWith('#') && low.length > 1) add('labels', low.slice(1))
+    else if (low.startsWith('under:') && low.length > 6) q.under = low.slice(6).toUpperCase()
+    else if ((PRIORITIES as string[]).includes(low)) add('priority', low as Priority)
+    else if ((TYPES as string[]).includes(low)) add('type', low as IssueType)
+    else if (STATUS_WORDS[low]) add('status', STATUS_WORDS[low]!)
+    else words.push(word)
+  }
+  if (words.length) q.text = words.join(' ')
+  return Object.keys(q).length ? q : undefined
+}
+
+/** Whether `item` is what `query` looks for. Status is the rolled-up one, as the board shows it. */
+export function matches(snap: Snapshot, item: Item, query: Query): boolean {
+  if (query.kind && item.kind !== query.kind) return false
+  if (query.status?.length && !query.status.includes(statusOf(snap.items, item))) return false
+  if (query.assignee?.length && !query.assignee.some(who => (who === 'none' ? !item.assignee : item.assignee?.toLowerCase() === who.toLowerCase())))
+    return false
+  if (query.priority?.length && !query.priority.includes(item.priority ?? 'p2')) return false
+  if (query.type?.length && !query.type.includes(item.type ?? 'feature')) return false
+  if (query.labels?.length && !query.labels.some(one => (item.labels ?? []).includes(one))) return false
+  if (query.under) {
+    const root = find(snap.items, query.under)
+    if (!root || root.id === item.id || !subtree(snap.items, root.id).includes(item.id)) return false
+  }
+  if (query.text?.trim()) {
+    const words = query.text.toLowerCase().split(/\s+/).filter(Boolean)
+    const said = snap.activity.filter(one => one.item_id === item.id && isMessage(one)).map(one => one.body)
+    const hay = [item.id, item.title, item.description ?? '', ...said].join('\n').toLowerCase()
+    if (!words.every(word => hay.includes(word))) return false
+  }
+  return true
 }
 
 /** The tasks `item` waits on that are not done yet. */
@@ -276,6 +331,15 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
   if (log.length) parts.push('Activity:\n' + log.map(one => `  ${one.at.slice(0, 16).replace('T', ' ')} ${one.author}: ${one.body}`).join('\n'))
   return parts.join('\n')
 }
+
+/**
+ * The backlog to triage: todo tasks nobody holds, those filed under no milestone or epic first (they
+ * still need a home), then by priority, then oldest first.
+ */
+export const backlog = (items: Item[]): Item[] =>
+  items
+    .filter(item => item.kind === 'task' && item.status === 'todo' && !item.assignee)
+    .sort((a, b) => Number(a.parent !== null) - Number(b.parent !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
 
 /**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then

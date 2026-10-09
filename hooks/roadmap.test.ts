@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, checkLinks, checkPlan, isStale, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, brief, checkLinks, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -696,4 +696,112 @@ test('plan: creates parents first, wires refs to new ids, and answers the map', 
   const refused = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'plan', tree: [{ kind: 'task', title: 'x', blocked_by: ['ghost'] }] } as never)
   expect(refused.deny).toContain('No item ghost')
   expect(scripts.slice(before).some(one => one.includes('INSERT'))).toBe(false)
+})
+
+test('find: every given filter must match, with text searched in titles, descriptions and comments', async ($, on) => {
+  const some = [
+    item('M1'),
+    item('E1', { parent: 'M1' }),
+    item('T1', { parent: 'E1', title: 'Login form', priority: 'p0', type: 'bug', labels: ['ui'], assignee: 'claude', status: 'in_progress' }),
+    item('T2', { parent: 'E1', title: 'Session store', description: 'Redis backed', labels: ['api'] }),
+    item('T3', { title: 'Docs' }),
+  ]
+  const activity: Activity[] = [{ id: 1, item_id: 'T3', author: 'user', type: 'comment', body: 'mention the login flow', at: '' }]
+  const snap = { items: some, activity, seen: {} }
+  const ids = (query: object) => some.filter(one => matches(snap, one, query)).map(one => one.id)
+  expect(ids({ labels: ['ui', 'api'] })).toEqual(['T1', 'T2'])
+  expect(ids({ assignee: ['none'], kind: 'task' })).toEqual(['T2', 'T3'])
+  expect(ids({ under: 'M1' })).toEqual(['E1', 'T1', 'T2'])
+  expect(ids({ text: 'login' })).toEqual(['T1', 'T3'])
+  expect(ids({ text: 'redis session' })).toEqual(['T2'])
+  expect(ids({ status: ['in_progress'] })).toEqual(['M1', 'E1', 'T1'])
+  expect(ids({ priority: ['p0'], type: ['bug'] })).toEqual(['T1'])
+  expect(ids({ priority: ['p2'], kind: 'task' })).toEqual(['T2', 'T3'])
+
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'find', ...input } as never)
+  expect(String((await call({ labels: ['#UI'] })).result)).toBe('1 match:\nT1 ◐ in_progress Login form  (p0, bug, #ui, @claude) [E1]')
+  expect(String((await call({ text: 'nothing like this' })).result)).toBe('Nothing matches.')
+  expect((await call({ under: 'E9' })).deny).toContain('No item E9')
+})
+
+test('board filter: a typed query narrows the board and the tree, shows in the header, and clears', async ($, on) => {
+  expect(parseQuery('@claude #UI p0 p1 bug review under:e3 login form')).toEqual({
+    assignee: ['claude'], labels: ['ui'], priority: ['p0', 'p1'], type: ['bug'], status: ['review'], under: 'E3', text: 'login form',
+  })
+  expect(parseQuery('  ')).toBeUndefined()
+  expect(parseQuery('wip @none')).toEqual({ status: ['in_progress'], assignee: ['none'] })
+
+  const some = [
+    item('M1'),
+    item('E1', { parent: 'M1' }),
+    item('T1', { parent: 'E1', title: 'Login form', labels: ['ui'] }),
+    item('T2', { parent: 'E1', title: 'Session store' }),
+    item('T3', { title: 'Docs', status: 'done' }),
+  ]
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: '#ui' } as never)
+  expect(await ui.find({ key: 'card-T1' })).toBeDefined()
+  expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
+  expect((await ui.find({ key: 'filter' }))?.text).toContain('Filter: #ui')
+  await ui.press({ key: 'tab-tree' })
+  expect(await ui.find({ key: 'row-M1' })).toBeDefined()
+  expect(await ui.find({ key: 'row-T1' })).toBeDefined()
+  expect(await ui.find({ key: 'row-T2' })).toBeUndefined()
+  expect(await ui.find({ key: 'row-T3' })).toBeUndefined()
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: 'nothing like it' } as never)
+  expect(await ui.find({ type: 'Text', text: /Nothing matches the filter/ })).toBeDefined()
+  await ui.press({ key: 'filter-clear' })
+  expect(await ui.find({ key: 'row-T2' })).toBeDefined()
+  expect(await ui.find({ key: 'filter-clear' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('backlog: unheld todo tasks, homeless first then by priority; a row sets priority and hands off', async ($, on) => {
+  const some = [
+    item('E1'),
+    item('T1', { parent: 'E1', priority: 'p3' }),
+    item('T2', { parent: 'E1', priority: 'p0', labels: ['ui'] }),
+    item('T3', { priority: 'p3' }),
+    item('T4', { assignee: 'claude' }),
+    item('T5', { status: 'done' }),
+  ]
+  expect(backlog(some).map(one => one.id)).toEqual(['T3', 'T2', 'T1'])
+  const scripts: string[] = []
+  let submitted = ''
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('prompt.submit', ($, e) => ((submitted = e.text), { text: e.text, origin: e.origin }))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  // v steps board → tree → backlog.
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-backlog' })
+  expect(await ui.find({ key: 'row-T3' })).toBeDefined()
+  expect(await ui.find({ key: 'row-T4' })).toBeUndefined()
+  await ui.select({ key: 'prio-T1', value: 'p1' } as never)
+  expect(scripts.some(one => one.includes("priority='p1'") && one.includes("WHERE id='T1'"))).toBe(true)
+  await ui.press({ key: 'hand-T2' })
+  expect(submitted).toContain('Work on roadmap task T2')
+  await ui.press({ key: 'filter' })
+  await ui.input({ key: 'filter-input', text: '#ui' } as never)
+  expect(await ui.find({ key: 'row-T3' })).toBeUndefined()
+  expect(await ui.find({ key: 'row-T2' })).toBeDefined()
+  await ui.unmount()
 })

@@ -32,6 +32,22 @@ export type Item = {
   updated_at: string
 }
 
+/**
+ * What to look for (`find`, and the board's filter); every field given must match. `assignee` "none"
+ * means unassigned; `labels` matches an item carrying any of them; `text` searches title, description
+ * and what was written on the item.
+ */
+export type Query = {
+  kind?: Kind
+  status?: Status[]
+  assignee?: string[]
+  priority?: Priority[]
+  type?: IssueType[]
+  labels?: string[]
+  under?: string
+  text?: string
+}
+
 /** One item of a `plan` call: a new item and, nested under it, its own new items. */
 export type PlanNode = {
   /** A name other nodes' blocked_by can use before the item has an id; defaults to its place, `#1`, `#2`… */
@@ -77,7 +93,7 @@ export type Activity = {
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
 export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number> }
 
-export type View = 'board' | 'tree'
+export type View = 'board' | 'tree' | 'backlog'
 
 /** A commit whose message names roadmap ids. */
 export type Commit = { hash: string; author: string; date: string; subject: string; ids: string[] }
@@ -90,6 +106,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean }
   }
 }
