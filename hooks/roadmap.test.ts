@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -537,6 +537,30 @@ test('targets: a task takes its own milestone, else its epic\'s; the tree puts i
   ]
   expect(['E1', 'T1', 'T2', 'T3', 'T4', 'M1'].map(id => targetOf(some, find(some, id)!))).toEqual(['M1', 'M1', 'M2', 'M2', null, 'M1'])
   expect(['E1', 'T1', 'T2', 'T3', 'T4'].map(id => upOf(find(some, id)!))).toEqual(['M1', 'E1', 'E1', 'M2', null])
+})
+
+test('roll-ups follow targets: a milestone is the tasks that target it; hand-offs, due dates and next follow suit', () => {
+  const some = [
+    item('M1', { due: '2026-11-01' }), item('M2', { due: '2026-12-01' }),
+    item('E1', { milestone: 'M1', due: '2026-10-20' }),
+    item('T1', { parent: 'E1', status: 'done' }),
+    item('T2', { parent: 'E1', milestone: 'M2' }),
+    item('T3', { milestone: 'M1' }),
+    item('T4', { milestone: 'M2', status: 'done' }),
+  ]
+  // T2 sits in E1 but targets M2: it counts for M2, not M1.
+  expect(tasksIn(some, find(some, 'M1')!).map(one => one.id)).toEqual(['T1', 'T3'])
+  expect(tasksIn(some, find(some, 'M2')!).map(one => one.id)).toEqual(['T2', 'T4'])
+  expect(progress(some, find(some, 'M1')!)).toEqual({ done: 1, total: 2 })
+  expect(progress(some, find(some, 'M2')!)).toEqual({ done: 1, total: 2 })
+  expect(progress(some, find(some, 'E1')!)).toEqual({ done: 1, total: 2 })
+  // Due: its own, else its epic's, else its milestone's.
+  expect(['T1', 'T2', 'T3'].map(id => dueOf(some, find(some, id)!))).toEqual(['2026-10-20', '2026-10-20', '2026-11-01'])
+  // Handing M2 over takes T2 too, though it sits in E1; next in M2 offers it.
+  const handed = some.map(one => (one.id === 'M2' ? { ...one, assignee: 'claude' } : one))
+  expect(handedScope(handed, find(handed, 'T2')!)?.id).toBe('M2')
+  expect(handedScope(handed, find(handed, 'T1')!)).toBeUndefined()
+  expect(readyIn(handed, find(handed, 'M2')!, 'claude')?.id).toBe('T2')
 })
 
 test('releases: a CHANGELOG reads as versions with their dates and notes; a version carries the tasks whose notes it holds', () => {

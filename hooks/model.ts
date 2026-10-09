@@ -70,7 +70,10 @@ export const upOf = (item: Item): string | null => item.parent ?? item.milestone
 export function targetOf(items: Item[], item: Item): string | null {
   if (item.kind === 'milestone') return item.id
   if (item.milestone) return item.milestone
-  return item.kind === 'task' && item.parent ? find(items, item.parent)?.milestone ?? null : null
+  const up = find(items, item.parent ?? undefined)
+  // Under a milestone, as data from before targets had it: that milestone; under an epic, the epic's.
+  if (!up) return null
+  return up.kind === 'milestone' ? up.id : item.kind === 'task' ? targetOf(items, up) : null
 }
 
 export const find = (items: Item[], id: string | undefined) =>
@@ -305,10 +308,17 @@ export function subtree(items: Item[], id: string): string[] {
   return out
 }
 
-const tasksUnder = (items: Item[], item: Item) =>
-  subtree(items, item.id)
-    .map(id => find(items, id)!)
-    .filter(one => one.kind === 'task' && one.id !== item.id)
+/**
+ * The tasks an item is made of: an epic's, its tasks; a milestone's, the tasks that target it, directly
+ * or through their epic (a task can target another milestone than its epic's).
+ */
+export const tasksIn = (items: Item[], item: Item): Item[] =>
+  item.kind === 'milestone'
+    ? items.filter(one => one.kind === 'task' && targetOf(items, one) === item.id)
+    : subtree(items, item.id)
+        .map(id => find(items, id)!)
+        .filter(one => one.kind === 'task' && one.id !== item.id)
+const tasksUnder = tasksIn
 
 /** Tasks in an item's subtree: done and total. */
 export function progress(items: Item[], item: Item): { done: number; total: number } {
@@ -333,9 +343,12 @@ export const isAgent = (who: string | null | undefined) => Boolean(who) && who !
  * are several: the unit of work that is reviewed once, at its end, in place of what is inside it.
  */
 export function handedScope(items: Item[], item: Item): Item | undefined {
+  // What holds it, inner first: a task's epic, then the milestone it targets (its own, else its epic's).
+  if (item.kind === 'milestone') return undefined
+  const epic = item.kind === 'task' && item.parent ? find(items, item.parent) : undefined
+  const milestone = find(items, targetOf(items, item) ?? undefined)
   let scope: Item | undefined
-  for (let at = find(items, upOf(item) ?? undefined); at; at = find(items, upOf(at) ?? undefined))
-    if (at.kind !== 'task' && isAgent(at.assignee)) scope = at
+  for (const at of [epic, milestone]) if (at && isAgent(at.assignee)) scope = at
   return scope
 }
 
@@ -506,11 +519,7 @@ export const backlog = (items: Item[]): Item[] =>
 export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   const tasks = items.filter(item => item.kind === 'task')
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done')
-  const due = (task: Item) => {
-    let at: Item | undefined = task
-    while (at && !at.due) at = find(items, upOf(at) ?? undefined)
-    return at?.due ?? '9999'
-  }
+  const due = (task: Item) => dueOf(items, task) ?? '9999'
   const isWaiting = (task: Item) => waitingOn(items, task).length > 0
   const free = tasks
     .filter(task => !task.assignee && task.status === 'todo' && !isWaiting(task))
@@ -530,7 +539,7 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
  * the first free todo task that waits on nothing unfinished, as next orders them; never `besides`.
  */
 export function readyIn(items: Item[], unit: Item, actor: string, besides?: string): Item | undefined {
-  const under = new Set(subtree(items, unit.id).filter(id => id !== besides))
+  const under = new Set(tasksIn(items, unit).map(one => one.id).filter(id => id !== besides))
   return nextUp(items, actor).find(
     task => under.has(task.id) && (task.status === 'todo' || task.status === 'in_progress') && !waitingOn(items, task).length,
   )
@@ -541,9 +550,11 @@ export const dateOf = (now: number) => new Date(now).toISOString().slice(0, 10)
 
 /** When an item is due: its own date, else the nearest one above it. */
 export function dueOf(items: Item[], item: Item): string | undefined {
-  let at: Item | undefined = item
-  while (at && !at.due) at = find(items, upOf(at) ?? undefined)
-  return at?.due ?? undefined
+  // Its own date, else its epic's, else the milestone it targets.
+  if (item.due) return item.due
+  const epic = item.kind === 'task' && item.parent ? find(items, item.parent) : undefined
+  if (epic?.due) return epic.due
+  return item.kind === 'milestone' ? undefined : find(items, targetOf(items, item) ?? undefined)?.due ?? undefined
 }
 
 /** Whether an item is past when it was due (its own date or one above it) and not done; never without a clock. */
@@ -759,7 +770,7 @@ export const branchFor = (item: Item) => `${item.id.toLowerCase()}-${slug(item.t
 
 /** A unit's pull request: titled with its id, the body listing what was done and what done meant. */
 export function pullRequest(items: Item[], item: Item): { branch: string; title: string; body: string } {
-  const tasks = item.kind === 'task' ? [item] : subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task')
+  const tasks = item.kind === 'task' ? [item] : tasksIn(items, item)
   const parts: string[] = []
   if (item.description) parts.push(item.description)
   parts.push(

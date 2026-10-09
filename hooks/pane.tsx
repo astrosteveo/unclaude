@@ -4,7 +4,7 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, upOf, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, tasksIn, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -1026,7 +1026,7 @@ export function drawPane(
   const isHandable = status !== 'done' && status !== 'review'
   // A milestone's or epic's tasks that could run at once: todo, and nobody's yet.
   const openUnder = item && item.kind !== 'task'
-    ? subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task' && one.status === 'todo' && !one.assignee).map(one => one.id)
+    ? tasksIn(items, item).filter(one => one.status === 'todo' && !one.assignee).map(one => one.id)
     : []
   // The pull request the item under review ships in, which Approve can merge.
   const reviewPr = isReview && item ? openPrOf(known, item) : undefined

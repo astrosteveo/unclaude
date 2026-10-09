@@ -405,3 +405,15 @@ test('inbox: the tool files what Claude notices, and /roadmap inbox files what t
   assert.equal(query('SELECT count(*) FROM items;'), '0')
   assert.match(await ok({ action: 'next' }), /^Nothing/)
 })
+
+test('a handed milestone holds every task that targets it, in an epic or not', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1' })
+  await ok({ action: 'add', kind: 'task', title: 'Loose', parent: 'M1', priority: 'p0' })
+  await ok({ action: 'add', kind: 'epic', title: 'Auth', parent: 'M1' })
+  await ok({ action: 'add', kind: 'task', title: 'Login', parent: 'E1' })
+  const claimed = await ok({ action: 'claim', id: 'M1' })
+  assert.match(claimed, /T1 is yours/)
+  assert.match(claimed, /T2 /)
+  await ok({ action: 'update', id: 'T1', status: 'done', note: '-' })
+  assert.match(await ok({ action: 'show', id: 'M1' }), /1\/2 tasks/)
+})
