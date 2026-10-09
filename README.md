@@ -50,6 +50,10 @@ node --test tests/sql.integration.mjs  # the generated SQL against a real sqlite
 
 This roadmap was built by working from itself: its own milestones are in this repo's `.claude/roadmap.db` (not committed).
 
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
