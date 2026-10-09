@@ -1,4 +1,4 @@
-import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
+import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
 
 // The person at the board, and the main loop's agent; subagents go by names from agentName.
 export const USER = 'user'
@@ -399,7 +399,7 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
 }
 
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */
-export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number): string | undefined {
+export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number, refs?: Refs): string | undefined {
   if (snap.items.length === 0) return undefined
   const items = snap.items
   const tasks = items.filter(item => item.kind === 'task')
@@ -421,7 +421,18 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   if (stale.length)
     parts.push(`Stale claims (holder silent over ${LEASE_MS / 60_000} min; claiming takes one over):\n` + list(stale))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
-  if (review.length) parts.push("Waiting on the user's review (they approve on the board, or tell you to):\n" + list(review))
+  if (review.length) {
+    // Each with its pull request, or a note that it still needs one.
+    const pr = (item: Item) => {
+      if (!refs) return ''
+      const open = refs.prs.find(one => one.state === 'open' && one.ids.includes(item.id))
+      return open ? ` — PR #${open.number} ${open.url}` : ' — no PR yet'
+    }
+    parts.push(
+      "Waiting on the user's review (they approve on the board, or tell you to):\n" +
+        review.slice(0, 8).map(item => `- ${line(items, item)}${pr(item)}`).join('\n'),
+    )
+  }
   if (news.length)
     parts.push(
       'Changes by the user since you last looked:\n' +
@@ -439,6 +450,34 @@ function slug(text: string, cap: number): string {
 }
 
 /**
+ * What `item` ships in: the milestone or epic it was handed over inside, or the item itself. One unit
+ * of work, one review, one branch and one pull request.
+ */
+export const unitOf = (items: Item[], item: Item): Item => handedScope(items, item) ?? item
+
+/** The branch a unit of work is built on: its id and title, as `e9-agent-coordination`. */
+export const branchFor = (item: Item) => `${item.id.toLowerCase()}-${slug(item.title, 40)}`.replace(/-$/, '')
+
+/** A unit's pull request: titled with its id, the body listing what was done and what done meant. */
+export function pullRequest(items: Item[], item: Item): { branch: string; title: string; body: string } {
+  const tasks = item.kind === 'task' ? [item] : subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task')
+  const parts: string[] = []
+  if (item.description) parts.push(item.description)
+  parts.push(
+    tasks
+      .map(task => {
+        const head = item.kind === 'task' ? '' : `- **${task.id}** ${task.title}\n`
+        const pad = item.kind === 'task' ? '' : '  '
+        return head + task.checklist.map(c => `${pad}- [${c.done ? 'x' : ' '}] ${c.text}`).join('\n')
+      })
+      .join('\n')
+      .trim(),
+  )
+  parts.push(`Tracked on the roadmap as ${item.id}${item.parent ? `, in ${path(items, item)}` : ''}.`)
+  return { branch: branchFor(item), title: `${item.id}: ${item.title}`, body: parts.filter(Boolean).join('\n\n') }
+}
+
+/**
  * A subagent's name on the board, stable for its whole run: a teammate's own name, else its type and
  * task (`explore:find-auth-handlers`). Two agents of one type on one task share it, as they share the work.
  */
@@ -448,9 +487,12 @@ export function agentName(type: string, description: string, teammateId?: string
   return task ? `${slug(type, 24) || 'agent'}:${task}` : slug(type, 24) || 'agent'
 }
 
-/** Task ids a text names, as written in a commit or a PR title: `T12`, `t12`, `[T12]`, `T12:`. */
+/**
+ * Roadmap ids a text names, as written in a commit, a PR title or a branch: `T12`, `[T12]`, `E9:`,
+ * `M4`, `e9-agent-coordination`. A word that only starts like one (`e2e`, `t3a`) is not one.
+ */
 export function idsIn(text: string): string[] {
-  const found = (text.match(/\b[Tt]\d+\b/g) ?? []).map(id => id.toUpperCase())
+  const found = (text.match(/\b[TtEeMm]\d+\b/g) ?? []).map(id => id.toUpperCase())
   return [...new Set(found)]
 }
 
@@ -466,20 +508,44 @@ export function parseGitLog(out: string): Commit[] {
     .filter(commit => commit.ids.length > 0)
 }
 
-/** Pull requests from `gh pr list --json number,title,headRefName,state,url` that name a task id. */
+type CheckEntry = { status?: string; conclusion?: string; state?: string }
+
+/** A rollup of check runs and status contexts as one word: a failure wins, then anything unfinished. */
+export function checksOf(rollup: CheckEntry[] | null | undefined): Checks {
+  const list = rollup ?? []
+  if (list.length === 0) return 'none'
+  const outcome = (one: CheckEntry) => (one.conclusion || one.state || '').toUpperCase()
+  if (list.some(one => ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'].includes(outcome(one)))) return 'fail'
+  if (list.some(one => (one.status && one.status.toUpperCase() !== 'COMPLETED') || ['PENDING', 'EXPECTED', ''].includes(outcome(one)))) return 'pending'
+  return 'pass'
+}
+
+/** Pull requests from `gh pr list --json number,title,headRefName,state,url,statusCheckRollup` that name a roadmap id. */
 export function parsePrs(out: string): Pr[] {
-  const list = JSON.parse(out) as { number: number; title: string; headRefName: string; state: string; url: string }[]
+  const list = JSON.parse(out) as { number: number; title: string; headRefName: string; state: string; url: string; statusCheckRollup?: CheckEntry[] }[]
   return list
-    .map(pr => ({ number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url, ids: idsIn(`${pr.title} ${pr.headRefName}`) }))
+    .map(pr => ({
+      number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
+      ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup),
+    }))
     .filter(pr => pr.ids.length > 0)
 }
 
-/** The commits and pull requests that name `item`, or any task under it. */
+/** The open pull request a unit of work ships in: the one naming the unit itself. */
+export const openPrOf = (refs: Refs, item: Item): Pr | undefined =>
+  refs.prs.find(pr => pr.state === 'open' && pr.ids.includes(item.id))
+
+/**
+ * The commits and pull requests that name `item` or anything under it; and the pull requests of what
+ * it sits in, since a task handed over inside an epic ships in the epic's PR.
+ */
 export function refsFor(items: Item[], refs: Refs, item: Item): Refs {
-  const ids = new Set(subtree(items, item.id).filter(id => id.startsWith('T')))
+  const ids = new Set(subtree(items, item.id))
+  const above = new Set<string>()
+  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined)) above.add(at.id)
   return {
     commits: refs.commits.filter(commit => commit.ids.some(id => ids.has(id))),
-    prs: refs.prs.filter(pr => pr.ids.some(id => ids.has(id))),
+    prs: refs.prs.filter(pr => pr.ids.some(id => ids.has(id) || above.has(id))),
   }
 }
 

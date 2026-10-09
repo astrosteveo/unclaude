@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, brief, checkLinks, handedScope, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -1021,5 +1021,120 @@ test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done
   await ui.press({ key: 'close' })
   await ui.press({ key: 'card-T2' })
   expect(await ui.find({ key: 'hand' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('epic and milestone ids link too: a scope\'s PR shows on it, on what it sits in, and on its tasks', async () => {
+  expect(idsIn('E9: agent coordination (M4), branch e9-agent-coordination; e2e tests, t3a, ME4')).toEqual(['E9', 'M4'])
+  const some = [item('M1'), item('E1', { parent: 'M1' }), item('T1', { parent: 'E1' }), item('T2')]
+  const prs = parsePrs(JSON.stringify([{ number: 9, title: 'E1: Auth', headRefName: 'e1-auth', state: 'OPEN', url: 'https://x/9' }]))
+  const commits = parseGitLog('aaa1111\x1fAda\x1f2026-10-09\x1fE1: wire it up\n\x1e\n')
+  const on = (id: string) => refsFor(some, { commits, prs }, some.find(one => one.id === id)!)
+  expect(on('E1').prs.map(pr => pr.number)).toEqual([9])
+  expect(on('M1').prs.map(pr => pr.number)).toEqual([9])
+  expect(on('T1').prs.map(pr => pr.number)).toEqual([9])
+  expect(on('T1').commits).toEqual([])
+  expect(on('M1').commits.map(c => c.hash)).toEqual(['aaa1111'])
+  expect(on('T2')).toEqual({ commits: [], prs: [] })
+})
+
+test('branch and pull request per unit of work: named from the unit, body from its tasks, asked for at review', async ($, on) => {
+  const some = [
+    item('E1', { title: 'Agent coordination!', assignee: 'claude', description: 'Keep agents apart.' }),
+    item('T1', { parent: 'E1', title: 'Leases', status: 'in_progress', assignee: 'claude', checklist: [{ n: 1, text: 'renews', done: true }] }),
+    item('T2', { title: 'Lone fix', status: 'in_progress', assignee: 'claude', checklist: [{ n: 1, text: 'fixed', done: true }] }),
+  ]
+  expect(unitOf(some, some[1]!).id).toBe('E1')
+  expect(unitOf(some, some[2]!).id).toBe('T2')
+  expect(branchFor(some[0]!)).toBe('e1-agent-coordination')
+  expect(pullRequest(some, some[0]!)).toEqual({
+    branch: 'e1-agent-coordination',
+    title: 'E1: Agent coordination!',
+    body: 'Keep agents apart.\n\n- **T1** Leases\n  - [x] renews\n\nTracked on the roadmap as E1.',
+  })
+  expect(pullRequest(some, some[2]!).body).toBe('- [x] fixed\n\nTracked on the roadmap as T2.')
+  const reviewing = [{ ...some[0]!, status: 'review' as const }, { ...some[1]!, status: 'done' as const }, item('T3', { status: 'review', assignee: 'claude' })]
+  const refs = { commits: [], prs: parsePrs(JSON.stringify([{ number: 4, title: 'E1: Agent coordination', headRefName: 'e1-agent-coordination', state: 'OPEN', url: 'https://x/4' }])) }
+  const text = brief({ items: reviewing, activity: [], seen: {} }, 'claude', [], undefined, refs)!
+  expect(text).toMatch(/E1 .* — PR #4 https:\/\/x\/4/)
+  expect(text).toMatch(/T3 .* — no PR yet/)
+
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    const isClaim = stdin.includes("'assign'") && stdin.includes('lease_at=')
+    return { value: isClaim ? { ...fakeSqlite('', null), stdout: 'claude' } : fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  expect(String((await call({ action: 'claim', id: 'T1' })).result)).toContain("Work on branch e1-agent-coordination (E1's, which this task ships in)")
+  expect(String((await call({ action: 'claim', id: 'T2' })).result)).toContain('Work on branch t2-lone-fix:')
+  const done = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  expect(done).toContain('Now open its pull request')
+  expect(done).toContain('gh pr create --title "T2: Lone fix"')
+  const pr = String((await call({ action: 'pr', id: 'T1' })).result)
+  expect(pr).toContain('Branch: e1-agent-coordination')
+  expect(pr).toContain('Title: E1: Agent coordination!')
+})
+
+test('review with a pull request: checks on the card; Approve offers to merge; changes go on the PR too', async ($, on) => {
+  expect(checksOf([])).toBe('none')
+  expect(checksOf([{ status: 'COMPLETED', conclusion: 'SUCCESS' }, { state: 'SUCCESS' }])).toBe('pass')
+  expect(checksOf([{ status: 'IN_PROGRESS', conclusion: '' }, { status: 'COMPLETED', conclusion: 'SUCCESS' }])).toBe('pending')
+  expect(checksOf([{ status: 'IN_PROGRESS' }, { status: 'COMPLETED', conclusion: 'FAILURE' }])).toBe('fail')
+
+  const some = [item('E1', { assignee: 'claude', status: 'review' }), item('T1', { parent: 'E1', status: 'done' }), item('T2', { status: 'review', assignee: 'claude' })]
+  const ghList = JSON.stringify([
+    { number: 8, title: 'E1: Things', headRefName: 'e1-things', state: 'OPEN', url: 'https://x/8', statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }] },
+  ])
+  const ran: string[][] = []
+  const scripts: string[] = []
+  let mergeExit = 1
+  on('process.run', ($, e) => {
+    ran.push([...e.argv])
+    if (e.argv[0] === 'gh' && e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
+    if (e.argv[0] === 'gh' && e.argv[2] === 'merge') return { value: { ...fakeSqlite('', null), exitCode: mergeExit, stderr: 'not mergeable' } }
+    if (e.argv[0] === 'gh' || e.argv[0] === 'git') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    scripts.push(e.init?.stdin ?? '')
+    return { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('prompt.submit', ($, e) => ({ text: e.text, origin: e.origin }))
+  // `show` asks git and gh afresh, which is how the board learns of the PR here.
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'E1' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'row-E1' })
+  expect(await ui.find({ type: 'Text', text: /✗ checks failing/ })).toBeDefined()
+  const wrote = (needle: string) => scripts.some(one => one.includes(needle))
+  // A merge that fails leaves it in review.
+  await ui.press({ key: 'approve' })
+  expect(wrote("status='done'")).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /Merge PR #8 \(checks: fail\)\?/ })).toBeDefined()
+  await ui.press({ key: 'merge-yes' })
+  expect(ran.some(argv => argv.join(' ') === 'gh pr merge 8 --merge')).toBe(true)
+  expect(wrote("status='done'")).toBe(false)
+  // Merged: approved, with a note saying so.
+  mergeExit = 0
+  await ui.press({ key: 'approve' })
+  await ui.press({ key: 'merge-yes' })
+  expect(wrote('Approved; merged PR #8.')).toBe(true)
+  expect(wrote("status='done'")).toBe(true)
+  // Approve only never merges.
+  const merges = ran.filter(argv => argv[2] === 'merge').length
+  await ui.press({ key: 'approve' })
+  await ui.press({ key: 'merge-no' })
+  expect(ran.filter(argv => argv[2] === 'merge').length).toBe(merges)
+  // Request changes puts the note on the PR too.
+  await ui.press({ key: 'request' })
+  await ui.input({ key: 'changes', text: 'split the migration' } as never)
+  expect(ran.some(argv => argv.join(' ') === 'gh pr comment 8 --body Changes requested: split the migration')).toBe(true)
   await ui.unmount()
 })

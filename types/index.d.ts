@@ -102,13 +102,17 @@ export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: s
 export type Commit = { hash: string; author: string; date: string; subject: string; ids: string[] }
 
 /** A pull request whose title or branch names roadmap ids. */
-export type Pr = { number: number; title: string; state: string; url: string; ids: string[] }
+/** A pull request whose title or branch names roadmap ids; `checks` sums up its CI. */
+export type Pr = { number: number; title: string; state: string; url: string; ids: string[]; checks: Checks }
+
+/** A pull request's checks at a glance: none reported, still running, all passed, or one failed. */
+export type Checks = 'none' | 'pending' | 'pass' | 'fail'
 
 /** What the repository says about the roadmap: commits and pull requests that name items. */
 export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null }
   }
 }
