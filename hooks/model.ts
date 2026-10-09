@@ -815,6 +815,20 @@ export const shouldOfferIgnore = (state: IgnoreState, answer: IgnoreAnswer | und
 
 export const IGNORE_LINE = '.claude/roadmap.db*'
 
+/** `dir` and the folders above it, nearest first: /a/b gives /a/b, /a, /. */
+export function ancestors(dir: string): string[] {
+  const parts = dir.replace(/\/+$/, '').split('/')
+  return parts.map((_, i) => parts.slice(0, parts.length - i).join('/') || '/')
+}
+
+/** Why a write found no roadmap to make here, and where to go instead. */
+export function noRoadmapHere(dir: string, found: string[]): string {
+  const why = `No roadmap here, and none was started: ${dir} is not the top of a git repository, so a new one would be in the wrong place.`
+  if (found.length === 0)
+    return `${why} Start the session in the project's folder (its git top level; git init it first if it has none) and the first write starts its roadmap there.`
+  return `${why} Roadmaps found below it: ${found.join(', ')}. Start the session in the project's folder (cd there and run claude) to use its roadmap.`
+}
+
 /** A .gitignore's text with the database's line appended, on a line of its own. */
 export function withIgnore(text: string | undefined): string {
   const base = text ?? ''

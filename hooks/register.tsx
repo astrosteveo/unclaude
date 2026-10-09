@@ -7,7 +7,7 @@ import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
   agentName, approvalNote, askAbout, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
-  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
+  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere,
 } from './model'
 
 const PANE = 'roadmap'
@@ -53,12 +53,58 @@ const refs = atom({ plugin: 'roadmap', key: 'refs' } as const, { commits: [], pr
 // Why the database cannot be read, shown in the pane in place of the board.
 const problem = atom({ plugin: 'roadmap', key: 'problem' } as const, null as string | null)
 
+/** The session's root. A shell `cd` in the session moves its working directory, never this. */
+const sessionRoot = ($: EngineInterface) => $.session.root().catch(() => '.')
+
 /**
- * The project root, where the roadmap lives. A shell `cd` in the session moves its working directory,
- * never this, so the database, git and gh are always found from here. A host that can't say falls back
- * to the working directory.
+ * Where the roadmap lives, by session root, and whether a roadmap may be started there: the root when it
+ * holds one; else, when the root is inside a git repository, that repository's top level, so a session
+ * started in a subfolder reaches the repository's roadmap; else the root itself, where none may be started.
  */
-const root = ($: EngineInterface) => $.session.root().catch(() => '.')
+let home: { session: string; dir: string; isRepoTop: boolean } | undefined
+
+/**
+ * The project root, where the roadmap lives (see `home`). The database, git and gh are always found from
+ * here. A host that can't say falls back to the working directory.
+ */
+async function root($: EngineInterface): Promise<string> {
+  const session = await sessionRoot($)
+  if (home?.session !== session) home = await homeFor($, session)
+  return home.dir
+}
+
+async function homeFor($: EngineInterface, session: string) {
+  const isThere = (path: string) => $.fs.stat(path).then(() => true, () => false)
+  // The repository's top is the nearest folder up holding .git (a folder, or a worktree's file): asked
+  // of the file system, not git, so a project without a roadmap runs nothing.
+  let top: string | undefined
+  for (const dir of ancestors(session)) if (await isThere(`${dir}/.git`)) {
+    top = dir
+    break
+  }
+  if (top === session) return { session, dir: session, isRepoTop: true }
+  if (top === undefined || (await isThere(`${session}/${db.DB}`))) return { session, dir: session, isRepoTop: false }
+  return { session, dir: top, isRepoTop: true }
+}
+
+/** Roadmaps in the folders one and two levels below `dir`, for a refusal to point at. */
+async function roadmapsBelow($: EngineInterface, dir: string, depth = 2): Promise<string[]> {
+  const subs = (await $.fs.list(dir).catch(() => []))
+    .map(one => one.name)
+    .filter(name => !name.startsWith('.') && name !== 'node_modules')
+    .sort()
+    .slice(0, 200)
+  const found: string[] = []
+  for (const name of subs) {
+    const sub = `${dir}/${name}`
+    if (await $.fs.stat(`${sub}/${db.DB}`).then(() => true, () => false)) found.push(sub)
+    else if (depth > 1) found.push(...(await roadmapsBelow($, sub, depth - 1)))
+  }
+  return found
+}
+
+// Where this load started a new roadmap, said once in the reply to the write that started it.
+let startedAt: string | undefined
 
 /** Runs a command in the project root. */
 const runAt = async ($: EngineInterface, argv: string[], init: { stdin?: string; timeoutMs?: number } = {}) =>
@@ -177,11 +223,17 @@ async function ensureSchema($: EngineInterface) {
 }
 
 async function sql($: EngineInterface, script: string, t: Target = REAL): Promise<string> {
-  if (!hasDir) {
+  if (!hasDir && !(await hasDb($))) {
+    // The first write makes the roadmap, and only where one plainly belongs: a repository's top level.
+    // Asked afresh: a `git init` since the session began makes the root a place for one.
+    home = await homeFor($, await sessionRoot($))
+    const dir = home.dir
+    if (!home.isRepoTop) throw new Error(noRoadmapHere(dir, await roadmapsBelow($, dir)))
     // A folder that cannot be made shows up as sqlite3's own "unable to open database".
     await runAt($, ['mkdir', '-p', '.claude']).catch(() => undefined)
-    hasDir = true
+    startedAt = `${dir}/${db.DB}`
   }
+  hasDir = true
   if (!isSchemaReady) await ensureSchema($)
   // Every write is a transaction of its own, begun so; reads are not kept.
   if (t.writes && script.startsWith('BEGIN')) t.writes.push(script)
@@ -225,8 +277,7 @@ async function ignoreAnswers($: EngineInterface): Promise<Record<string, IgnoreA
 }
 
 async function answerIgnore($: EngineInterface, answer: IgnoreAnswer) {
-  const root = await $.session.root()
-  await $.store.set('gitignore', { ...(await ignoreAnswers($)), [root]: answer })
+  await $.store.set('gitignore', { ...(await ignoreAnswers($)), [await root($)]: answer })
 }
 
 /**
@@ -237,7 +288,7 @@ async function checkIgnore($: EngineInterface) {
   isIgnoreChecked = true
   const ran = await runAt($, ['git', 'check-ignore', '-q', db.DB]).catch(() => undefined)
   if (!ran) return
-  const answer = (await ignoreAnswers($))[await $.session.root()]
+  const answer = (await ignoreAnswers($))[await root($)]
   const isOffered = shouldOfferIgnore(ignoreState(ran.exitCode), answer)
   await update($, ignoreOffer, () => isOffered)
   // Said once per project: after that the offer waits on the board until answered.
@@ -1381,10 +1432,13 @@ export const register: Register = on => {
       if (actor.toLowerCase() === USER) fail(`"${USER}" is the person at the board; act as yourself`)
       // Any call to the tracker is a sign of life for the caller's claims.
       await heartbeat($, actor, true).catch(() => undefined)
+      startedAt = undefined
       const reply = await act($, actor, a, agentId !== undefined)
       if (!agentId && a.action !== 'show' && a.action !== 'next') hasWorkedSinceUpdate = false
       await refresh($)
-      return { result: reply }
+      const started = startedAt
+      startedAt = undefined
+      return { result: started ? `Started a new roadmap at ${started}.\n${reply}` : reply }
     } catch (err) {
       return { deny: err instanceof Error ? err.message : String(err) }
     }

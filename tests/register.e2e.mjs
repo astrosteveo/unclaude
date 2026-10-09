@@ -94,9 +94,9 @@ function engine(root) {
   }
 }
 
-beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), 'roadmap-e2e-'))
-  $ = engine(dir)
+/** Loads the hooks module afresh with the session rooted at `root`, and points `call` at its tool. */
+async function load(root) {
+  $ = engine(root)
   // A fresh load per test: the module keeps state (schema checked, names learned) for its project.
   const { register } = await import(`../hooks/register.tsx?load=${++loads}`)
   const hooks = []
@@ -111,6 +111,15 @@ beforeEach(async () => {
     const reply = await tool($, { tool: TOOL, tool_use_id: 't', ...(agentId ? { agentId } : {}), ...input })
     return reply.deny === undefined ? { ok: true, text: reply.result } : { ok: false, text: reply.deny }
   }
+}
+
+const gitInit = at => (mkdirSync(at, { recursive: true }), execFileSync('git', ['init', '-q', at]))
+
+beforeEach(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'roadmap-e2e-'))
+  // A roadmap is started only at a repository's top level.
+  gitInit(dir)
+  await load(dir)
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
@@ -126,7 +135,7 @@ const ok = async (input, agentId) => {
 }
 
 test('add and plan build the tree; show reads it back', async () => {
-  assert.equal(await ok({ action: 'add', kind: 'milestone', title: 'v1', due: '2026-12-01' }), 'Added M1: v1')
+  assert.equal(await ok({ action: 'add', kind: 'milestone', title: 'v1', due: '2026-12-01' }), `Started a new roadmap at ${dir}/.claude/roadmap.db.\nAdded M1: v1`)
   const planned = await ok({
     action: 'plan', parent: 'M1', tree: [
       { ref: 'auth', kind: 'epic', title: 'Auth', children: [
@@ -208,7 +217,50 @@ test('remove takes a subtree only with cascade; export, then import into an empt
     return chain
   })
   const back = await tool($, { tool: TOOL, tool_use_id: 't', action: 'import', path: 'saved.json' })
-  assert.match(back.result, /^Imported 3 item\(s\)/)
+  assert.match(back.result, /^Started a new roadmap at .*\nImported 3 item\(s\)/)
   assert.equal(everything().split(' | ')[0], 'E1 epic todo - -; T1 task todo E1 -; T2 task todo E1 -')
   assert.equal(query("SELECT body FROM activity WHERE type='comment';"), 'kept')
+})
+
+test('a fresh repository starts its roadmap on the first write, and the reply says where', async () => {
+  const first = await ok({ action: 'add', kind: 'task', title: 'First' })
+  assert.equal(first, `Started a new roadmap at ${dir}/.claude/roadmap.db.\nAdded T1: First`)
+  assert.equal(await ok({ action: 'add', kind: 'task', title: 'Second' }), 'Added T2: Second')
+})
+
+test('a session in a folder holding repositories is refused a new roadmap, and told where the roadmaps are', async () => {
+  rmSync(join(dir, '.git'), { recursive: true, force: true })
+  gitInit(join(dir, 'app'))
+  gitInit(join(dir, 'tools/cli'))
+  gitInit(join(dir, 'empty'))
+  for (const project of ['app', 'tools/cli']) {
+    await load(join(dir, project))
+    await ok({ action: 'add', kind: 'task', title: project })
+  }
+  await load(dir)
+  // Reads find nothing and make nothing.
+  assert.match(await ok({ action: 'next' }), /.*/)
+  const refused = await call({ action: 'add', kind: 'task', title: 'lost' })
+  assert.equal(refused.ok, false)
+  assert.match(refused.text, /is not the top of a git repository/)
+  assert.match(refused.text, new RegExp(`Roadmaps found below it: ${dir}/app, ${dir}/tools/cli\\.`))
+  const batch = await call({ action: 'batch', ops: [{ action: 'add', kind: 'task', title: 'lost' }] })
+  assert.equal(batch.ok, false)
+  assert.equal(existsSync(join(dir, '.claude')), false)
+})
+
+test('a session in a subfolder of a repository writes to the roadmap at its top level', async () => {
+  await ok({ action: 'add', kind: 'task', title: 'At the top' })
+  mkdirSync(join(dir, 'src/deep'), { recursive: true })
+  await load(join(dir, 'src/deep'))
+  assert.equal(await ok({ action: 'add', kind: 'task', title: 'From below' }), 'Added T2: From below')
+  assert.equal(existsSync(join(dir, 'src/deep/.claude')), false)
+  assert.equal(query("SELECT group_concat(title, '|') FROM (SELECT title FROM items ORDER BY id);"), 'At the top|From below')
+})
+
+test('a subfolder of a fresh repository starts the roadmap at the top, never in the subfolder', async () => {
+  mkdirSync(join(dir, 'sub'))
+  await load(join(dir, 'sub'))
+  assert.match(await ok({ action: 'add', kind: 'task', title: 'x' }), new RegExp(`^Started a new roadmap at ${dir}/\\.claude/roadmap\\.db\\.`))
+  assert.equal(existsSync(join(dir, 'sub/.claude')), false)
 })

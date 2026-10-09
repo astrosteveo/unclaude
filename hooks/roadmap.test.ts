@@ -5,11 +5,12 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
+/** A fresh git repository with no roadmap in it yet. */
 const noRoadmap = (on: On, ran: string[][]) => {
-  on('fs.stat', () => ({ deny: 'ENOENT' }) as never)
+  on('fs.stat', ($, e) => (e.path.endsWith('/.git') ? { value: { size: 1, mtimeMs: 1 } } : { deny: 'ENOENT' }) as never)
   on('process.run', ($, e) => (ran.push([...e.argv]), { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }))
 }
 
@@ -161,7 +162,7 @@ test('the roadmap is found from the project root, wherever a shell cd took the s
   // sqlite3, mkdir, git and gh all run in the root; the database is looked for there too.
   expect(cwds.length).toBeGreaterThan(2)
   expect(cwds.every(cwd => cwd === '/work/project')).toBe(true)
-  expect(stats.every(path => path.startsWith('/work/project/.claude/roadmap.db'))).toBe(true)
+  expect(stats.every(path => path === '/work/project/.git' || path.startsWith('/work/project/.claude/roadmap.db'))).toBe(true)
 
   // A read that finds no database must not make the next brief replay what was already seen.
   await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'composer' } })
@@ -511,6 +512,13 @@ for (const [label, exitCode, isOffered] of [['not ignored', 1, true], ['ignored'
     await ui.unmount()
   })
 }
+
+test('a roadmap is started only at a repository top; a refusal points at the roadmaps below', () => {
+  expect(ancestors('/home/me/Projects/')).toEqual(['/home/me/Projects', '/home/me', '/home', '/'])
+  expect(ancestors('/')).toEqual(['/'])
+  expect(noRoadmapHere('/p', ['/p/a', '/p/b/c'])).toContain('Roadmaps found below it: /p/a, /p/b/c. Start the session in the project')
+  expect(noRoadmapHere('/p', [])).toContain('git init it first')
+})
 
 test('a project without a roadmap gets no database, no sqlite3 and no git until the first write', async ($, on) => {
   const ran: string[][] = []
