@@ -1,10 +1,18 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import type { On } from 'claude-code'
+
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
 import { agentName, brief, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
+/** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
+const noRoadmap = (on: On, ran: string[][]) => {
+  on('fs.stat', () => ({ deny: 'ENOENT' }) as never)
+  on('process.run', ($, e) => (ran.push([...e.argv]), { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }))
+}
+
 const fakeSqlite = (stdin: string | undefined, snap: unknown) => ({
   exitCode: 0,
   stdout: stdin?.trim() === 'PRAGMA user_version;' ? String(VERSION) : JSON.stringify(snap),
@@ -72,6 +80,7 @@ test('SQL literals cannot break out or start a dot-command', async () => {
 
 test('a missing sqlite3 is named, with how to install it', async ($, on) => {
   on('process.run', () => ({ deny: 'spawn sqlite3 ENOENT' }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const ran = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
   expect(ran.deny).toContain('sqlite3 is not installed or not on PATH')
   expect(ran.deny).toContain('pacman -S sqlite')
@@ -111,6 +120,7 @@ test('the board draws on terminal and desktop, and a card opens and closes from 
   }
   // sqlite3 answers the schema version when asked, the snapshot otherwise; writes are ignored.
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('ui.focus', () => ({}))
   await $.command.run({ command: 'roadmap', args: '' } as never)
@@ -172,6 +182,7 @@ test("the band shows the agents' current task, and pressing it opens that task o
   ]
   const snap = { items: working, activity: [], seen: {} }
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const opened: string[] = []
   on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true } }) as never)
   on('ui.focus', () => ({}))
@@ -217,6 +228,7 @@ test('the detail bar sits right under the title on every card, short or long, ta
   })
   const snap = { items: [...items, long], activity: [], seen: {} }
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('ui.focus', () => ({}))
   await $.command.run({ command: 'roadmap', args: '' } as never)
@@ -259,6 +271,7 @@ test('a card reads as labelled sections, and a tall one scrolls under its fixed 
   ]
   const snap = { items: [...items, long], activity, seen: {} }
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('ui.focus', () => ({}))
   await $.command.run({ command: 'roadmap', args: '' } as never)
@@ -346,3 +359,34 @@ for (const [label, exitCode, isOffered] of [['not ignored', 1, true], ['ignored'
     await ui.unmount()
   })
 }
+
+test('a project without a roadmap gets no database, no sqlite3 and no git until the first write', async ($, on) => {
+  const ran: string[][] = []
+  noRoadmap(on, ran)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  let seen: readonly string[] | undefined = ['unset']
+  on('prompt.submit', ($, e) => ((seen = e.context), { text: e.text, origin: e.origin }))
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const shown = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show' } as never)
+  expect(shown.result).toBe('The roadmap is empty.')
+  // Nothing ran: no mkdir, no sqlite3, no git log, no gh; and the brief stayed out of the prompt.
+  expect(ran).toEqual([])
+  expect(seen).toBeUndefined()
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock' } as never,
+  })
+  expect(await ui.find({ type: 'Text', text: /No roadmap yet/ })).toBeDefined()
+  await ui.unmount()
+  // The first write makes the folder and the database.
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'add', kind: 'task', title: 'first' } as never)
+  expect(ran.some(argv => argv[0] === 'mkdir')).toBe(true)
+  expect(ran.some(argv => argv[0] === 'sqlite3')).toBe(true)
+})

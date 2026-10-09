@@ -136,8 +136,18 @@ async function sql($: EngineInterface, script: string): Promise<string> {
   return run($, script)
 }
 
+/** Whether the project has a roadmap yet. Reads never make one: the database is created by the first write. */
+const hasDb = ($: EngineInterface) => $.fs.stat(db.DB).then(() => true, () => false)
+
 async function refresh($: EngineInterface): Promise<Snapshot> {
   try {
+    if (!(await hasDb($))) {
+      // Dormant: a project that never used the roadmap gets no file, no folder and no sqlite3.
+      const empty = emptySnapshot()
+      await update($, snapshot, () => empty)
+      await update($, problem, () => null)
+      return empty
+    }
     const snap = db.parseLoad(await sql($, db.load(USER)))
     await update($, snapshot, () => snap)
     await update($, problem, () => null)
@@ -201,7 +211,9 @@ async function poll($: EngineInterface) {
     isSchemaReady = false
     await refresh($)
   }
-  if (!isIgnoreChecked && stamps[0] !== '-') await checkIgnore($)
+  // Without a roadmap there is nothing to link commits to, so git and gh aren't asked.
+  if (stamps[0] === '-') return
+  if (!isIgnoreChecked) await checkIgnore($)
   await refreshRefs($)
 }
 
