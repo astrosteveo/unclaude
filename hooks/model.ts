@@ -489,6 +489,35 @@ export const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) -
  * The timeline: milestones (and epics under none) by due date, soonest first and undated last, each
  * milestone followed by its epics in the same order.
  */
+/** Open work first, then what is done, each in the order `list` gives. */
+export const openFirst = (items: Item[], list: Item[]): Item[] => [
+  ...list.filter(one => statusOf(items, one) !== 'done'),
+  ...list.filter(one => statusOf(items, one) === 'done'),
+]
+
+/** The tree's rows: open work first at every level, and none under an item `isFolded` says is folded. */
+export function treeRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
+  const out: { item: Item; depth: number }[] = []
+  const walk = (parent: string | null, depth: number) => {
+    for (const item of openFirst(items, childrenOf(items, parent).sort(byId))) {
+      out.push({ item, depth })
+      if (!isFolded(item)) walk(item.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return out
+}
+
+/** The timeline's rows: `timelineOf`'s, open work first, a milestone's epics left out while it is folded. */
+export function timelineRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
+  const all = timelineOf(items)
+  const tops = openFirst(items, all.filter(one => !find(items, one.parent ?? undefined)))
+  return tops.flatMap(top => [
+    { item: top, depth: 0 },
+    ...(isFolded(top) ? [] : openFirst(items, all.filter(one => one.parent === top.id)).map(item => ({ item, depth: 1 }))),
+  ])
+}
+
 export function timelineOf(items: Item[]): Item[] {
   const byDue = (list: Item[]) => [...list].sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999') || byId(a, b))
   const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, one.parent ?? undefined)))

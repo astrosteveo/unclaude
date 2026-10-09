@@ -1,0 +1,296 @@
+import { expect, test } from 'claude-code/testing'
+
+import type { Activity, Item, Snapshot } from '../types'
+import { VERSION } from './db'
+import { paintPane } from './paint'
+import { columnWidths, fitHints, progressBar } from './pane'
+
+// Layout at the sizes people use: every view, with and without a card docked under it, drawn at narrow
+// and wide widths and short and tall heights, then laid out by `paint` and checked for what doesn't fit.
+
+const WIDTHS = [60, 84, 120, 180]
+const HEIGHTS = [30, 50]
+// Set to, say, 'board 120x30' to see that drawing (in the failure) while working on the layout.
+const SHOW = ''
+
+const item = (id: string, over: Partial<Item> = {}): Item => ({
+  id, kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task', title: `${id} title`, status: 'todo', parent: null,
+  description: null, assignee: null, due: null, priority: 'p2', type: 'feature', note: null, section: null, lease_at: null,
+  labels: [], relations: [], blocked_by: [], checklist: [], created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
+  ...over,
+})
+
+const WORDS = 'Make the board read cleanly when a long title meets a narrow column and the assignee is a subagent'.split(' ')
+const titled = (n: number) => WORDS.slice(0, 3 + (n * 7) % (WORDS.length - 3)).join(' ')
+
+/** A roadmap of the size a project reaches: three milestones, epics, dozens of done tasks, long names. */
+export function bigRoadmap(): Snapshot {
+  const items: Item[] = [
+    item('M1', { title: 'v0.2 Agent collaboration core', due: '2026-10-01' }),
+    item('M2', { title: 'v0.3 Planning power with a much longer milestone name than usual', due: '2026-11-20' }),
+    item('M3', { title: 'v1.0' }),
+    item('E1', { parent: 'M1', title: 'Core tracker' }),
+    item('E2', { parent: 'M2', title: 'Dependencies and the things that wait on them', due: '2026-11-01' }),
+    item('E3', { parent: 'M3', title: 'Polish', assignee: 'claude' }),
+  ]
+  const statuses = ['done', 'done', 'done', 'todo', 'in_progress', 'review', 'blocked', 'done', 'todo', 'done'] as const
+  const assignees = [null, 'claude', 'user', 'general-purpose-implement-the-login-and-session-flow', 'claude']
+  for (let n = 1; n <= 60; n++) {
+    const status = statuses[n % statuses.length]!
+    items.push(item(`T${n}`, {
+      parent: ['E1', 'E2', 'E3', 'M2', null][n % 5] ?? null,
+      title: titled(n),
+      status,
+      assignee: status === 'todo' && n % 3 ? null : assignees[n % assignees.length] ?? null,
+      priority: (['p0', 'p1', 'p2', 'p3'] as const)[n % 4]!,
+      type: (['feature', 'bug', 'chore'] as const)[n % 3]!,
+      labels: n % 4 === 0 ? ['ui', 'storage'] : [],
+      checklist: n % 2 ? [1, 2, 3].map(k => ({ n: k, text: `criterion ${k} for ${titled(n + k)}`, done: k <= n % 4 })) : [],
+      description: n % 3 ? null : `${titled(n)}. `.repeat(4),
+      updated_at: `2026-10-0${1 + (n % 9)}T10:00:00Z`,
+    }))
+  }
+  const activity: Activity[] = items.slice(6, 20).map((one, i) => ({
+    id: i + 1, item_id: one.id, author: i % 2 ? 'user' : 'claude', type: 'comment', body: `${titled(i)}, and a second sentence to wrap.`, at: '2026-10-09T10:00:00Z',
+  }))
+  return { items, activity, seen: {} }
+}
+
+const fake = (stdin: string | undefined, snap: Snapshot) => {
+  const input = stdin ?? ''
+  const one = /FROM \(SELECT \* FROM activity WHERE item_id='([^']*)'/.exec(input)?.[1]
+  const answer = input.trim() === 'PRAGMA user_version;'
+    ? VERSION
+    : one !== undefined
+      ? snap.activity.filter(entry => entry.item_id === one)
+      : input.includes("type IN ('comment', 'handoff')") ? {} : snap
+  return { exitCode: 0, stdout: typeof answer === 'number' ? String(answer) : JSON.stringify(answer), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+}
+
+/** Each view: the tab that shows it, and the key of a row that opens a card from it. */
+const VIEWS = [
+  ['board', 'tab-board', 'card-T5'],
+  ['tree', 'tab-tree', 'row-T5'],
+  ['backlog', 'tab-backlog', 'row-T8'],
+  ['timeline', 'tab-timeline', 'time-E2'],
+] as const
+
+test('every view fits the pane at narrow and wide widths, with and without a docked card', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const found: string[] = []
+  for (const width of WIDTHS)
+    for (const height of HEIGHTS) {
+      const ui = await $.ui.mount({
+        plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+        props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: height } } as never,
+      })
+      for (const [view, tab, row] of VIEWS) {
+        await ui.press({ key: tab })
+        const plain = paintPane(await ui.drawn(), width)
+        if (SHOW === `${view} ${width}x${height}`) found.push(...plain.lines.map(line => `|${line}`))
+        for (const problem of plain.problems) found.push(`${view} ${width}x${height}: ${problem}`)
+        if (!(await ui.find({ key: row }))) {
+          found.push(`${view} ${width}x${height}: no ${row} to open`)
+          continue
+        }
+        await ui.press({ key: row })
+        const docked = paintPane(await ui.drawn(), width)
+        for (const problem of docked.problems) found.push(`${view} + card ${width}x${height}: ${problem}`)
+        await ui.press({ key: 'close' })
+      }
+      await ui.unmount()
+    }
+  expect(found).toEqual([])
+})
+
+test('side by side, an empty column takes its heading and the columns with cards share the rest', () => {
+  const widths = columnWidths({ todo: 0, in_progress: 15, blocked: 11, review: 0, done: 0 }, 120, 2)
+  expect(widths).toEqual({ todo: 28, in_progress: 15, blocked: 11, review: 28, done: 28 })
+  expect(Object.values(widths).reduce((sum, one) => sum + one, 0) + 8).toBeLessThanOrEqual(120)
+})
+
+test('wide board cards: one line where all fit, else a title line and a details line for every card of the column', async ($, on) => {
+  const snap = bigRoadmap()
+  // Two short tasks in progress fit on one line; Done holds long titles, so all its cards take two.
+  snap.items = snap.items.filter(one => one.kind !== 'task' || one.status === 'done')
+  snap.items.push(item('T90', { status: 'in_progress', title: 'Short' }), item('T91', { status: 'in_progress', title: 'Tiny', assignee: 'claude' }))
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  expect(problems).toEqual([])
+  const heads = lines.find(line => line.includes('○ Todo 0'))!
+  // Empty Todo, Blocked and Review keep to their headings; In progress and Done share the rest.
+  expect(heads.indexOf('◐ In progress')).toBeLessThan(20)
+  expect(heads.indexOf('● Done') - heads.indexOf('◐ In progress')).toBeGreaterThan(40)
+  const at = heads.indexOf('p: ◐ In progress')
+  const progress = lines.slice(lines.indexOf(heads) + 2).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
+  expect(progress.slice(0, 2)).toEqual(['T90 Short', 'T91 Tiny @claude'])
+  const done = lines.slice(lines.indexOf(heads) + 2, lines.indexOf(heads) + 6).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
+  expect(done[0]).toMatch(/^T\d+ Make the board/)
+  expect(done[1]).not.toMatch(/^T\d+/)
+  expect(done[2]).toMatch(/^T\d+ Make the board/)
+  // The open card's id stands out.
+  await ui.press({ key: 'card-T90' })
+  const open = await ui.find({ key: 'card-T90' })
+  expect(JSON.stringify(open)).toContain('"inverse":true')
+  await ui.unmount()
+})
+
+test('narrow board: empty columns fold into one line, and every row puts its details in the same slots', async ($, on) => {
+  const snap = bigRoadmap()
+  snap.items = snap.items.filter(one => one.kind !== 'task' || one.status === 'done' || one.status === 'todo')
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } as never,
+  })
+  const { lines, problems } = paintPane(await ui.drawn(), 84)
+  expect(problems).toEqual([])
+  // One line for the empty columns (Review holds a handed epic), each heading still a button with its jump key.
+  expect(lines.filter(line => /In progress 0/.test(line))).toEqual(['p: ◐ In progress 0 · b: ✗ Blocked 0'])
+  for (const status of ['in_progress', 'blocked']) expect((await ui.find({ key: `col-${status}-head` }))?.props.hotkey).toBeDefined()
+  // Rows line up: each card's checklist sits in the same column, under Todo and Done alike.
+  const ticks = lines.filter(line => /^[TE]\d+ /.test(line) && line.includes('☑')).map(line => line.indexOf('☑'))
+  expect(ticks.length).toBeGreaterThan(5)
+  expect(new Set(ticks).size).toBe(1)
+  // One blank row between each of the four blocks (the folded line, Todo, Review, Done), none for the empty ones.
+  expect(lines.filter(line => line.trim() === '').length).toBe(3)
+  await ui.unmount()
+})
+
+test('Done shows the last week\'s work, a few at least; the rest open from its heading, narrow and wide alike', async ($, on) => {
+  const snap = bigRoadmap()
+  // Thirty done tasks, two of them finished this week.
+  for (const one of snap.items) if (one.status === 'done') one.updated_at = '2026-09-01T10:00:00Z'
+  snap.items.find(one => one.id === 'T1')!.updated_at = '2026-10-08T10:00:00Z'
+  snap.items.find(one => one.id === 'T2')!.updated_at = '2026-10-09T09:00:00Z'
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of [84, 140]) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } as never,
+    })
+    const doneCards = async () => (await ui.findAll({ type: 'Button' })).filter(one => /^card-T\d+$/.test(String(one.key)) && snap.items.find(i => i.id === String(one.key).slice(5))?.status === 'done')
+    // The two of this week and one more: at least three.
+    expect((await doneCards()).map(one => one.key)).toEqual(['card-T2', 'card-T1', expect.stringMatching(/^card-T/)])
+    expect(await ui.find({ type: 'Text', text: '…27 older' })).toBeDefined()
+    // Opened, Done takes the rows the pane has left: some narrow, where the columns stack, more side by side.
+    await ui.press({ key: 'done-toggle' })
+    expect((await doneCards()).length).toBeGreaterThan(width > 100 ? 20 : 5)
+    expect(paintPane(await ui.drawn(), width).problems).toEqual([])
+    expect(await ui.find({ type: 'Text', text: '· recent only' })).toBeDefined()
+    await ui.press({ key: 'done-toggle' })
+    expect((await doneCards()).length).toBe(3)
+    await ui.unmount()
+  }
+})
+
+test('the header: views as tabs, a progress bar, actions apart; one row wide, two at 84; hints whole, least useful dropped', async ($, on) => {
+  expect(progressBar(3, 4, 8)).toEqual({ done: '██████', left: '░░' })
+  expect(progressBar(0, 0, 8)).toEqual({ done: '', left: '░░░░░░░░' })
+  const hints = ['Enter opens', 'Tab/↑↓ move', 'v tree', 't p b r d jump to a column', 'n new', 'f filter']
+  expect(fitHints(hints, 200, 1)).toEqual(hints)
+  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v tree'])
+  expect(fitHints(hints, 40, 2)).toEqual(hints.slice(0, 5))
+
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const [width, rows] of [[84, 2], [140, 1]] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+    })
+    const { lines } = paintPane(await ui.drawn(), width)
+    const top = lines.findIndex(line => /Todo \d+/.test(line))
+    expect(top).toBe(rows)
+    expect(lines[0]).toMatch(/Board +v: +Tree +Backlog +Timeline +█+░* 30\/60 done +● 7 unread/)
+    expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
+    // The view showing is the tab drawn inverse.
+    expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
+    // Hints break between hints: every footer line starts a hint.
+    const footer = lines.slice(lines.findIndex(line => line.startsWith('Enter opens')))
+    expect(footer.length).toBeLessThanOrEqual(width >= 100 ? 1 : 2)
+    for (const line of footer) expect(hints.some(hint => line.startsWith(hint))).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('tree and timeline: open work first, finished scopes folded to a line, a toggle (Tab to it, Enter) opens them', async ($, on) => {
+  const items = [
+    item('M1', { title: 'Shipped', due: '2026-09-01' }), item('E1', { parent: 'M1', title: 'Old epic' }),
+    item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'done' }),
+    item('M2', { title: 'Going', due: '2026-12-01' }), item('E2', { parent: 'M2', title: 'Current' }),
+    item('T3', { parent: 'E2', status: 'done' }), item('T4', { parent: 'E2', status: 'in_progress' }),
+    item('M3', { title: 'Undated' }), item('E3', { parent: 'M3' }), item('T5', { parent: 'E3' }),
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  const rowsOf = async (prefix: string) =>
+    (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
+  await ui.press({ key: 'tab-tree' })
+  // Open milestones lead, done tasks after open ones; finished M1 is one line, its epic and tasks folded away.
+  expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1'])
+  expect((await ui.find({ key: 'fold-M1' }))?.text).toBe('▸')
+  // Opened, M1 shows its finished epic, itself folded until opened.
+  await ui.press({ key: 'fold-M1' })
+  expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1', 'E1'])
+  await ui.press({ key: 'fold-E1' })
+  expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1', 'E1', 'T1', 'T2'])
+  // An open one folds too.
+  await ui.press({ key: 'fold-M2' })
+  expect(await rowsOf('row-')).toEqual(['M2', 'M3', 'E3', 'T5', 'M1', 'E1', 'T1', 'T2'])
+  await ui.press({ key: 'fold-M2' })
+  await ui.press({ key: 'fold-M1' })
+
+  // A card open on work inside a folded scope unfolds what holds it.
+  await ui.press({ key: 'tab-board' })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'tab-tree' })
+  expect(await rowsOf('row-')).toContain('T1')
+  await ui.press({ key: 'close' })
+
+  await ui.press({ key: 'tab-timeline' })
+  expect(await rowsOf('time-')).toEqual(['M2', 'E2', 'M3', 'E3', 'M1'])
+  // Only milestones fold here, where epics have no rows under them.
+  expect(await ui.find({ key: 'fold-E2', type: 'Button' })).toBeUndefined()
+  await ui.press({ key: 'fold-M1' })
+  expect(await rowsOf('time-')).toEqual(['M2', 'E2', 'M3', 'E3', 'M1', 'E1'])
+  // Bars and counts line up; an undated milestone shows a dash, not words.
+  const { lines } = paintPane(await ui.drawn(), 84)
+  const rows = lines.filter(line => /[▓░]/.test(line) && !line.includes('done'))
+  expect(new Set(rows.map(line => line.search(/[▓░]/))).size).toBe(1)
+  expect(rows.find(line => line.includes('M3 Undated'))).toMatch(/M3 Undated +— +░/)
+  await ui.unmount()
+})

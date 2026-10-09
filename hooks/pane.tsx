@@ -3,8 +3,8 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, timelineOf, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn,
+  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
+  subtree, waitingOn, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -41,8 +41,9 @@ export function columnCaps(heights: Record<Status, number[]>, budget: number, is
       caps[status] = total(heights[status]) <= budget - 1 ? heights[status].length : fit(heights[status], Math.max(0, budget - 2)).n
     return caps
   }
-  // Each column's heading, and a row kept for each non-empty one's "… more" in case it is cut.
-  let left = budget - STATUSES.length - STATUSES.filter(status => heights[status].length > 0).length
+  // Each non-empty column's heading and a row for its "… more" in case it is cut; the empty ones share a line.
+  const filled = STATUSES.filter(status => heights[status].length > 0).length
+  let left = budget - 2 * filled - (filled < STATUSES.length ? 1 : 0)
   for (const status of ['in_progress', 'review', 'blocked', 'todo', 'done'] as Status[]) {
     const { n, used } = fit(heights[status], Math.max(0, left))
     caps[status] = n
@@ -51,6 +52,62 @@ export function columnCaps(heights: Record<Status, number[]>, budget: number, is
   }
   return caps
 }
+
+// Done shows the tasks finished in the last RECENT_DAYS, at least DONE_MIN and at most DONE_MAX of them.
+const RECENT_DAYS = 7
+const DONE_MIN = 3
+const DONE_MAX = 8
+// Rows of the pane that aren't the board's: the header, the footer and a spare.
+const BOARD_CHROME = 5
+
+// The cells of the header's progress bar.
+const PROGRESS_BAR = 8
+
+/** A bar of `cells` cells, filled for `done` of `total`: the filled part and the rest. */
+export function progressBar(done: number, total: number, cells: number): { done: string; left: string } {
+  const filled = total > 0 ? Math.round((done / total) * cells) : 0
+  return { done: '█'.repeat(filled), left: '░'.repeat(cells - filled) }
+}
+
+/** The first of `hints` that fit in `rows` rows of `width`, each whole and joined by " · ". */
+export function fitHints(hints: string[], width: number, rows: number): string[] {
+  for (let n = hints.length; n > 1; n--) {
+    let lines = 1
+    let used = 0
+    for (const [i, hint] of hints.slice(0, n).entries()) {
+      const w = hint.length + (i < n - 1 ? 2 : 0)
+      if (used > 0 && used + 1 + w > width) (lines++, (used = w))
+      else used += (used > 0 ? 1 : 0) + w
+    }
+    if (lines <= rows) return hints.slice(0, n)
+  }
+  return hints.slice(0, 1)
+}
+
+// The space between board columns side by side.
+const COLUMN_GAP = 2
+
+/**
+ * The width of each board column side by side in `width`: a column with a fixed width (`fixed`, 0 for
+ * none: an empty column's heading) takes that, and the others share what is left evenly.
+ */
+export function columnWidths(fixed: Record<Status, number>, width: number, gap: number): Record<Status, number> {
+  const free = STATUSES.filter(status => fixed[status] === 0)
+  const taken = STATUSES.reduce((sum, status) => sum + fixed[status], 0) + gap * (STATUSES.length - 1)
+  const share = free.length ? Math.floor((width - taken) / free.length) : 0
+  return Object.fromEntries(STATUSES.map(status => [status, fixed[status] || share])) as Record<Status, number>
+}
+
+/** The first of `list` whose rows (`heights`, one each) fit in `room`. */
+export function fitRows<T>(list: T[], heights: number[], room: number): T[] {
+  let used = 0
+  let n = 0
+  while (n < list.length && used + heights[n]! <= room) used += heights[n++]!
+  return list.slice(0, Math.max(1, n))
+}
+
+// A backlog row's picker, priority and hand-off beside its title, with the gaps between them.
+const BACKLOG_EDGES = 1 + 5 + 12 + 3
 
 /** The rows `text` takes wrapped at word boundaries to `width` columns, as the terminal draws it. */
 export function rowsOf(text: string, width: number): number {
@@ -89,6 +146,10 @@ export type PaneState = {
   filter: string
   /** Whether the filter's field is open. */
   isFiltering: boolean
+  /** Whether the board's Done column shows all done work, not just the recent. */
+  isDoneOpen: boolean
+  /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
+  flipped: string[]
   /** The new-item form, while it is open. */
   draft: Draft | null
   /** Whether the open card shows its fields for editing. */
@@ -135,6 +196,9 @@ export type PaneActions = {
   setRequesting: (isOn: boolean) => void
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
+  setDoneOpen: (isOn: boolean) => void
+  /** Folds or unfolds a milestone or epic in the tree and the timeline. */
+  toggleFold: (id: string) => void
   /** Opens the new-item form (under `parent` when given), changes its choices, or closes it (null). */
   setDraft: (draft: Draft | null) => void
   create: (draft: Draft, title: string) => void
@@ -198,7 +262,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -228,56 +292,118 @@ export function drawPane(
     return count ? ` ● ${count}` : ''
   }
 
-  // What a card says, cut to fit `room` columns where it can be.
-  const cardBits = (item: Item, room: number) => {
-    const fullWho = item.assignee ? ` @${item.assignee}` : ''
-    const stale = isStale(item, now) ? ' ⌛stale' : ''
-    // Past when it was due, its own date or one above it.
-    const late = isLate(items, item, now) ? ' ⚠late' : ''
-    const news = badge(item)
-    const waits = waitingOn(items, item).map(one => one.id)
-    const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
+  /**
+   * How a card is laid out in `room` columns: on one line when it all fits, the details right-aligned in
+   * the stacked board; else, in a board column, the title on one line and the details under it (every card
+   * of a column so, `isSplit`, when any needs it, so they line up); else, in the stacked board, one line
+   * with the title cut. Only the title and a long name are ever cut.
+   */
+  // What a card says beside its title, each piece led by a space.
+  const piecesOf = (item: Item) => {
     const list = item.checklist ?? []
     const part = item.kind === 'task' ? undefined : progress(items, item)
-    const ticks = part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
     const tags = marks(item)
-    const tag = tags.length ? ` ${tags.join(' ')}` : ''
+    const waits = waitingOn(items, item).map(one => one.id)
     // Work in review shows the pull request an Approve would merge.
     const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
-    const prTag = pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : ''
-    const marked = item.id.length + stale.length + late.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
-    // A readable title comes first: a long name (a parallel task's agent) is cut short to make room for it.
-    const whoRoom = Math.max(8, room - marked - 12)
-    const who = fullWho.length > whoRoom ? `${fullWho.slice(0, whoRoom - 1)}…` : fullWho
-    const extra = marked + who.length
-    const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
-    return { title, tag, ticks, pr, prTag, wait, who, stale, late, news }
+    return {
+      pr,
+      tag: tags.length ? ` ${tags.join(' ')}` : '',
+      ticks: part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
+      prTag: pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : '',
+      wait: waits.length ? ` ⧗${waits.join(',')}` : '',
+      who: item.assignee ? ` @${item.assignee}` : '',
+      stale: isStale(item, now) ? ' ⌛stale' : '',
+      // Past when it was due, its own date or one above it.
+      late: isLate(items, item, now) ? ' ⚠late' : '',
+      news: badge(item),
+    }
   }
-  /** The rows a card takes in a column `width` wide: a narrow one wraps it. */
-  const cardRows = (item: Item, room: number, width: number) => {
-    const { title, tag, ticks, prTag, wait, who, stale, late, news } = cardBits(item, room)
-    return rowsOf(`${item.id} ${title}${tag}${ticks}${prTag}${wait}${who}${stale}${late}${news}`, width)
+  type Slots = Record<Exclude<keyof ReturnType<typeof piecesOf>, 'pr'> | 'id', number>
+  const SLOT_KEYS = ['tag', 'ticks', 'prTag', 'wait', 'who', 'stale', 'late', 'news'] as const
+  // A name is given at most this much of a stacked row's slots; a longer one is cut.
+  const WHO_SLOT = 19
+  /** The width of each piece's slot over `list`: the widest of each, so stacked rows line them up. */
+  const slotsOf = (list: Item[]): Slots => {
+    const slots = Object.fromEntries([...SLOT_KEYS, 'id'].map(key => [key, 0])) as Slots
+    for (const one of list) {
+      slots.id = Math.max(slots.id, one.id.length)
+      const pieces = piecesOf(one)
+      for (const key of SLOT_KEYS) slots[key] = Math.max(slots[key], key === 'who' ? Math.min(WHO_SLOT, pieces.who.length) : pieces[key].length)
+    }
+    return slots
   }
-  const card = (item: Item, room: number) => {
-    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news } = cardBits(item, room)
+
+  /**
+   * How a card is laid out in `room` columns. Stacked, given `slots`, on one line: the title, then each
+   * piece in its slot so the rows line up. Else on one line when it all fits; else, in a board column, the
+   * title on one line and the details under it (every card of a column so, `isSplit`, when any needs it, so
+   * they line up); else one line with the title cut. Only the title and a long name are ever cut.
+   */
+  const cardLayout = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
+    const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, news } = piecesOf(item)
+    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + news.length
+    const head = item.id.length + 1
+    const cutWho = (whoRoom: number) => (fullWho.length <= whoRoom ? fullWho : whoRoom >= 5 ? `${fullWho.slice(0, whoRoom - 1)}…` : '')
+    const cutTitle = (titleRoom: number) => (item.title.length <= titleRoom ? item.title : `${item.title.slice(0, Math.max(1, titleRoom - 1))}…`)
+    const bits = { tag, ticks, pr, prTag, wait, stale, late, news }
+    const slotted = slots ? SLOT_KEYS.reduce((sum, key) => sum + slots[key], 0) : 0
+    if (isStacked && slots && room - slots.id - 1 - slotted >= 16) {
+      const fit = (text: string, key: keyof Slots) => (text.length > slots[key] ? `${text.slice(0, slots[key] - 1)}…` : text).padEnd(slots[key])
+      const lead = slots.id + 1
+      const title = cutTitle(room - lead - slotted)
+      return {
+        id: item.id.padEnd(slots.id), tag: fit(tag, 'tag'), ticks: fit(ticks, 'ticks'), pr, prTag: fit(prTag, 'prTag'), wait: fit(wait, 'wait'), who: fit(fullWho, 'who'),
+        stale: fit(stale, 'stale'), late: fit(late, 'late'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
+      }
+    }
+    if (!isSplit && head + item.title.length + others + fullWho.length <= room) {
+      const pad = isStacked ? room - head - item.title.length - others - fullWho.length : 0
+      return { ...bits, title: item.title, who: fullWho, pad, rows: 1 }
+    }
+    if (isStacked) {
+      // A readable title comes first: a long name is cut short to make room for it.
+      const who = cutWho(Math.max(0, Math.min(18, room - head - others - 24)))
+      const title = cutTitle(room - head - others - who.length)
+      return { ...bits, title, who, pad: Math.max(0, room - head - title.length - others - who.length), rows: 1 }
+    }
+    // A board column: the title, then its details on a line of their own under it.
+    return { ...bits, title: cutTitle(room - head), who: cutWho(room - others + 1), pad: 0, rows: 2 }
+  }
+  const card = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
+    const laid = cardLayout(item, room, isStacked, isSplit, slots)
+    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news, pad, rows } = laid
+    const id = 'id' in laid && laid.id ? laid.id : item.id
+    const isOpen = pick === item.id
+    // A detail line leads with its first detail, its space dropped, under the title.
+    let isFirst = rows === 2
+    const detail = (text: string) => {
+      if (!text || !isFirst) return text
+      isFirst = false
+      return text.slice(1)
+    }
     return (
       <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
-        <Text dimColor>{item.id}</Text> {title}
+        <Text dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
+          {id}
+        </Text>{' '}
+        <Text bold={isOpen}>{title}</Text>
+        {rows === 2 ? '\n' : ' '.repeat(pad)}
         <Text color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
-          {tag}
+          {detail(tag)}
         </Text>
-        <Text dimColor>{ticks}</Text>
-        <Text color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{prTag}</Text>
+        <Text dimColor>{detail(ticks)}</Text>
+        <Text color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{detail(prTag)}</Text>
         <Text color="yellow" dimColor>
-          {wait}
+          {detail(wait)}
         </Text>
-        <Text color="cyan">{who}</Text>
+        <Text color="cyan">{detail(who)}</Text>
         <Text color="red" dimColor>
-          {stale}
+          {detail(stale)}
         </Text>
-        <Text color="red">{late}</Text>
+        <Text color="red">{detail(late)}</Text>
         <Text color="magenta" bold>
-          {news}
+          {detail(news)}
         </Text>
       </Button>
     )
@@ -290,32 +416,50 @@ export function drawPane(
   const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
   const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done').length
   const taskCount = items.filter(i => i.kind === 'task').length
+  // The header: the views as tabs with the progress and unread count beside them, then the actions. They
+  // share a row where the pane is wide enough; else the actions take a second row of their own.
+  const bar = progressBar(doneCount, taskCount, PROGRESS_BAR)
   const header = (
-    // Wraps rather than squeezing its counts into columns when the filter and buttons crowd it.
-    <Box flexDirection="row" columnGap={1} flexWrap="wrap">
-      {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
-      {VIEWS.map(([one, label]) => (
-        <Button key={`tab-${one}`} label={label} variant={mode === one ? 'primary' : 'secondary'}
-          hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)} />
-      ))}
-      <Text dimColor>
-        {doneCount}/{taskCount} tasks done
-      </Text>
-      {unreadTotal > 0 && (
-        <Text color="magenta" bold>
-          ● {unreadTotal} unread
+    <Box flexDirection="row" columnGap={3} flexWrap="wrap">
+      <Box key="views" flexDirection="row" columnGap={2}>
+        <Box key="tabs" flexDirection="row" columnGap={1}>
+          {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
+          {VIEWS.map(([one, label]) => (
+            <Button key={`tab-${one}`} plain variant={mode === one ? 'primary' : 'secondary'}
+              hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)}>
+              {mode === one ? (
+                <Text inverse bold>
+                  {` ${label} `}
+                </Text>
+              ) : (
+                <Text dimColor>{` ${label} `}</Text>
+              )}
+            </Button>
+          ))}
+        </Box>
+        <Text key="progress">
+          <Text color="green">{bar.done}</Text>
+          <Text dimColor>{bar.left}</Text> <Text dimColor>{doneCount}/{taskCount} done</Text>
         </Text>
-      )}
-      {unreadTotal > 0 && <Button key="mark-read" label="Mark all read" onPress={() => act.markAllRead()} />}
-      {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
-        onPress={() => act.setFiltering(true)} />}
-      {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
-      {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
-      {stackRun && <Text color="yellow">Merging a stack: {stackRun}</Text>}
-      {/* With a card open, n adds under it (on the card's bar) instead. */}
-      {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
+        {unreadTotal > 0 && (
+          <Text color="magenta" bold>
+            ● {unreadTotal} unread
+          </Text>
+        )}
+        {stackRun ? <Text color="yellow">Merging a stack: {stackRun}</Text> : null}
+      </Box>
+      <Box key="actions" flexDirection="row" columnGap={1}>
+        {unreadTotal > 0 && <Button key="mark-read" label="Mark all read" onPress={() => act.markAllRead()} />}
+        {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
+          onPress={() => act.setFiltering(true)} />}
+        {filter && !isFiltering ? <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} /> : null}
+        {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
+        {/* With a card open, n adds under it (on the card's bar) instead. */}
+        {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
+      </Box>
     </Box>
   )
+
   const filterRow = isFiltering && Input && (
     <Box key="filter-row" flexDirection="row" columnGap={1}>
       <Input key="filter-input" label="Filter" value={filter} autoFocus submitLabel="apply"
@@ -327,39 +471,100 @@ export function drawPane(
   const tasks = items.filter(item => item.kind === 'task' && isShown(item)).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
   // A milestone or epic handed over whole is reviewed as one: it waits in Review, where its card approves and merges it.
   const scopes = items.filter(item => item.kind !== 'task' && isAgent(item.assignee) && statusOf(items, item) === 'review' && isShown(item))
-  const colWidth = Math.floor((width - (STATUSES.length - 1)) / STATUSES.length)
   const columns = Object.fromEntries(STATUSES.map(status =>
     [status, [...(status === 'review' ? scopes : []), ...tasks.filter(task => task.status === status)]])) as Record<Status, Item[]>
-  // Docked, the board fits the rows above the card.
-  const caps = isDocked
-    ? columnCaps(
-      Object.fromEntries(STATUSES.map(status =>
-        [status, columns[status].map(task => cardRows(task, isWide ? colWidth - 1 : width - 2, isWide ? colWidth : width))])) as Record<Status, number[]>,
-      topRows, isWide)
-    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? 8 : 15])) as Record<Status, number>)
+  // Side by side, an empty column takes its heading's width and the columns with cards share the rest.
+  // A heading is drawn with its jump key: "t: ○ Todo 0".
+  const headOf = (status: Status) => `${HOTKEY[status]}: ${GLYPH[status]} ${LABEL[status]} ${columns[status].length}`
+  const widths = columnWidths(
+    Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length])) as Record<Status, number>,
+    width, COLUMN_GAP)
+  const roomOf = (status: Status) => (isWide ? widths[status] : width - 2)
+  // Side by side, a column whose cards don't all fit on one line gives every card two, so they line up.
+  const isSplit = Object.fromEntries(STATUSES.map(status =>
+    [status, isWide && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
+  // Docked, the board fits the rows above the card; side by side, each heading has its rule under it.
+  // Done shows the recent (the last week's, at least a few) unless opened; the rest are a press away.
+  const recentDone = columns.done.filter(task => now - Date.parse(task.updated_at) < RECENT_DAYS * 86_400_000).length
+  const doneClosed = Math.min(columns.done.length, Math.max(DONE_MIN, Math.min(recentDone, DONE_MAX)))
+  const doneShown = isDoneOpen ? columns.done.length : doneClosed
+  const heights = Object.fromEntries(STATUSES.map(status =>
+    [status, columns[status].slice(0, status === 'done' ? doneShown : undefined)
+      .map(task => cardLayout(task, roomOf(status), !isWide, isSplit[status]).rows)])) as Record<Status, number[]>
+  // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
+  // each heading has its rule under it; stacked, the blocks have a blank row between them.
+  const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
+  const caps = budget !== Infinity
+    ? columnCaps(heights, isWide ? budget - 1 : budget, isWide)
+    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : 15])) as Record<Status, number>)
+  // Stacked, the empty columns fold into one line, and every card's pieces sit in slots shared by the board.
+  const empties = isWide ? [] : STATUSES.filter(status => columns[status].length === 0)
+  const stackSlots = isWide ? undefined : slotsOf(STATUSES.flatMap(status => columns[status].slice(0, caps[status])))
+  const heading = (status: Status) => (
+    <Button key={`col-${status}-head`} plain hotkey={HOTKEY[status]}
+      onPress={() => columns[status][0] && act.focus(`card-${columns[status][0]!.id}`)}>
+      <Text bold color={COLOR[status]}>
+        {GLYPH[status]} {LABEL[status]}
+      </Text>{' '}
+      <Text dimColor>{columns[status].length}</Text>
+    </Button>
+  )
+  const doneToggle = (isDoneOpen || columns.done.length > doneClosed) && (
+    <Button key="done-toggle" plain onPress={() => act.setDoneOpen(!isDoneOpen)}>
+      <Text dimColor>{isDoneOpen ? '· recent only' : '· show all'}</Text>
+    </Button>
+  )
   const board = (
-    <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? 1 : 0}>
-      {STATUSES.map(status => {
+    <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? COLUMN_GAP : isDocked ? 0 : 1}>
+      {empties.length > 0 && (
+        <Box key="col-empty" flexDirection="row" columnGap={1} flexWrap="wrap">
+          {empties.flatMap((status, i) => [...(i ? [<Text key={`col-empty-${i}`} dimColor>·</Text>] : []), heading(status)])}
+        </Box>
+      )}
+      {STATUSES.filter(status => !empties.includes(status)).map(status => {
         const column = columns[status]
         const shown = column.slice(0, caps[status])
         return (
-          <Box key={`col-${status}`} flexDirection="column" width={isWide ? colWidth : undefined} marginBottom={isWide || isDocked ? 0 : 1}>
-            <Button key={`col-${status}-head`} plain hotkey={HOTKEY[status]}
-              onPress={() => column[0] && act.focus(`card-${column[0].id}`)}>
-              <Text bold color={COLOR[status]}>
-                {GLYPH[status]} {LABEL[status]}
-              </Text>{' '}
-              <Text dimColor>{column.length}</Text>
-            </Button>
-            {shown.map(task => card(task, isWide ? colWidth - 1 : width - 2))}
-            {column.length > shown.length && <Text dimColor>…{column.length - shown.length} more</Text>}
+          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}>
+            {status === 'done' && doneToggle ? (
+              <Box key="col-done-top" flexDirection="row" columnGap={1}>
+                {heading(status)}
+                {doneToggle}
+              </Box>
+            ) : heading(status)}
+            {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
+            {shown.map(task => card(task, roomOf(status), !isWide, isSplit[status], stackSlots))}
+            {column.length > shown.length && (
+              <Text dimColor>
+                …{column.length - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
+              </Text>
+            )}
           </Box>
         )
       })}
     </Box>
   )
 
-  const treeRows = rows(items).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
+
+  // A finished milestone or epic is folded to its own line, an open one unfolded, each until pressed;
+  // with a filter typed, nothing is folded, so every match shows.
+  const hasKids = (item: Item) => item.kind !== 'task' && childrenOf(items, item.id).length > 0
+  // What holds the open card stays unfolded, so the card's row is always there to return to.
+  const holdsPick = new Set<string>()
+  for (let at = find(items, pick ?? undefined)?.parent; at; at = find(items, at)?.parent ?? null) holdsPick.add(at)
+  const isFolded = (item: Item) =>
+    !query && hasKids(item) && !holdsPick.has(item.id) && (statusOf(items, item) === 'done') !== flipped.includes(item.id)
+  // The timeline shows epics under milestones, not tasks: there, only a milestone with epics folds.
+  const foldsInTimeline = (item: Item) => item.kind === 'milestone' && childrenOf(items, item.id).some(one => one.kind === 'epic')
+  const foldToggle = (item: Item, canFold = hasKids(item)) =>
+    canFold ? (
+      <Button key={`fold-${item.id}`} plain onPress={() => act.toggleFold(item.id)}>
+        <Text dimColor>{isFolded(item) ? '▸' : '▾'}</Text>
+      </Button>
+    ) : (
+      <Text key={`fold-${item.id}`}> </Text>
+    )
+  const treeRows = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
   // Docked, a window of rows that keeps the open item in sight.
   const treeFrom = isDocked && treeRows.length > topRows
     ? Math.max(0, Math.min(treeRows.findIndex(row => row.item.id === pick) - Math.floor(topRows / 2), treeRows.length - (topRows - 1)))
@@ -370,22 +575,28 @@ export function drawPane(
       {treeShown.map(({ item, depth }) => {
         const p = progress(items, item)
         const status = statusOf(items, item)
+        const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
+        const news = badge(item)
+        // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
+        // name, then the title, is cut.
+        const lead = depth * 2 + 2 + 2 + item.id.length + 1
+        const fullWho = item.assignee ? `  @${item.assignee}` : ''
+        const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
+        const room = width - lead - facts.length - who.length - news.length
+        const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
         return (
-          <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
-            {'  '.repeat(depth)}
-            <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
-            <Text bold={item.kind === 'milestone'}>
-              {isDocked && item.title.length > width - depth * 2 - item.id.length - 16 ? `${item.title.slice(0, Math.max(8, width - depth * 2 - item.id.length - 17))}…` : item.title}
-            </Text>
-            <Text dimColor>
-              {item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}
-              {item.due ? `  due ${item.due}` : ''}
-            </Text>
-            <Text color="cyan">{item.assignee ? `  @${item.assignee}` : ''}</Text>
-            <Text color="magenta" bold>
-              {badge(item)}
-            </Text>
-          </Button>
+          <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+            {foldToggle(item)}
+            <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
+              <Text color={COLOR[status]}>{GLYPH[status]}</Text> <Text dimColor>{item.id}</Text>{' '}
+              <Text bold={item.kind === 'milestone'}>{title}</Text>
+              <Text dimColor>{facts}</Text>
+              <Text color="cyan">{who}</Text>
+              <Text color="magenta" bold>
+                {news}
+              </Text>
+            </Button>
+          </Box>
         )
       })}
       {treeShown.length < treeRows.length && <Text key="tree-more" dimColor>…{treeRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
@@ -408,7 +619,13 @@ export function drawPane(
 
   // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
   const triageAll = backlog(items).filter(isShown)
-  const triage = isDocked ? triageAll.slice(0, Math.max(1, Math.floor((topRows - 1) / 2))) : triageAll
+  // Docked, as many rows as fit above the card, each as tall as its title wraps beside the picker and hand-off.
+  const triageRows = (task: Item) => {
+    const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
+    const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
+    return rowsOf(`${task.id} ${task.title}${where}${tags ? ` ${tags}` : ''}`, Math.max(10, width - BACKLOG_EDGES))
+  }
+  const triage = isDocked ? fitRows(triageAll, triageAll.map(triageRows), topRows - 1) : triageAll
   const backlogView = (
     <Box flexDirection="column">
       {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
@@ -457,39 +674,63 @@ export function drawPane(
 
   // The timeline: milestones and epics by due date, each with its progress and how it stands against the date.
   const today = now > 0 ? dateOf(now) : undefined
-  const timelineAll = timelineOf(items).filter(one => !query || subtree(items, one.id).some(id => isShown(find(items, id)!)))
+  const timelineAll = timelineRows(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
   const timelineShown = isDocked ? timelineAll.slice(0, Math.max(1, topRows - 1)) : timelineAll
   const BAR = 10
+  // The timeline lines up in columns: the name, the date (a dim dash for none), the bar and its count,
+  // then how it stands against its date.
+  const countWidth = Math.max(0, ...timelineAll.map(({ item }) => { const p = progress(items, item); return `${p.done}/${p.total}`.length }))
+  const right = 2 + 10 + 2 + BAR + 1 + countWidth
+  // How each stands against its date: room is kept for it, up to a point, before the names take the rest.
+  const standing = (one: Item) => {
+    const p = progress(items, one)
+    const days = one.due && today ? daysBetween(today, one.due) : undefined
+    if (days === undefined || statusOf(items, one) === 'done') return ''
+    if (isLate(items, one, now)) return `${-days} day${days === -1 ? '' : 's'} late, ${p.total - p.done} open`
+    return days === 0 ? 'due today' : `in ${days} day${days === 1 ? '' : 's'}`
+  }
+  const whenWidth = Math.min(22, Math.max(0, ...timelineAll.map(({ item }) => standing(item).length)))
+  const nameWidth = Math.min(
+    Math.max(0, ...timelineAll.map(({ item, depth }) => depth * 2 + 2 + 2 + item.id.length + 1 + item.title.length)),
+    Math.max(20, width - right - 2 - (whenWidth ? whenWidth + 2 : 0)),
+  )
   const timelineView = (
     <Box flexDirection="column">
       {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
-      {timelineShown.map(one => {
+      {timelineShown.map(({ item: one, depth }) => {
         const p = progress(items, one)
         const st = statusOf(items, one)
         const filled = p.total ? Math.round((p.done / p.total) * BAR) : 0
-        const days = one.due && today ? daysBetween(today, one.due) : undefined
         const late = isLate(items, one, now)
-        const open = p.total - p.done
-        const when = days === undefined ? '' : st === 'done' ? '' : late ? `${-days} day${days === -1 ? '' : 's'} late, ${open} open` : days === 0 ? 'due today' : `in ${days} day${days === 1 ? '' : 's'}`
-        const isUnder = Boolean(one.parent && find(items, one.parent))
+        const when = standing(one)
+        const lead = depth * 2 + 2 + 2 + one.id.length + 1
+        const title = one.title.length + lead > nameWidth ? `${one.title.slice(0, Math.max(4, nameWidth - lead - 1))}…` : one.title
+        const pad = ' '.repeat(Math.max(0, nameWidth - lead - title.length))
         // An epic without a date of its own goes by its milestone's.
-        const date = one.due ? `  ${one.due}` : isUnder ? '' : '  no due date'
-        const fixed = (isUnder ? 2 : 0) + 2 + one.id.length + 1 + date.length + 2 + BAR + ` ${p.done}/${p.total}`.length + (when ? when.length + 2 : 0)
-        const title = one.title.length + fixed > width - 1 ? `${one.title.slice(0, Math.max(8, width - fixed - 2))}…` : one.title
+        const date = one.due ?? (depth > 0 ? '' : '—')
+        // Room left on the line for how it stands: cut rather than wrapped.
+        const whenRoom = width - nameWidth - right - 2
+        const said = when && whenRoom > 4 ? (when.length > whenRoom ? `${when.slice(0, whenRoom - 1)}…` : when) : ''
         return (
-          <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
-            {isUnder ? '  ' : ''}
-            <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
-            <Text dimColor>{date}  </Text>
-            <Text color="green">{'▓'.repeat(filled)}</Text>
-            <Text dimColor>{'░'.repeat(BAR - filled)} {p.done}/{p.total}</Text>
-            <Text color={late ? 'red' : undefined} dimColor={!late} bold={late}>{when ? `  ${when}` : ''}</Text>
-          </Button>
+          <Box key={`timeline-${one.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+            {foldToggle(one, foldsInTimeline(one))}
+            <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
+              <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
+              {pad}
+              <Text dimColor>{`  ${date.padEnd(10)}  `}</Text>
+              <Text color="green">{'▓'.repeat(filled)}</Text>
+              <Text dimColor>
+                {'░'.repeat(BAR - filled)} {`${p.done}/${p.total}`.padStart(countWidth)}
+              </Text>
+              <Text color={late ? 'red' : undefined} dimColor={!late} bold={late}>{said ? `  ${said}` : ''}</Text>
+            </Button>
+          </Box>
         )
       })}
       {timelineShown.length < timelineAll.length && <Text key="timeline-more" dimColor>…{timelineAll.length - timelineShown.length} more (close the card to see them all)</Text>}
     </Box>
   )
+
 
   const item = find(items, pick ?? undefined)
   const status = item && statusOf(items, item)
@@ -697,12 +938,12 @@ export function drawPane(
   // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
   // The bar's two rows of buttons, as they wrap at this width ("[ label ]", one column apart).
   // How many rows pieces of these widths take, laid one column apart and wrapped at `room`.
-  const flowRows = (widths: number[], room: number) => {
+  const flowRows = (widths: number[], room: number, gap = 1) => {
     let lines = 1
     let used = 0
     for (const w of widths) {
-      if (used > 0 && used + 1 + w > room) (lines++, (used = w))
-      else used += (used > 0 ? 1 : 0) + w
+      if (used > 0 && used + gap + w > room) (lines++, (used = w))
+      else used += (used > 0 ? gap : 0) + w
     }
     return lines
   }
@@ -710,14 +951,17 @@ export function drawPane(
   const buttonRows = (labels: string[]) => flowRows(labels.map(label => label.length + 4), inner)
   // The header as it wraps over the whole pane, when it shows above an open card.
   const headerRows = flowRows([
-    ...VIEWS.map(([, label]) => label.length + 4),
-    `${doneCount}/${taskCount} tasks done`.length,
-    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length, 'Mark all read'.length + 4] : []),
-    ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
-    ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
-    ...(canUndo ? ['Undo'.length + 4] : []),
-    ...(stackRun ? [`Merging a stack: ${stackRun}`.length] : []),
-  ], width)
+    VIEWS.reduce((sum, [one, label]) => sum + label.length + 2 + (one === nextView ? 3 : 0), 0) + (VIEWS.length - 1) +
+      2 + PROGRESS_BAR + ` ${doneCount}/${taskCount} done`.length +
+      (unreadTotal > 0 ? 2 + `● ${unreadTotal} unread`.length : 0) + (stackRun ? 2 + `Merging a stack: ${stackRun}`.length : 0),
+    [
+      ...(unreadTotal > 0 ? ['Mark all read'.length + 4] : []),
+      ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
+      ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
+      ...(canUndo ? ['Undo'.length + 4] : []),
+      ...(!draft && !pick ? ['New'.length + 4] : []),
+    ].reduce((sum, one, i) => sum + one + (i ? 1 : 0), 0),
+  ].filter(one => one > 0), width, 3)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
@@ -745,16 +989,16 @@ export function drawPane(
       (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 :
         parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
-  const footer = (draft
+  // Key hints, most useful first: as many as fit in the rows the pane gives them (one wide, two narrow),
+  // each whole, the rest dropped from the end. Drawn in that order of usefulness, not of the keys.
+  const hints = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
-    ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', isEditing ? 'e done editing' : 'e edit', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', canUndo ? 'z undo' : '', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
-  )
-    .filter(Boolean)
-    .join(' · ')
-  // The footer is as wide as the pane, not the panel inside it.
-  const footerRows = Math.max(1, Math.ceil(footer.length / Math.max(1, width)))
+    ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', 'n new', 'f filter', canUndo ? 'z undo' : '']
+  ).filter(Boolean)
+  const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
+  const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
   const fixed = (isCompact ? 0 : headerRows) + (isDocked ? topRows : 0) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   const total = sections.reduce((sum, row) => sum + row.rows, 0)
@@ -1004,9 +1248,13 @@ export function drawPane(
           )
         )}
         {items.length > 0 && !trouble && (
-          <Text dimColor>
-            {footer}
-          </Text>
+          <Box key="hints" flexDirection="row" columnGap={1} flexWrap="wrap">
+            {footerHints.map((one, i) => (
+              <Text key={`hint-${i}`} dimColor>
+                {i < footerHints.length - 1 ? `${one} ·` : one}
+              </Text>
+            ))}
+          </Box>
         )}
       </Box>
       ),
