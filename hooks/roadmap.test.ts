@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, brief, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, brief, checkLinks, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -449,5 +449,37 @@ test('priority and type: next takes higher priority first, and only what differs
   })
   expect((await ui.find({ key: 'card-T2' }))?.text).toContain('p0 bug')
   expect((await ui.find({ key: 'card-T1' }))?.text).not.toContain('p2')
+  await ui.unmount()
+})
+
+test('labels and links: shown from both ends, in the outline, the detail and on the card', async ($, on) => {
+  const some = [
+    item('T1', { labels: ['ui'], relations: [{ type: 'relates', id: 'T2' }] }),
+    item('T2'),
+    item('T3', { status: 'done', relations: [{ type: 'duplicates', id: 'T1' }] }),
+  ]
+  expect(linksOf(some, some[1]!)).toEqual({ relates: ['T1'], duplicateOf: [], duplicatedBy: [] })
+  expect(linksOf(some, some[0]!)).toEqual({ relates: ['T2'], duplicateOf: [], duplicatedBy: ['T3'] })
+  expect(() => checkLinks(some, 'T1', ['T1'])).toThrow('cannot link to itself')
+  expect(() => checkLinks(some, 'T1', ['T9'])).toThrow('No item T9')
+  expect(outline(some).split('\n')[0]).toBe('T1 ○ todo T1 title  (#ui)')
+  const text = detail({ items: some, activity: [], seen: {} }, some[0]!)
+  expect(text).toContain('Duplicated by:\n  T3')
+  expect(text).toContain('Related:\n  T2')
+
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ key: 'head-links' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /relates to ○ T2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /duplicated by ● T3/ })).toBeDefined()
+  expect(await ui.find({ text: /#ui/ })).toBeDefined()
   await ui.unmount()
 })

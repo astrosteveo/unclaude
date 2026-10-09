@@ -26,6 +26,7 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 - **Keys:** `t` `p` `b` `d` jump to a column, Enter opens a card, `1`–`4` set its status, `h` hands it to Claude, `m`/`u` assign it to you or unassign it, `x` closes it, and `v` switches between board and tree.
 - **Comments** you post on a card reach Claude with your next prompt. A `● N` badge marks cards with comments you haven't read yet.
 - **Priority and type:** each task has a priority (`p0` urgent to `p3` can wait, `p2` by default) and a type (feature, bug or chore). Cards show them when they differ from the defaults, with `p0` in red and `p1` in yellow.
+- **Labels and links:** tasks can carry labels (`#ui`, `#auth`), relate to other items (shown on both), or be marked a duplicate of another, which closes them. They show in the card's Links section.
 - **The band** above the prompt shows what an agent is working on. Press it to open that task.
 
 What Claude does with it:

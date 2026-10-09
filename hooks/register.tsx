@@ -5,7 +5,7 @@ import type { IssueType, Item, Kind, Priority, Refs, Snapshot, Status, View } fr
 import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import {
-  agentName, brief, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
+  agentName, brief, checkLinks, linksOf, marks, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, GLYPH, KINDS, LABEL, nextUp, outline, path, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, statusOf, subtree, timeline, unread, waitingOn,
 } from './model'
 
@@ -231,6 +231,9 @@ type Input = {
   due?: string
   priority?: Priority
   type?: IssueType
+  labels?: string[] | string
+  relates_to?: string[] | string
+  duplicates?: string
   body?: string
   blocked_by?: string[] | string
   checklist?: string[] | string
@@ -312,10 +315,16 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
       }))
       const checklist = a.checklist === undefined ? [] : texts(a.checklist)
       if (checklist.length && a.kind !== 'task') fail('Only tasks carry a checklist')
-      if (blockers.length || checklist.length) {
+      const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
+      const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
+      const tags = a.labels === undefined ? [] : idList(a.labels)
+      if (blockers.length || checklist.length || related.length || original.length || tags.length) {
         const created = find((await refresh($)).items, id) as Item
         if (blockers.length) await sql($, db.setBlockers(actor, created, blockers).script)
         if (checklist.length) await sql($, db.setChecklist(actor, created, checklist).script)
+        if (tags.length) await sql($, db.setLabels(actor, created, tags).script)
+        if (related.length) await sql($, db.setRelations(actor, created, 'relates', related).script)
+        if (original.length) await sql($, db.setRelations(actor, created, 'duplicates', original).script)
       }
       return `Added ${id}: ${a.title!.trim()}${blockers.length ? `, blocked by ${blockers.join(', ')}` : ''}`
     }
@@ -350,6 +359,21 @@ async function act($: EngineInterface, actor: string, a: Input): Promise<string>
         const links = db.setBlockers(actor, it, checkBlockers(snap.items, it.id, idList(a.blocked_by)))
         if (links.script) await sql($, links.script)
         notes.push(...links.notes)
+      }
+      if (a.labels !== undefined) {
+        const set = db.setLabels(actor, it, idList(a.labels))
+        if (set.script) await sql($, set.script)
+        notes.push(...set.notes)
+      }
+      if (a.relates_to !== undefined) {
+        const set = db.setRelations(actor, it, 'relates', checkLinks(snap.items, it.id, idList(a.relates_to)))
+        if (set.script) await sql($, set.script)
+        notes.push(...set.notes)
+      }
+      if (a.duplicates !== undefined) {
+        const set = db.setRelations(actor, it, 'duplicates', checkLinks(snap.items, it.id, idList(a.duplicates)))
+        if (set.script) await sql($, set.script)
+        notes.push(...set.notes)
       }
       return notes.length ? `${it.id}: ${notes.join('; ')}` : `${it.id}: nothing changed`
     }
@@ -495,7 +519,7 @@ export const register: Register = on => {
         'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by due date),',
         'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
         'claim (id: take a task and start it; refused when someone else holds it or it waits on unfinished tasks), release (id), comment (id, body), remove (id; cascade for children).',
-        'Dependencies: blocked_by lists the tasks a task waits on. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
+        'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
         'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
         'Name the task id in commit messages and PR titles or branches (e.g. "T12: ..."); show lists the commits and PRs that name it.',
         'Milestone and epic status roll up from their tasks. Working rules: claim a task before you start it; comment on decisions,',
@@ -523,6 +547,12 @@ export const register: Register = on => {
           },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}", or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'Target date, YYYY-MM-DD' },
+          labels: { type: 'array', items: { type: 'string' }, description: 'Tags such as "ui" or "auth" (add/update); replaces the list, [] clears.' },
+          relates_to: {
+            type: 'array', items: { type: 'string' },
+            description: 'Items this one is related to, shown on both (add/update); replaces the list, [] clears.',
+          },
+          duplicates: { type: 'string', description: 'The item this one duplicates (add/update); closes this task as done. Empty string clears.' },
           priority: { type: 'string', enum: PRIORITIES, description: 'p0 urgent … p3 can wait; p2 is the default. next picks higher priority first.' },
           type: { type: 'string', enum: TYPES, description: 'What sort of work: feature (default), bug or chore' },
           body: { type: 'string', description: 'Comment text (comment)' },
@@ -822,7 +852,21 @@ export const register: Register = on => {
           ) })),
       ])
       const linked = refsFor(items, known, item)
+      const links = linksOf(items, item)
+      const linkRow = (key: string, verb: string, id: string) => {
+        const other = find(items, id)
+        const st = other ? statusOf(items, other) : 'todo'
+        return { key: `${key}-${id}`, rows: tall(`${verb} ${id} ${other?.title ?? ''}`), node: (
+          <Text key={`${key}-${id}`}>
+            <Text dimColor>{verb} </Text>
+            <Text color={COLOR[st]}>{GLYPH[st]}</Text> {id} {other?.title ?? '(removed)'}
+          </Text>
+        ) }
+      }
       section('links', 'Links', [
+        ...links.duplicateOf.map(id => linkRow('dup', 'duplicate of', id)),
+        ...links.duplicatedBy.map(id => linkRow('dupby', 'duplicated by', id)),
+        ...links.relates.map(id => linkRow('rel', 'relates to', id)),
         ...linked.prs.slice(0, 3).map(pr => ({ key: `pr-${pr.number}`, rows: tall(`PR #${pr.number} [${pr.state}] ${pr.title}`), node: (
           <Text key={`pr-${pr.number}`}>
             <Text dimColor>PR </Text>#{pr.number}{' '}
@@ -874,7 +918,8 @@ export const register: Register = on => {
     // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
     // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
-    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
+    const tagLine = item?.labels?.length ? item.labels.map(one => `#${one}`).join(' ') : ''
+    const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', tagLine, item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
     const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 : 0)
     // Tabs (hidden inline), the panel's borders, title, bar, info line (folded into the title inline), footer, ↓ mark.
     const fixed = (isCompact ? 0 : 1) + 2 + titleRows + 2 + (inner < 56 ? 1 : 0) + (isCompact ? 0 : 1) + 1 + 1
@@ -949,6 +994,7 @@ export const register: Register = on => {
             {item.kind === 'task' && <Text dimColor>  priority </Text>}
             {item.kind === 'task' && <Text color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>}
             {item.kind === 'task' && <Text dimColor>  {item.type}</Text>}
+            {tagLine && <Text color="blue">  {tagLine}</Text>}
             {item.due && <Text dimColor>  due {item.due}</Text>}
             {where && <Text dimColor>  in {where}</Text>}
           </Text>

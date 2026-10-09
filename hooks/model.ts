@@ -63,6 +63,33 @@ export function checkBlockers(items: Item[], id: string, blockers: string[]): st
   return out
 }
 
+/** The item ids to link to, normalized, or throws: each must exist and not be `id` itself. */
+export function checkLinks(items: Item[], id: string, ids: string[]): string[] {
+  const out: string[] = []
+  for (const raw of ids) {
+    const found = find(items, raw.trim())
+    if (!found) throw new Error(`No item ${raw}`)
+    if (found.id.toUpperCase() === id.toUpperCase()) throw new Error(`${found.id} cannot link to itself`)
+    if (!out.includes(found.id)) out.push(found.id)
+  }
+  return out
+}
+
+/**
+ * An item's links other than blocked-by, read from both ends: `relates` goes both ways, so an item
+ * relates to those it names and to those that name it; a duplicate names its original.
+ */
+export function linksOf(items: Item[], item: Item) {
+  const out = (type: string) => (item.relations ?? []).filter(one => one.type === type).map(one => one.id)
+  const into = (type: string) =>
+    items.filter(one => (one.relations ?? []).some(r => r.type === type && r.id === item.id)).map(one => one.id)
+  return {
+    relates: [...new Set([...out('relates'), ...into('relates')])],
+    duplicateOf: out('duplicates'),
+    duplicatedBy: into('duplicates'),
+  }
+}
+
 /** Ids in an item's subtree, the item first. */
 export function subtree(items: Item[], id: string): string[] {
   const out = [id]
@@ -123,6 +150,7 @@ export function line(items: Item[], item: Item): string {
   const status = statusOf(items, item)
   const bits = [
     ...marks(item),
+    ...(item.labels ?? []).map(one => `#${one}`),
     item.kind !== 'task' && p.total > 0 ? `${p.done}/${p.total} tasks` : '',
     item.assignee ? `@${item.assignee}` : '',
     item.due ? `due ${item.due}` : '',
@@ -163,6 +191,11 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
   if (before.length) parts.push('Blocked by:\n' + before.map(one => `  ${line(snap.items, one)}`).join('\n'))
   const after = blocks(snap.items, item)
   if (after.length) parts.push('Blocks:\n' + after.map(one => `  ${line(snap.items, one)}`).join('\n'))
+  const links = linksOf(snap.items, item)
+  const named = (ids: string[]) => ids.map(id => find(snap.items, id)).filter((one): one is Item => one !== undefined)
+  if (links.duplicateOf.length) parts.push('Duplicate of:\n' + named(links.duplicateOf).map(one => `  ${line(snap.items, one)}`).join('\n'))
+  if (links.duplicatedBy.length) parts.push('Duplicated by:\n' + named(links.duplicatedBy).map(one => `  ${line(snap.items, one)}`).join('\n'))
+  if (links.relates.length) parts.push('Related:\n' + named(links.relates).map(one => `  ${line(snap.items, one)}`).join('\n'))
   const under = outline(snap.items, item.id)
   if (under) parts.push(under)
   const log = timeline(snap.activity, item.id).slice(-limit)

@@ -1,4 +1,4 @@
-import type { Check, IssueType, Item, Kind, Priority, Snapshot, Status } from '../types'
+import type { Check, IssueType, Item, Kind, Priority, Relation, Snapshot, Status } from '../types'
 import { PREFIX } from './model'
 
 export const DB = '.claude/roadmap.db'
@@ -205,6 +205,51 @@ ${dropped.map(id => `DELETE FROM links WHERE blocker=${q(id)} AND blocked=${q(it
 ${added.map(id => `INSERT OR IGNORE INTO links(blocker, blocked) VALUES (${q(id)}, ${q(item.id)});`).join('\n')}
 ${notes.map(note => activity(item.id, actor, 'edit', note)).join('\n')}
 UPDATE items SET updated_at=${NOW} WHERE id=${q(item.id)};
+COMMIT;`,
+    notes,
+  }
+}
+
+/** A label as stored: lowercase, words joined by hyphens, no leading `#`. */
+export const label = (text: string) => text.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-')
+
+/** The script setting an item's labels to exactly `next`, logging the new set; none when unchanged. */
+export function setLabels(actor: string, item: Item, next: string[]): { script: string; notes: string[] } {
+  const wanted = [...new Set(next.map(label).filter(Boolean))].sort()
+  if (wanted.join('\n') === [...item.labels].sort().join('\n')) return { script: '', notes: [] }
+  const notes = [wanted.length ? `labels: ${wanted.join(', ')}` : 'labels cleared']
+  return {
+    script: `BEGIN IMMEDIATE;
+DELETE FROM labels WHERE item_id=${q(item.id)};
+${wanted.map(one => `INSERT INTO labels(item_id, label) VALUES (${q(item.id)}, ${q(one)});`).join('\n')}
+${activity(item.id, actor, 'edit', notes[0]!)}
+UPDATE items SET updated_at=${NOW} WHERE id=${q(item.id)};
+COMMIT;`,
+    notes,
+  }
+}
+
+const RELATION_NOTE = { relates: ['relates to', 'no longer relates to'], duplicates: ['duplicate of', 'no longer a duplicate of'] }
+
+/**
+ * The script setting the links of one `type` that `item` makes to exactly `next`, logging each made or
+ * dropped; none when unchanged. Marking a task a duplicate also closes it: the work lives on elsewhere.
+ */
+export function setRelations(actor: string, item: Item, type: Relation['type'], next: string[]): { script: string; notes: string[] } {
+  const now = item.relations.filter(one => one.type === type).map(one => one.id)
+  const added = next.filter(id => !now.includes(id))
+  const dropped = now.filter(id => !next.includes(id))
+  const [made, gone] = RELATION_NOTE[type]
+  const notes = [...added.map(id => `${made} ${id}`), ...dropped.map(id => `${gone} ${id}`)]
+  if (notes.length === 0) return { script: '', notes }
+  const closes = type === 'duplicates' && added.length > 0 && item.kind === 'task' && item.status !== 'done'
+  if (closes) notes.push(`status ${item.status} → done (closed as a duplicate)`)
+  return {
+    script: `BEGIN IMMEDIATE;
+${dropped.map(id => `DELETE FROM relations WHERE a=${q(item.id)} AND b=${q(id)} AND type=${q(type)};`).join('\n')}
+${added.map(id => `INSERT OR IGNORE INTO relations(a, b, type) VALUES (${q(item.id)}, ${q(id)}, ${q(type)});`).join('\n')}
+${notes.map(note => activity(item.id, actor, note.startsWith('status') ? 'status' : 'edit', note)).join('\n')}
+UPDATE items SET ${closes ? "status='done', " : ''}updated_at=${NOW} WHERE id=${q(item.id)};
 COMMIT;`,
     notes,
   }

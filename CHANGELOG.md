@@ -7,6 +7,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 ### Added
 
 - Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.
+- Labels (`labels`), related items (`relates_to`, shown on both items) and duplicates (`duplicates`, which closes the duplicate). The card lists them under Links, and `show` lists them in the detail.
 
 - In a git repository that doesn't ignore `.claude/roadmap.db`, the board offers to add it to `.gitignore` (press `g`). A toast mentions it once per project, and "Don't ask again" turns it off for that project. Nothing is written without the person's say-so.
 
