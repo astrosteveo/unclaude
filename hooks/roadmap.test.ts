@@ -2200,6 +2200,59 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', version: '0.5.0', approved: true, agentId: 'a1' } as never).then(r => String(r.result ?? r.deny))).toContain("the user's call")
 })
 
+test('ship with nothing under [Unreleased] writes the notes of merged work itself, and takes a CHANGELOG changelog left uncommitted', async ($, on) => {
+  const files: Record<string, string> = {
+    '/p/.claude-plugin/plugin.json': '{\n  "name": "roadmap",\n  "version": "0.6.0"\n}\n',
+    '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n## [0.6.0] - 2026-10-09\n\n### Fixed\n\n- Old fix.\n\n[Unreleased]: https://github.com/o/r/compare/v0.6.0...HEAD\n',
+  }
+  // T1 shipped in 0.6.0 already (its note is in the file); T2 merged since; T3 is still open on its PR.
+  const snap = {
+    items: [
+      item('T1', { status: 'done', type: 'bug', note: 'Old fix.' }),
+      item('T2', { status: 'done', type: 'bug', note: 'ship writes the notes itself.', updated_at: '2026-10-10T08:00:00Z' }),
+      item('T3', { status: 'done', note: 'Not merged yet.' }),
+    ],
+    activity: [], seen: {},
+  }
+  const ran: string[] = []
+  let dirty = ''
+  on('process.run', ($, e) => {
+    const line = e.argv.join(' ')
+    if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
+      ran.push(line)
+      const stdout = line === 'git remote get-url origin' ? 'git@github.com:o/r.git\n' : line === 'git status --porcelain' ? dirty
+        : line === 'git symbolic-ref --short refs/remotes/origin/HEAD' ? 'origin/main\n' : line === 'git rev-parse --abbrev-ref HEAD' ? 'main\n'
+        : line.startsWith('git rev-list --count') ? '0\n'
+        : line.startsWith('gh pr list --state') ? JSON.stringify([{ number: 9, title: 'T3: open work', headRefName: 't3-x', baseRefName: 'main', state: 'OPEN', url: '', statusCheckRollup: [] }])
+        : line.startsWith('gh pr create') ? 'https://github.com/o/r/pull/31\n' : ''
+      return { value: { ...fakeSqlite('', null), stdout, exitCode: 0 } }
+    }
+    return { value: fakeSqlite(e.init?.stdin, snap) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('session.root', () => ({ value: '/p' }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T09:00:00Z') }) as never)
+  on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: 'ENOENT' } : { value: files[e.path] }) as never)
+  on('fs.write', ($, e) => ((files[e.path] = e.text), { value: undefined }) as never)
+  const ship = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  // Another changed file still stops it; the CHANGELOG alone (changelog run first) does not.
+  dirty = ' M CHANGELOG.md\n M hooks/x.ts\n'
+  expect(await ship({ version: '0.7.0' })).toBe('the working tree has changes; commit or stash them first')
+  dirty = ' M CHANGELOG.md\n'
+  const reply = await ship({ version: '0.7.0' })
+  expect(reply).toContain('Opened https://github.com/o/r/pull/31 for 0.7.0: .claude-plugin/plugin.json bumped, 1 release note(s) of merged work added and CHANGELOG [Unreleased] cut as 0.7.0')
+  const log = files['/p/CHANGELOG.md']!
+  expect(log).toContain('## [Unreleased]\n\n## [0.7.0] - 2026-10-10\n\n### Fixed\n\n- ship writes the notes itself.')
+  expect(log.match(/Old fix\./g)).toHaveLength(1)
+  expect(log).not.toContain('Not merged yet.')
+  // One commit on the release branch carries the bump and the notes; main is left as it was.
+  expect(ran.filter(one => one.startsWith('git commit') || one.startsWith('git switch'))).toEqual(['git switch -c release-v0.7.0', 'git commit -am Release 0.7.0', 'git switch main'])
+  expect(ran.find(one => one.startsWith('gh pr create'))).toContain('### Fixed\n\n- ship writes the notes itself.')
+})
+
 test('timeline: milestones and epics by due date with their progress; late work marked on the board and in the brief', async ($, on) => {
   const some = [
     item('M1', { title: 'Launch', due: '2026-10-20' }), item('E1', { parent: 'M1', title: 'Billing', due: '2026-10-05' }),
