@@ -575,3 +575,18 @@ test('v5: a release note and its section are written, logged and undone like any
   sql(db.change('claude', item('T1'), { note: db.NO_NOTE }).script)
   assert.deepEqual(log('T1').at(-1), 'claude: no release note needed')
 })
+
+test('mark all seen: every item read up to its newest entry, and a comment after counts again', () => {
+  sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
+  sql(db.insert('claude', { kind: 'task', title: 'b', parent: null }))
+  sql(db.comment('claude', 'T1', 'one'))
+  sql(db.comment('claude', 'T2', 'two'))
+  sql(db.markSeen('user', 'T1'))
+  sql(db.markAllSeen('user'))
+  const newest = id => Math.max(...load().activity.filter(one => one.item_id === id).map(one => one.id))
+  assert.deepEqual(load().seen, { T1: newest('T1'), T2: newest('T2') })
+  // Another reader's marks are their own.
+  assert.deepEqual(db.parseLoad(sql(db.load('claude'))).seen, {})
+  sql(db.comment('claude', 'T2', 'three'))
+  assert.ok(newest('T2') > load().seen.T2)
+})

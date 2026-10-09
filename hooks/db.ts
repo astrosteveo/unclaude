@@ -469,6 +469,12 @@ export const markSeen = (reader: string, id: string) =>
   (SELECT COALESCE(MAX(id), 0) FROM activity WHERE item_id=${q(id)}))
   ON CONFLICT(reader, item_id) DO UPDATE SET seen=excluded.seen;`
 
+/** Marks everything on every item as seen by `reader`, up to each one's newest activity. */
+export const markAllSeen = (reader: string) =>
+  `INSERT INTO reads(reader, item_id, seen) SELECT ${q(reader)}, item_id, MAX(id) FROM activity
+  WHERE item_id IN (SELECT id FROM items) GROUP BY item_id
+  ON CONFLICT(reader, item_id) DO UPDATE SET seen=excluded.seen;`
+
 /** The script setting what `item` waits on to exactly `next`, logging each link made or dropped; none when unchanged. */
 export function setBlockers(actor: string, item: Item, next: string[]): { script: string; notes: string[] } {
   const added = next.filter(id => !item.blocked_by.includes(id))

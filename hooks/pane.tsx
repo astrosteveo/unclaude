@@ -108,6 +108,8 @@ export type PaneActions = {
   setEditing: (isOn: boolean) => void
   /** Takes back the person's last change, or the logged entries `ids`. */
   undo: (ids?: number[]) => void
+  /** Marks every comment on the board as read by the person. */
+  markAllRead: () => void
   /** Asks to confirm merging the stack on an item's card (null drops the question). */
   askStack: (id: string | null) => void
   /** Merges a stack of PRs, bottom first. */
@@ -258,6 +260,7 @@ export function drawPane(
           ● {unreadTotal} unread
         </Text>
       )}
+      {unreadTotal > 0 && <Button key="mark-read" label="Mark all read" onPress={() => act.markAllRead()} />}
       {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
         onPress={() => act.setFiltering(true)} />}
       {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
@@ -624,7 +627,7 @@ export function drawPane(
   const headerRows = flowRows([
     ...VIEWS.map(([, label]) => label.length + 4),
     `${doneCount}/${taskCount} tasks done`.length,
-    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length] : []),
+    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length, 'Mark all read'.length + 4] : []),
     ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
     ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
     ...(canUndo ? ['Undo'.length + 4] : []),

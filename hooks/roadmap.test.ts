@@ -2019,3 +2019,41 @@ test('run tasks at once: picked backlog rows each get an agent, a worktree and a
   expect(stored.parallel).toEqual({ '/work/project': [] })
   await ui.unmount()
 })
+
+test('mark all read: the button by the unread count reads everything; a comment after counts again', async ($, on) => {
+  const snap: Snapshot = {
+    items: [item('T1'), item('T2')],
+    activity: [
+      { id: 3, item_id: 'T1', author: 'claude', type: 'comment', body: 'one', at: '2026-10-09T10:00:00Z' },
+      { id: 4, item_id: 'T2', author: 'claude', type: 'comment', body: 'two', at: '2026-10-09T10:00:00Z' },
+    ],
+    seen: {},
+  }
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    // The database's answer: everything read, up to each item's newest entry.
+    if (stdin.startsWith("INSERT INTO reads(reader, item_id, seen) SELECT 'user'")) snap.seen = { T1: 3, T2: 4 }
+    return { value: fakeSqlite(stdin, snap) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect(await ui.find({ type: 'Text', text: /● 2 unread/ })).toBeDefined()
+  await ui.press({ key: 'mark-read' })
+  expect(await ui.find({ type: 'Text', text: /unread/ })).toBeUndefined()
+  expect(await ui.find({ key: 'mark-read' })).toBeUndefined()
+  expect((await ui.find({ key: 'card-T1' }))?.text).not.toContain('●')
+  // A new comment counts again.
+  snap.activity.push({ id: 5, item_id: 'T2', author: 'claude', type: 'comment', body: 'three', at: '2026-10-09T11:00:00Z' })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  expect(await ui.find({ type: 'Text', text: /● 1 unread/ })).toBeDefined()
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('● 1')
+  await ui.unmount()
+})

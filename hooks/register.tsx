@@ -1426,6 +1426,7 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
+      markAllRead: () => void sql($, db.markAllSeen(USER)).then(() => refresh($)).catch(() => undefined),
       setPicked: ids => void update($, picked, () => ids),
       askParallel: ids => void update($, parallelAsk, () => ids).then(() => focusOn($, ids ? 'parallel-cancel' : pick ? 'close' : 'tab-backlog')),
       runParallel: ids => void runParallel($, ids),
