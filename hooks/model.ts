@@ -655,6 +655,46 @@ export const openPrOf = (refs: Refs, item: Item): Pr | undefined =>
 export const stackedOn = (refs: Refs, pr: Pr): Pr | undefined =>
   pr.base ? refs.prs.find(one => one.state === 'open' && one.number !== pr.number && one.branch === pr.base) : undefined
 
+/**
+ * The stack `pr` is the bottom of: it, then each open PR based on the branch of the one before (the
+ * lowest-numbered where two are), up to the top. Just `[pr]` when nothing is stacked on it, or when it
+ * is itself stacked on another open PR (only a stack's bottom merges it).
+ */
+export function stackFrom(refs: Refs, pr: Pr): Pr[] {
+  if (stackedOn(refs, pr)) return [pr]
+  const out = [pr]
+  for (;;) {
+    const top = out.at(-1)!
+    const next = refs.prs
+      .filter(one => one.state === 'open' && one.base === top.branch && !out.includes(one))
+      .sort((a, b) => a.number - b.number)[0]
+    if (!next) return out
+    out.push(next)
+  }
+}
+
+/** A stack as the card shows it: `#11 ← #12 ← #15`, bottom first. */
+export const stackText = (stack: Pr[]) => stack.map(pr => `#${pr.number}`).join(' ← ')
+
+/**
+ * The turn telling Claude how merging a stack from the board went: all merged into `base`, so it brings
+ * the checkout up to date; or stopped at a PR, with why, so it finds out and fixes what it can.
+ */
+export function stackNote(stack: Pr[], merged: Pr[], base: string, failure?: { at: Pr; why: string }): string {
+  const done = merged.length ? `merged ${merged.map(pr => `#${pr.number} (${pr.branch})`).join(', ')} into ${base}` : 'merged none of it'
+  if (failure)
+    return (
+      `The user merged the stack ${stackText(stack)} from the board, bottom first: it ${done}, then stopped at PR #${failure.at.number} ` +
+      `(branch ${failure.at.branch}): ${failure.why}. What is left stays in review. Find out why (failing checks on ${base}, a conflict, branch protection), ` +
+      `fix what you can on ${failure.at.branch}, bring the checkout up to date with ${base}, and tell the user whether the rest is ready to merge.`
+    )
+  return (
+    `The user merged the stack ${stackText(stack)} from the board: ${done}, each after its checks passed on ${base}; their items are approved. ` +
+    `Bring the checkout up to date: switch to ${base} and pull, delete the local branches ${stack.map(pr => pr.branch).join(', ')}, ` +
+    'then say in a line or two what is next on the roadmap.'
+  )
+}
+
 /** Whether a branch is the repository's main line, where a merged pull request's work is done. */
 export const isMainLine = (branch: string) => branch === 'main' || branch === 'master'
 

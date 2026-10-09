@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, commentNote, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, commentNote, stackFrom, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -1865,4 +1865,82 @@ test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s car
   expect(submitted.length).toBe(before)
   await ui.unmount()
   expect(commentNote(item('T5', { assignee: 'explore:a', title: 'X' }), 'hi')).toContain('which explore:a holds: "hi". If explore:a is still running, pass it on (SendMessage)')
+})
+
+test('merge a stack from its bottom card: in order, each after its checks pass on main; items approved; a failure stops and tells Claude', async ($, on) => {
+  const some = [
+    item('T1', { status: 'review', assignee: 'claude', title: 'Bottom' }), item('T2', { status: 'review', assignee: 'claude', title: 'Middle' }),
+    item('T3', { status: 'review', assignee: 'claude', title: 'Top' }),
+  ]
+  const pr = (number: number, id: string, branch: string, base: string) =>
+    ({ number, title: `${id}: x`, headRefName: branch, baseRefName: base, state: 'OPEN', url: `https://x/${number}`, statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }] })
+  const ghList = JSON.stringify([pr(15, 'T3', 't3-top', 't2-middle'), pr(12, 'T2', 't2-middle', 't1-bottom'), pr(11, 'T1', 't1-bottom', 'main')])
+  const ran: string[] = []
+  const scripts: string[] = []
+  const submitted: string[] = []
+  let failing = 0
+  on('process.run', ($, e) => {
+    const argv = e.argv.join(' ')
+    if (e.argv[0] === 'gh') {
+      if (e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
+      ran.push(argv)
+      if (e.argv[2] === 'view') {
+        const isFailing = Number(e.argv[3]) === failing
+        return { value: { ...fakeSqlite('', null), stdout: JSON.stringify({ mergeable: 'MERGEABLE', statusCheckRollup: [{ status: 'COMPLETED', conclusion: isFailing ? 'FAILURE' : 'SUCCESS' }] }) } }
+      }
+      return { value: { ...fakeSqlite('', null), stdout: '' } }
+    }
+    if (e.argv[0] === 'git') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    scripts.push(e.init?.stdin ?? '')
+    return { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'T1' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  // Only the bottom's card offers the stack; the others are stacked on another PR.
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ key: 'merge-stack' })).toBeUndefined()
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ type: 'Text', text: /stack #11 ← #12 ← #15/ })).toBeDefined()
+  await ui.press({ key: 'merge-stack' })
+  expect(await ui.find({ type: 'Text', text: /Merge #11, then #12, then #15 into main, each once its checks pass there\?/ })).toBeDefined()
+  await ui.press({ key: 'stack-yes' })
+  expect(ran).toEqual([
+    'gh pr view 11 --json statusCheckRollup,mergeable', 'gh pr merge 11 --merge',
+    'gh pr edit 12 --base main', 'gh pr update-branch 12', 'gh pr view 12 --json statusCheckRollup,mergeable', 'gh pr merge 12 --merge',
+    'gh pr edit 15 --base main', 'gh pr update-branch 15', 'gh pr view 15 --json statusCheckRollup,mergeable', 'gh pr merge 15 --merge',
+  ])
+  for (const id of ['T1', 'T2', 'T3']) expect(scripts.some(one => one.includes(`status='done'`) && one.includes(`WHERE id='${id}'`))).toBe(true)
+  expect(submitted.at(-1)).toContain('The user merged the stack #11 ← #12 ← #15 from the board: merged #11 (t1-bottom), #12 (t2-middle), #15 (t3-top) into main')
+  await ui.press({ key: 'close' })
+  await ui.unmount()
+
+  // The top's checks fail once it is on main: the run stops there, its item stays in review, and Claude hears where.
+  ran.length = 0
+  scripts.length = 0
+  failing = 15
+  const again = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await again.press({ key: 'card-T1' })
+  await again.press({ key: 'merge-stack' })
+  await again.press({ key: 'stack-yes' })
+  expect(ran).not.toContain('gh pr merge 15 --merge')
+  expect(ran).toContain('gh pr merge 12 --merge')
+  expect(scripts.some(one => one.includes(`status='done'`) && one.includes("WHERE id='T3'"))).toBe(false)
+  expect(submitted.at(-1)).toContain('then stopped at PR #15 (branch t3-top): its checks failed on main')
+  await again.unmount()
+  expect(stackFrom({ commits: [], prs: parsePrs(ghList) }, parsePrs(ghList)[1]!).map(one => one.number)).toEqual([12])
 })

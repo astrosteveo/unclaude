@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, lastChange, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -64,6 +64,10 @@ export type PaneState = {
   handing: string | null
   /** The item waiting on a yes before it is approved and its pull request merged. */
   merging: string | null
+  /** The item whose card asks before merging its stack of PRs. */
+  stacking: string | null
+  /** What a stack being merged is doing now; empty when none is. */
+  stackRun: string
   /** Whether a comment on an agent's card starts a turn at once. */
   commentTurns: boolean
   /** The task whose card asks for its release note, having just been set done. */
@@ -100,6 +104,10 @@ export type PaneActions = {
   setEditing: (isOn: boolean) => void
   /** Takes back the person's last change, or the logged entries `ids`. */
   undo: (ids?: number[]) => void
+  /** Asks to confirm merging the stack on an item's card (null drops the question). */
+  askStack: (id: string | null) => void
+  /** Merges a stack of PRs, bottom first. */
+  mergeStack: (stack: Pr[]) => void
   /** Posts the person's comment on an item (starting a turn when set to). */
   comment: (item: Item, body: string) => void
   /** Puts a prompt about an item in the prompt box. */
@@ -145,7 +153,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -240,6 +248,7 @@ export function drawPane(
         onPress={() => act.setFiltering(true)} />}
       {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
       {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
+      {stackRun && <Text color="yellow">Merging a stack: {stackRun}</Text>}
       {/* With a card open, n adds under it (on the card's bar) instead. */}
       {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
     </Box>
@@ -580,6 +589,7 @@ export function drawPane(
     ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
     ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
     ...(canUndo ? ['Undo'.length + 4] : []),
+    ...(stackRun ? [`Merging a stack: ${stackRun}`.length] : []),
   ], width)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
@@ -591,14 +601,17 @@ export function drawPane(
   // The card's pull request, held under the bar with the buttons that act on it; and the one it is stacked on.
   const cardPr = item ? openPrOf(known, item) : undefined
   const under = cardPr && stackedOn(known, cardPr)
+  // The bottom of a stack merges the whole of it.
+  const stack = cardPr ? stackFrom(known, cardPr) : []
+  const isStack = stack.length > 1
   const prText = cardPr
-    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  stacked on #${under.number}: merge that first` : ''}`
+    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  stacked on #${under.number}: merge that first` : ''}${isStack ? `  stack ${stackText(stack)} [ Merge the stack ]` : ''}${stackRun ? `  ${stackRun}` : ''}`
     : ''
   const prRows = cardPr ? tall(prText) : 0
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id || noting === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
@@ -678,7 +691,15 @@ export function drawPane(
             </Text>
           </Box>
         )}
-        {noting === item.id && Input ? (
+        {stacking === item.id && isStack ? (
+          <Box key="stack-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
+            <Text color="yellow">
+              Merge {stack.map(pr => `#${pr.number}`).join(', then ')} into {stack[0]!.base || 'main'}, each once its checks pass there?
+            </Text>
+            <Button key="stack-yes" label="Merge the stack" onPress={() => act.mergeStack(stack)} />
+            <Button key="stack-cancel" label="Cancel" onPress={() => act.askStack(null)} />
+          </Box>
+        ) : noting === item.id && Input ? (
           <Box key="note-row" flexDirection="row" columnGap={1}>
             <Input key="note" label={`Release note (${sectionFor(item)})`} placeholder="One line for the CHANGELOG; Enter saves it" autoFocus submitLabel="save"
               onSubmit={(value: string) => {
@@ -734,7 +755,7 @@ export function drawPane(
         )}
       </Box>
       {cardPr && (
-        <Box key="pr-line">
+        <Box key="pr-line" flexDirection="row" flexWrap="wrap" columnGap={1}>
         <Text>
           <Link href={cardPr.url}>PR #{cardPr.number}</Link>
           <Text color="green"> [open]</Text>
@@ -742,7 +763,10 @@ export function drawPane(
           <Text dimColor> {cardPr.branch} → </Text>
           <Text>{cardPr.base || '?'}</Text>
           {under && <Text color="yellow">  stacked on #{under.number}: merge that first</Text>}
+          {isStack && <Text dimColor>  stack {stackText(stack)}</Text>}
+          {stackRun && <Text color="yellow">  {stackRun}</Text>}
         </Text>
+        {isStack && !stackRun && <Button key="merge-stack" label="Merge the stack" onPress={() => act.askStack(item.id)} />}
         </Box>
       )}
       {!isCompact && (

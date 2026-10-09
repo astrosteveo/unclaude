@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, askAbout, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, askAbout, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -36,6 +36,9 @@ const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as str
 const merging = atom({ plugin: 'roadmap', key: 'merging' } as const, null as string | null)
 // The task just set done on the board, whose card asks for its release note.
 const noting = atom({ plugin: 'roadmap', key: 'noting' } as const, null as string | null)
+// The item whose card waits on a yes before merging its stack of PRs, and the run's progress while one goes.
+const stacking = atom({ plugin: 'roadmap', key: 'stacking' } as const, null as string | null)
+const stackRun = atom({ plugin: 'roadmap', key: 'stackRun' } as const, '')
 // Whether a comment on an agent's card starts a turn at once; the person's setting, kept across sessions.
 const commentTurns = atom({ plugin: 'roadmap', key: 'commentTurns' } as const, false)
 // How many rows the open card's sections are scrolled under its fixed title and bar.
@@ -876,6 +879,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, handing, () => null)
   await update($, merging, () => null)
   await update($, noting, () => null)
+  await update($, stacking, () => null)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -931,6 +935,88 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
   // An agent's work: it hears at once, to bring the checkout up to date. Each approval is its own turn,
   // taken in order once the session is idle. The person's own work needs no word.
   if (isAgent(item.assignee)) await $.prompt.submit({ text: approvalNote(item, pr) }).catch(() => undefined)
+}
+
+// While a stack merges, how often a PR's checks are asked after, and how long they are waited for.
+const CHECKS_EVERY = 10_000
+const CHECKS_WAIT = 30 * 60_000
+
+type Ran = { exitCode: number; stdout: string; stderr: string }
+
+/** Runs gh in the project; a gh that cannot start answers as a failure, with why. */
+const gh = async ($: EngineInterface, args: string[], timeoutMs = 60_000): Promise<Ran> =>
+  runAt($, ['gh', ...args], { timeoutMs }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }))
+const whyNot = (ran: Ran) => ran.stderr.trim() || ran.stdout.trim() || `exit ${ran.exitCode}`
+
+/**
+ * Waits until `pr` can merge into `base`: its checks passed (or the repository reports none) and it has
+ * no conflict. Answers why not, when it can't.
+ */
+async function checksSettle($: EngineInterface, pr: Pr, base: string): Promise<string | undefined> {
+  const started = await $.clock.now()
+  let quiet = 0
+  for (;;) {
+    const ran = await gh($, ['pr', 'view', String(pr.number), '--json', 'statusCheckRollup,mergeable'], 30_000)
+    if (ran.exitCode !== 0) return `gh could not read it: ${whyNot(ran)}`
+    const view = JSON.parse(ran.stdout) as { statusCheckRollup?: Parameters<typeof checksOf>[0]; mergeable?: string }
+    if (view.mergeable === 'CONFLICTING') return `it conflicts with ${base}`
+    const checks = checksOf(view.statusCheckRollup)
+    if (checks === 'fail') return `its checks failed on ${base}`
+    const isKnown = view.mergeable !== 'UNKNOWN'
+    if (checks === 'pass' && isKnown) return undefined
+    // No checks reported, and still none a little later: the repository runs none.
+    if (checks === 'none' && isKnown && ++quiet >= 3) return undefined
+    if ((await $.clock.now()) - started > CHECKS_WAIT) return `its checks were still running after ${CHECKS_WAIT / 60_000} minutes`
+    await $.clock.sleep(CHECKS_EVERY)
+  }
+}
+
+/**
+ * Merges a stack of pull requests into the main line, bottom first, from the person's press on the board.
+ * Each one above the bottom is moved onto the main line once the one under it merged and brought up to
+ * date with it, so its checks run on what it now merges into; it merges only once they pass. The items
+ * of each merged PR are approved. A failure stops the run where it is, and Claude is told, as is success.
+ */
+async function mergeStack($: EngineInterface, stack: Pr[]) {
+  await update($, stacking, () => null)
+  if (await read($, stackRun)) return $.ui.toast('roadmap: a stack is already merging')
+  const base = stack[0]!.base || 'main'
+  const merged: Pr[] = []
+  const say = (text: string) => update($, stackRun, () => text)
+  const stop = async (at: Pr, why: string) => {
+    await say('')
+    $.ui.toast(`roadmap: merging the stack stopped at PR #${at.number}: ${why}. Claude is looking into it.`)
+    await $.prompt.submit({ text: stackNote(stack, merged, base, { at, why }) }).catch(() => undefined)
+  }
+  for (const [i, pr] of stack.entries()) {
+    const step = `PR #${pr.number} (${i + 1} of ${stack.length})`
+    if (i > 0) {
+      await say(`${step}: moving it onto ${base}`)
+      const moved = await gh($, ['pr', 'edit', String(pr.number), '--base', base])
+      if (moved.exitCode !== 0) return stop(pr, `it could not be moved onto ${base}: ${whyNot(moved)}`)
+      const fresh = await gh($, ['pr', 'update-branch', String(pr.number)])
+      if (fresh.exitCode !== 0 && !/up.to.date/i.test(`${fresh.stdout} ${fresh.stderr}`))
+        return stop(pr, `its branch could not be brought up to date with ${base}: ${whyNot(fresh)}`)
+    }
+    await say(`${step}: waiting for its checks on ${base}`)
+    const problem = await checksSettle($, pr, base)
+    if (problem) return stop(pr, problem)
+    await say(`${step}: merging`)
+    const ran = await gh($, ['pr', 'merge', String(pr.number), '--merge'])
+    if (ran.exitCode !== 0) return stop(pr, `the merge failed: ${whyNot(ran)}`)
+    merged.push(pr)
+    const snap = await read($, snapshot)
+    for (const id of pr.ids) {
+      const it = find(snap.items, id)
+      if (!it || statusOf(snap.items, it) !== 'review') continue
+      await userAct($, { action: 'comment', id: it.id, body: `Approved; merged PR #${pr.number} with its stack.` })
+      await userAct($, { action: 'update', id: it.id, status: 'done' })
+    }
+  }
+  await say('')
+  await refreshRefs($, true).catch(() => undefined)
+  $.ui.toast(`roadmap: merged ${stackText(stack)} into ${base}`)
+  await $.prompt.submit({ text: stackNote(stack, merged, base) }).catch(() => undefined)
 }
 
 /** Sends a task back from review with what needs changing, and puts its agent back on it. */
@@ -1226,6 +1312,8 @@ export const register: Register = on => {
       isEditing: await read($, editing),
       handing: await read($, handing),
       merging: await read($, merging),
+      stacking: await read($, stacking),
+      stackRun: await read($, stackRun),
       commentTurns: await read($, commentTurns),
       noting: await read($, noting),
       scrolledTo: await read($, scrolled),
@@ -1253,6 +1341,8 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
+      askStack: id => void update($, stacking, () => id).then(() => focusOn($, id ? 'stack-cancel' : 'close')),
+      mergeStack: stack => void mergeStack($, stack),
       comment: (item, body) => void postComment($, item, body),
       askClaude: item => void askClaude($, item),
       setCommentTurns: isOn => void update($, commentTurns, () => isOn).then(() => $.store.set('commentTurns', isOn)).then(() => focusOn($, 'comment-turns')),
