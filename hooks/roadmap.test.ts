@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, commentNote, cutRelease, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -2132,4 +2132,45 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   // A subagent's approval doesn't count.
   ran.length = 0
   expect(await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', version: '0.5.0', approved: true, agentId: 'a1' } as never).then(r => String(r.result ?? r.deny))).toContain("the user's call")
+})
+
+test('timeline: milestones and epics by due date with their progress; late work marked on the board and in the brief', async ($, on) => {
+  const some = [
+    item('M1', { title: 'Launch', due: '2026-10-20' }), item('E1', { parent: 'M1', title: 'Billing', due: '2026-10-05' }),
+    item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude' }),
+    item('T3', { parent: 'M1' }), item('M2', { title: 'Later' }), item('T4', { parent: 'M2' }),
+  ]
+  const now = Date.parse('2026-10-09T12:00:00Z')
+  expect(dueOf(some, find(some, 'T2')!)).toBe('2026-10-05')
+  expect(dueOf(some, find(some, 'T3')!)).toBe('2026-10-20')
+  expect(dueOf(some, find(some, 'T4')!)).toBeUndefined()
+  expect(['T1', 'T2', 'T3', 'T4', 'E1', 'M1'].filter(id => isLate(some, find(some, id)!, now))).toEqual(['T2', 'E1'])
+  expect(isLate(some, find(some, 'T2')!, 0)).toBe(false)
+  expect(timelineOf(some).map(one => one.id)).toEqual(['M1', 'E1', 'M2'])
+  expect(timelineOf([item('M1'), item('M2', { due: '2026-01-01' }), item('E2', { parent: 'M2' }), item('E1', { parent: 'M2', due: '2026-02-01' }), item('E3')]).map(one => one.id))
+    .toEqual(['M2', 'E1', 'E2', 'M1', 'E3'])
+  // The brief names what is overdue, by its own date.
+  expect(brief({ items: some, activity: [], seen: {} }, 'claude', [], now)).toContain('Overdue (past their due date, not done; today is 2026-10-09):\n- E1')
+
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('clock.now', () => ({ value: now }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock' } as never,
+  })
+  // On the board, a task past its (inherited) date is marked late.
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('⚠late')
+  expect((await ui.find({ key: 'card-T3' }))?.text).not.toContain('late')
+  await ui.press({ key: 'tab-timeline' })
+  expect((await ui.find({ key: 'time-E1' }))?.text).toContain('2026-10-05  ▓▓▓▓▓░░░░░ 1/2  4 days late, 1 open')
+  expect((await ui.find({ key: 'time-M1' }))?.text).toContain('2026-10-20  ▓▓▓░░░░░░░ 1/3  in 11 days')
+  expect((await ui.find({ key: 'time-M2' }))?.text).toContain('no due date')
+  // A row opens its card.
+  await ui.press({ key: 'time-M1' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
+  await ui.unmount()
 })

@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, timelineOf, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -11,7 +11,7 @@ export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yello
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog']]
+const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog'], ['timeline', 'Timeline']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -198,6 +198,8 @@ export function drawPane(
   const card = (item: Item, room: number) => {
     const fullWho = item.assignee ? ` @${item.assignee}` : ''
     const stale = isStale(item, now) ? ' ⌛stale' : ''
+    // Past when it was due, its own date or one above it.
+    const late = isLate(items, item, now) ? ' ⚠late' : ''
     const news = badge(item)
     const waits = waitingOn(items, item).map(one => one.id)
     const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
@@ -209,7 +211,7 @@ export function drawPane(
     // Work in review shows the pull request an Approve would merge.
     const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
     const prTag = pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : ''
-    const marked = item.id.length + stale.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
+    const marked = item.id.length + stale.length + late.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
     // A readable title comes first: a long name (a parallel task's agent) is cut short to make room for it.
     const whoRoom = Math.max(8, room - marked - 12)
     const who = fullWho.length > whoRoom ? `${fullWho.slice(0, whoRoom - 1)}…` : fullWho
@@ -230,6 +232,7 @@ export function drawPane(
         <Text color="red" dimColor>
           {stale}
         </Text>
+        <Text color="red">{late}</Text>
         <Text color="magenta" bold>
           {news}
         </Text>
@@ -403,6 +406,42 @@ export function drawPane(
           </Box>
         ) : row
       })}
+    </Box>
+  )
+
+  // The timeline: milestones and epics by due date, each with its progress and how it stands against the date.
+  const today = now > 0 ? dateOf(now) : undefined
+  const timelineAll = timelineOf(items).filter(one => !query || subtree(items, one.id).some(id => isShown(find(items, id)!)))
+  const timelineShown = isDocked ? timelineAll.slice(0, Math.max(1, topRows - 1)) : timelineAll
+  const BAR = 10
+  const timelineView = (
+    <Box flexDirection="column">
+      {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
+      {timelineShown.map(one => {
+        const p = progress(items, one)
+        const st = statusOf(items, one)
+        const filled = p.total ? Math.round((p.done / p.total) * BAR) : 0
+        const days = one.due && today ? daysBetween(today, one.due) : undefined
+        const late = isLate(items, one, now)
+        const open = p.total - p.done
+        const when = days === undefined ? '' : st === 'done' ? '' : late ? `${-days} day${days === -1 ? '' : 's'} late, ${open} open` : days === 0 ? 'due today' : `in ${days} day${days === 1 ? '' : 's'}`
+        const isUnder = Boolean(one.parent && find(items, one.parent))
+        // An epic without a date of its own goes by its milestone's.
+        const date = one.due ? `  ${one.due}` : isUnder ? '' : '  no due date'
+        const fixed = (isUnder ? 2 : 0) + 2 + one.id.length + 1 + date.length + 2 + BAR + ` ${p.done}/${p.total}`.length + (when ? when.length + 2 : 0)
+        const title = one.title.length + fixed > width - 1 ? `${one.title.slice(0, Math.max(8, width - fixed - 2))}…` : one.title
+        return (
+          <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
+            {isUnder ? '  ' : ''}
+            <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
+            <Text dimColor>{date}  </Text>
+            <Text color="green">{'▓'.repeat(filled)}</Text>
+            <Text dimColor>{'░'.repeat(BAR - filled)} {p.done}/{p.total}</Text>
+            <Text color={late ? 'red' : undefined} dimColor={!late} bold={late}>{when ? `  ${when}` : ''}</Text>
+          </Button>
+        )
+      })}
+      {timelineShown.length < timelineAll.length && <Text key="timeline-more" dimColor>…{timelineAll.length - timelineShown.length} more (close the card to see them all)</Text>}
     </Box>
   )
 
@@ -910,12 +949,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'tree' ? tree : backlogView}
+                {mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : backlogView)
+            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView)
           )
         )}
         {items.length > 0 && !trouble && (

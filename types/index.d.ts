@@ -108,7 +108,7 @@ export type Activity = {
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
 export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number> }
 
-export type View = 'board' | 'tree' | 'backlog'
+export type View = 'board' | 'tree' | 'backlog' | 'timeline'
 
 /** The new-item form's choices so far; the title is typed last and submits it. */
 export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: string }

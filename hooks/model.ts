@@ -466,6 +466,35 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   ]
 }
 
+/** The date of a clock reading, as due dates are written (YYYY-MM-DD). */
+export const dateOf = (now: number) => new Date(now).toISOString().slice(0, 10)
+
+/** When an item is due: its own date, else the nearest one above it. */
+export function dueOf(items: Item[], item: Item): string | undefined {
+  let at: Item | undefined = item
+  while (at && !at.due) at = find(items, at.parent ?? undefined)
+  return at?.due ?? undefined
+}
+
+/** Whether an item is past when it was due (its own date or one above it) and not done; never without a clock. */
+export const isLate = (items: Item[], item: Item, now: number) => {
+  const due = dueOf(items, item)
+  return now > 0 && due !== undefined && due < dateOf(now) && statusOf(items, item) !== 'done'
+}
+
+/** Days from date `a` to date `b` (YYYY-MM-DD): negative when `b` is before `a`. */
+export const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000)
+
+/**
+ * The timeline: milestones (and epics under none) by due date, soonest first and undated last, each
+ * milestone followed by its epics in the same order.
+ */
+export function timelineOf(items: Item[]): Item[] {
+  const byDue = (list: Item[]) => [...list].sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999') || byId(a, b))
+  const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, one.parent ?? undefined)))
+  return top.flatMap(one => [one, ...(one.kind === 'milestone' ? byDue(childrenOf(items, one.id).filter(child => child.kind === 'epic')) : [])])
+}
+
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */
 export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number, refs?: Refs): string | undefined {
   if (snap.items.length === 0) return undefined
@@ -489,6 +518,9 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   if (stale.length)
     parts.push(`Stale claims (holder silent over ${LEASE_MS / 60_000} min; claiming takes one over):\n` + list(stale))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
+  // Dated items past their date: a milestone, epic or task with a due date of its own.
+  const late = now === undefined ? [] : items.filter(item => item.due && isLate(items, item, now)).sort((a, b) => a.due!.localeCompare(b.due!))
+  if (late.length) parts.push(`Overdue (past their due date, not done; today is ${dateOf(now!)}):\n` + list(late))
   if (review.length) {
     // Each with its pull request, or a note that it still needs one.
     const pr = (item: Item) => {

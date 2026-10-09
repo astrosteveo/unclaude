@@ -6,6 +6,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Added
 
+- A Timeline tab: milestones by due date, each followed by its epics, with progress bars and how each stands against its date (*in 11 days*, or *4 days late, 1 open*). Tasks past their due date, their own or inherited, are marked `⚠late` on the board, and the session brief lists overdue items.
 - A `ship` action for releases, in two steps. First it bumps the manifests' version, cuts CHANGELOG `[Unreleased]` as that version (dated, with compare and tag links) and opens the release PR. Once that PR has merged and the user confirms (`approved`), it tags the merge and publishes the GitHub release from the version's notes. A version that isn't higher is refused, and so is a first 1.0 unless the user asked for it.
 - Mark all read, by the unread count in the board's header: every comment on the board counts as read, and comments after it count again.
 - Run several tasks at once. Pick todo tasks in the Backlog, or press Run its tasks at once on an epic or milestone, and confirm. Each task gets a git worktree of its own under `.claude/worktrees/`, on a branch named for the task, and an agent of its own (Claude starts them, since agents a mod starts can't call its tool). The board shows whose each is, and the band shows each agent's task and checklist. A task waiting on another starts once that one is done, at most four at a time; the queue survives a restart.
