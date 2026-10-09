@@ -333,6 +333,15 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
 }
 
 /**
+ * The backlog to triage: todo tasks nobody holds, those filed under no milestone or epic first (they
+ * still need a home), then by priority, then oldest first.
+ */
+export const backlog = (items: Item[]): Item[] =>
+  items
+    .filter(item => item.kind === 'task' && item.status === 'todo' && !item.assignee)
+    .sort((a, b) => Number(a.parent !== null) - Number(b.parent !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
+
+/**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
  * unassigned todo tasks that wait on nothing unfinished, by priority, then due date, then others'
  * claims gone stale (given `now`), which a claim takes over.

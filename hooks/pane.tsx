@@ -3,13 +3,15 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Item, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  find, GLYPH, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, find, GLYPH, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
+// The views, in the order `v` steps through them.
+const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog']]
 export const HOTKEY: Record<Status, string> = { todo: 't', in_progress: 'p', blocked: 'b', review: 'r', done: 'd' }
 
 /** What the pane draws from, read by the hooks module. */
@@ -81,6 +83,7 @@ export function drawPane(
 ): { node: RenderElement; scrollMax: number } {
   const { Box, Text, Button } = els
   const Input = 'Input' in els ? els.Input : undefined
+  const Select = 'Select' in els ? els.Select : undefined
   const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering } = state
   const query = parseQuery(filter)
   // What the filter lets through: everything without one; with one, what matches and, in the tree, what holds it.
@@ -131,13 +134,14 @@ export function drawPane(
   }
 
   const unreadTotal = items.reduce((sum, item) => sum + unread(snap, item.id, USER).length, 0)
+  const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
   const header = (
     <Box flexDirection="row" gap={1}>
-      {/* `v` switches to whichever view is not showing: one hotkey, held by the inactive tab alone. */}
-      <Button key="tab-board" label="Board" variant={mode === 'board' ? 'primary' : 'secondary'}
-        hotkey={mode === 'board' ? undefined : 'v'} onPress={() => act.setView('board')} />
-      <Button key="tab-tree" label="Tree" variant={mode === 'tree' ? 'primary' : 'secondary'}
-        hotkey={mode === 'tree' ? undefined : 'v'} onPress={() => act.setView('tree')} />
+      {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
+      {VIEWS.map(([one, label]) => (
+        <Button key={`tab-${one}`} label={label} variant={mode === one ? 'primary' : 'secondary'}
+          hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)} />
+      ))}
       <Text dimColor>
         {items.filter(i => i.kind === 'task' && i.status === 'done').length}/{items.filter(i => i.kind === 'task').length} tasks done
       </Text>
@@ -202,6 +206,36 @@ export function drawPane(
               {badge(item)}
             </Text>
           </Button>
+        )
+      })}
+    </Box>
+  )
+
+  // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
+  const triage = backlog(items).filter(isShown)
+  const backlogView = (
+    <Box flexDirection="column">
+      {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
+      {triage.map(task => {
+        const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
+        const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
+        return (
+          <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
+            {Select ? (
+              <Select key={`prio-${task.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={task.priority}
+                onSelect={(value: string) => act.userAct({ action: 'update', id: task.id, priority: value })} />
+            ) : (
+              <Text key={`prio-${task.id}`} color={PRIORITY_COLOR[task.priority]}>{task.priority}</Text>
+            )}
+            <Button key={`row-${task.id}`} plain onPress={choose(task.id)}>
+              <Text dimColor>{task.id}</Text> {task.title}
+              <Text dimColor>
+                {where}
+                {tags ? ` ${tags}` : ''}
+              </Text>
+            </Button>
+            <Button key={`hand-${task.id}`} label="→ Claude" onPress={() => act.handToClaude(task)} />
+          </Box>
         )
       })}
     </Box>
@@ -350,7 +384,7 @@ export function drawPane(
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (item
     ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', 'h hand to Claude', 'm/u assign', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${mode === 'board' ? 'tree' : 'board'}`]
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
   )
     .filter(Boolean)
     .join(' · ')
@@ -479,7 +513,7 @@ export function drawPane(
           <Text dimColor>No roadmap yet. Ask Claude to plan milestones, epics and tasks.</Text>
         ) : (
           // An open item stands in for the board, so a long board never pushes it off screen.
-          panel ?? (mode === 'board' ? board : tree)
+          panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : backlogView)
         )}
         {items.length > 0 && !trouble && (
           <Text dimColor>

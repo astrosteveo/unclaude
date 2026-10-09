@@ -93,7 +93,7 @@ export type Activity = {
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
 export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number> }
 
-export type View = 'board' | 'tree'
+export type View = 'board' | 'tree' | 'backlog'
 
 /** A commit whose message names roadmap ids. */
 export type Commit = { hash: string; author: string; date: string; subject: string; ids: string[] }
