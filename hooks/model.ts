@@ -399,7 +399,7 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
 }
 
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */
-export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number): string | undefined {
+export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number, refs?: Refs): string | undefined {
   if (snap.items.length === 0) return undefined
   const items = snap.items
   const tasks = items.filter(item => item.kind === 'task')
@@ -421,7 +421,18 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   if (stale.length)
     parts.push(`Stale claims (holder silent over ${LEASE_MS / 60_000} min; claiming takes one over):\n` + list(stale))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
-  if (review.length) parts.push("Waiting on the user's review (they approve on the board, or tell you to):\n" + list(review))
+  if (review.length) {
+    // Each with its pull request, or a note that it still needs one.
+    const pr = (item: Item) => {
+      if (!refs) return ''
+      const open = refs.prs.find(one => one.state === 'open' && one.ids.includes(item.id))
+      return open ? ` — PR #${open.number} ${open.url}` : ' — no PR yet'
+    }
+    parts.push(
+      "Waiting on the user's review (they approve on the board, or tell you to):\n" +
+        review.slice(0, 8).map(item => `- ${line(items, item)}${pr(item)}`).join('\n'),
+    )
+  }
   if (news.length)
     parts.push(
       'Changes by the user since you last looked:\n' +
@@ -436,6 +447,34 @@ function slug(text: string, cap: number): string {
   if (full.length <= cap) return full
   const cut = full.slice(0, cap + 1).lastIndexOf('-')
   return cut > 0 ? full.slice(0, cut) : full.slice(0, cap)
+}
+
+/**
+ * What `item` ships in: the milestone or epic it was handed over inside, or the item itself. One unit
+ * of work, one review, one branch and one pull request.
+ */
+export const unitOf = (items: Item[], item: Item): Item => handedScope(items, item) ?? item
+
+/** The branch a unit of work is built on: its id and title, as `e9-agent-coordination`. */
+export const branchFor = (item: Item) => `${item.id.toLowerCase()}-${slug(item.title, 40)}`.replace(/-$/, '')
+
+/** A unit's pull request: titled with its id, the body listing what was done and what done meant. */
+export function pullRequest(items: Item[], item: Item): { branch: string; title: string; body: string } {
+  const tasks = item.kind === 'task' ? [item] : subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task')
+  const parts: string[] = []
+  if (item.description) parts.push(item.description)
+  parts.push(
+    tasks
+      .map(task => {
+        const head = item.kind === 'task' ? '' : `- **${task.id}** ${task.title}\n`
+        const pad = item.kind === 'task' ? '' : '  '
+        return head + task.checklist.map(c => `${pad}- [${c.done ? 'x' : ' '}] ${c.text}`).join('\n')
+      })
+      .join('\n')
+      .trim(),
+  )
+  parts.push(`Tracked on the roadmap as ${item.id}${item.parent ? `, in ${path(items, item)}` : ''}.`)
+  return { branch: branchFor(item), title: `${item.id}: ${item.title}`, body: parts.filter(Boolean).join('\n\n') }
 }
 
 /**

@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, brief, checkLinks, handedScope, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, branchFor, brief, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -1036,4 +1036,42 @@ test('epic and milestone ids link too: a scope\'s PR shows on it, on what it sit
   expect(on('T1').commits).toEqual([])
   expect(on('M1').commits.map(c => c.hash)).toEqual(['aaa1111'])
   expect(on('T2')).toEqual({ commits: [], prs: [] })
+})
+
+test('branch and pull request per unit of work: named from the unit, body from its tasks, asked for at review', async ($, on) => {
+  const some = [
+    item('E1', { title: 'Agent coordination!', assignee: 'claude', description: 'Keep agents apart.' }),
+    item('T1', { parent: 'E1', title: 'Leases', status: 'in_progress', assignee: 'claude', checklist: [{ n: 1, text: 'renews', done: true }] }),
+    item('T2', { title: 'Lone fix', status: 'in_progress', assignee: 'claude', checklist: [{ n: 1, text: 'fixed', done: true }] }),
+  ]
+  expect(unitOf(some, some[1]!).id).toBe('E1')
+  expect(unitOf(some, some[2]!).id).toBe('T2')
+  expect(branchFor(some[0]!)).toBe('e1-agent-coordination')
+  expect(pullRequest(some, some[0]!)).toEqual({
+    branch: 'e1-agent-coordination',
+    title: 'E1: Agent coordination!',
+    body: 'Keep agents apart.\n\n- **T1** Leases\n  - [x] renews\n\nTracked on the roadmap as E1.',
+  })
+  expect(pullRequest(some, some[2]!).body).toBe('- [x] fixed\n\nTracked on the roadmap as T2.')
+  const reviewing = [{ ...some[0]!, status: 'review' as const }, { ...some[1]!, status: 'done' as const }, item('T3', { status: 'review', assignee: 'claude' })]
+  const refs = { commits: [], prs: parsePrs(JSON.stringify([{ number: 4, title: 'E1: Agent coordination', headRefName: 'e1-agent-coordination', state: 'OPEN', url: 'https://x/4' }])) }
+  const text = brief({ items: reviewing, activity: [], seen: {} }, 'claude', [], undefined, refs)!
+  expect(text).toMatch(/E1 .* — PR #4 https:\/\/x\/4/)
+  expect(text).toMatch(/T3 .* — no PR yet/)
+
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    const isClaim = stdin.includes("'assign'") && stdin.includes('lease_at=')
+    return { value: isClaim ? { ...fakeSqlite('', null), stdout: 'claude' } : fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  expect(String((await call({ action: 'claim', id: 'T1' })).result)).toContain("Work on branch e1-agent-coordination (E1's, which this task ships in)")
+  expect(String((await call({ action: 'claim', id: 'T2' })).result)).toContain('Work on branch t2-lone-fix:')
+  const done = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  expect(done).toContain('Now open its pull request')
+  expect(done).toContain('gh pr create --title "T2: Lone fix"')
+  const pr = String((await call({ action: 'pr', id: 'T1' })).result)
+  expect(pr).toContain('Branch: e1-agent-coordination')
+  expect(pr).toContain('Title: E1: Agent coordination!')
 })
