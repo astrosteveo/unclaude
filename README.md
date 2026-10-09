@@ -54,7 +54,7 @@ What Claude does with it:
 
 ## How it's stored
 
-Everything lives in `.claude/roadmap.db` (SQLite) in your project, shared by every Claude Code session and agent working there. Writes are transactions, so concurrent agents don't lose each other's changes. The file is binary, so it belongs in `.gitignore`. If it isn't ignored, the board offers to add it once (press `g`), or you can turn the offer down. The schema is versioned: a newer build of the mod migrates older databases on first use, and an older build refuses a newer database instead of corrupting it.
+Everything lives in `.claude/roadmap.db` (SQLite) in your project, shared by every Claude Code session and agent working there. The roadmap is made by the first write, and only at the top of a git repository: a session started in a subfolder uses the repository's roadmap, and one started in a folder that isn't a repository (say, the folder holding your projects) is refused, with the roadmaps it found below. Writes are transactions, so concurrent agents don't lose each other's changes. The file is binary, so it belongs in `.gitignore`. If it isn't ignored, the board offers to add it once (press `g`), or you can turn the offer down. The schema is versioned: a newer build of the mod migrates older databases on first use, and an older build refuses a newer database instead of corrupting it.
 
 ### Backups
 
