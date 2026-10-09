@@ -232,12 +232,36 @@ export function progress(items: Item[], item: Item): { done: number; total: numb
   return { done: tasks.filter(task => task.status === 'done').length, total: tasks.length }
 }
 
-/** A milestone's or epic's status follows its tasks once it has any; a task's is its own. */
+/** Whether `who` is an agent: anyone holding work who isn't the person at the board. */
+export const isAgent = (who: string | null | undefined) => Boolean(who) && who !== USER
+
+/**
+ * The milestone or epic above `item` that was handed to an agent as a whole, the outermost when there
+ * are several: the unit of work that is reviewed once, at its end, in place of what is inside it.
+ */
+export function handedScope(items: Item[], item: Item): Item | undefined {
+  let scope: Item | undefined
+  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined))
+    if (at.kind !== 'task' && isAgent(at.assignee)) scope = at
+  return scope
+}
+
+/**
+ * A milestone's or epic's status follows its tasks once it has any; a task's is its own. A milestone or
+ * epic handed to an agent as a whole is reviewed once its tasks are all done: it reads `review` until
+ * the person approves it (its own status set to done), or `in_progress` once they've asked for changes.
+ */
 export function statusOf(items: Item[], item: Item): Status {
   if (item.kind === 'task') return item.status
   const tasks = tasksUnder(items, item).map(task => task.status)
   if (tasks.length === 0) return item.status
-  if (tasks.every(status => status === 'done')) return 'done'
+  if (tasks.every(status => status === 'done')) {
+    if (isAgent(item.assignee) && item.status !== 'done' && !handedScope(items, item))
+      return item.status === 'in_progress' ? 'in_progress' : 'review'
+    // Not done while a part of it still waits on the person's review.
+    const isPartInReview = childrenOf(items, item.id).some(one => one.kind !== 'task' && statusOf(items, one) === 'review')
+    return isPartInReview ? 'review' : 'done'
+  }
   if (tasks.includes('blocked')) return 'blocked'
   if (tasks.some(status => status !== 'todo')) return 'in_progress'
   return 'todo'
@@ -379,7 +403,7 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   const milestones = items.filter(item => item.kind === 'milestone' && statusOf(items, item) !== 'done').sort(byId)
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done' && task.status !== 'review')
   const blocked = tasks.filter(task => task.status === 'blocked')
-  const review = tasks.filter(task => task.status === 'review')
+  const review = items.filter(item => statusOf(items, item) === 'review')
   const stale = now === undefined ? [] : tasks.filter(task => task.assignee !== actor && isStale(task, now))
   const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor && !stale.includes(task))
   const parts = [

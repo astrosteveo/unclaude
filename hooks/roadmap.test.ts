@@ -4,7 +4,7 @@ import type { On } from 'claude-code'
 
 import type { Activity, Item } from '../types'
 import { q, VERSION } from './db'
-import { agentName, backlog, brief, checkLinks, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, backlog, brief, checkLinks, handedScope, checkPlan, isStale, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** What sqlite3 prints for a script, for tests that stand in for it: the version, or the snapshot. */
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
@@ -803,5 +803,68 @@ test('backlog: unheld todo tasks, homeless first then by priority; a row sets pr
   await ui.input({ key: 'filter-input', text: '#ui' } as never)
   expect(await ui.find({ key: 'row-T3' })).toBeUndefined()
   expect(await ui.find({ key: 'row-T2' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('review at the level handed over: tasks in a handed epic close as they go; the epic is reviewed once', async ($, on) => {
+  const some = [
+    item('M1'),
+    item('E1', { parent: 'M1', assignee: 'claude' }),
+    item('T1', { parent: 'E1', status: 'done' }),
+    item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude' }),
+    item('T3', { status: 'in_progress', assignee: 'claude' }),
+  ]
+  expect(handedScope(some, some[3]!)?.id).toBe('E1')
+  expect(handedScope(some, some[4]!)).toBeUndefined()
+  expect(handedScope([...some.slice(1), item('M1', { assignee: 'claude' })], some[3]!)?.id).toBe('M1')
+  const allDone = some.map(one => (one.id === 'T2' ? { ...one, status: 'done' as const } : one))
+  expect(statusOf(allDone, allDone[1]!)).toBe('review')
+  // M1 wasn't handed over, but isn't done while E1 waits on review.
+  expect(statusOf(allDone, allDone[0]!)).toBe('review')
+  expect(statusOf(allDone.map(one => (one.id === 'E1' ? { ...one, status: 'done' as const } : one)), allDone[0]!)).toBe('done')
+  expect(statusOf(allDone, { ...allDone[1]!, status: 'done' })).toBe('done')
+  expect(statusOf(allDone, { ...allDone[1]!, status: 'in_progress' })).toBe('in_progress')
+  // The outermost handed scope holds the only review.
+  const both = allDone.map(one => (one.id === 'M1' ? { ...one, assignee: 'claude' } : one))
+  expect(statusOf(both, both[1]!)).toBe('done')
+  expect(statusOf(both, both[0]!)).toBe('review')
+  // Nothing handed: a finished epic is just done.
+  expect(statusOf(allDone.map(one => (one.id === 'E1' ? { ...one, assignee: null } : one)), { ...allDone[1]!, assignee: null })).toBe('done')
+
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+  const inScope = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  expect(inScope).toContain('closed as part of E1')
+  expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='T2'"))).toBe(true)
+  expect(String((await call({ action: 'update', id: 'T3', status: 'done' })).result)).toContain("waiting on the user's approval")
+  expect((await call({ action: 'update', id: 'E1', status: 'done' })).deny).toContain('closes when its tasks are done')
+})
+
+test('a handed epic in review is approved, or sent back, from its card', async ($, on) => {
+  const some = [item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done' })]
+  const scripts: string[] = []
+  let submitted = ''
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('prompt.submit', ($, e) => ((submitted = e.text), { text: e.text, origin: e.origin }))
+  const agentDone = String((await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'update', id: 'E1', status: 'done' } as never)).result)
+  expect(agentDone).toContain("waiting on the user's approval")
+  expect(scripts.some(one => one.includes("status='review'") && one.includes("WHERE id='E1'"))).toBe(true)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'row-E1' })
+  await ui.press({ key: 'approve' })
+  expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='E1'"))).toBe(true)
+  await ui.press({ key: 'request' })
+  await ui.input({ key: 'changes', text: 'add an empty state' } as never)
+  expect(submitted).toContain('sent roadmap epic E1')
   await ui.unmount()
 })

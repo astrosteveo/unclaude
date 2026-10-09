@@ -308,3 +308,15 @@ test('a claim from before leases counts its last change as the heartbeat', () =>
   sql("UPDATE items SET updated_at='2000-01-01T00:00:00Z';")
   assert.equal(sql(db.claim('claude', 'T1', false, 'old')), 'claude')
 })
+
+test('v3: milestones and epics already finished keep reading done; open ones are left as they were', () => {
+  raw(`BEGIN IMMEDIATE;\n${db.MIGRATIONS.slice(0, 2).join('\n')}\nPRAGMA user_version=2;\nCOMMIT;`)
+  raw(`INSERT INTO items(id, kind, title, parent, assignee) VALUES ('M1','milestone','m',NULL,'claude'), ('E1','epic','e','M1',NULL),
+    ('T1','task','a','E1',NULL), ('M2','milestone','open',NULL,'claude'), ('T2','task','b','M2',NULL);
+    UPDATE items SET status='done' WHERE id='T1';`)
+  raw(db.migrate(2))
+  isMigrated = true
+  assert.equal(item('M1').status, 'done')
+  assert.equal(item('E1').status, 'done')
+  assert.equal(item('M2').status, 'todo')
+})
