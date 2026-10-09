@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, approvalNote, askAbout, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, askAbout, readyIn, timeline, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere,
 } from './model'
 
@@ -449,6 +449,53 @@ const idList = (value: unknown) => listOf(value, /,/)
 const numbers = (value: unknown) => listOf(value, /,/).map(Number)
 
 /**
+ * Claims task `it` for `actor`, answering with all it takes to start cold: the task as it stands, its
+ * notes and the work already committed. Inside a unit taken whole, `unit` answers with that unit's
+ * detail in place of the task's, since it holds every task.
+ */
+async function claimTask($: EngineInterface, actor: string, snap: Snapshot, it: Item, force: boolean, t: Target, unit?: Item): Promise<string> {
+  const waiting = waitingOn(snap.items, it)
+  if (waiting.length && !force)
+    fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
+  const holder = (await sql($, db.claim(actor, it.id, force, it.assignee, it.status), t)) || null
+  const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${force ? '' : ', whose claim had gone stale'}.` : ''
+  if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
+  const after = await withHistory($, await refresh($, t), it.id, t)
+  // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
+  const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
+  const now = find(after.items, it.id) ?? it
+  const linked = refsText(refsFor(after.items, known, now))
+  const home = unitOf(after.items, now)
+  const where = `\nWork on branch ${branchFor(home)}${home.id === it.id ? '' : ` (${home.id}'s, which this task ships in)`}: switch to it, or create it from the branch you're building on. Commit as "${it.id}: …".`
+  if (!unit) return `${it.id} is yours (${actor}), in progress.${tookOver}${where}\n\n${detail(after, now, 10)}${linked ? `\n${linked}` : ''}`
+  // The unit's detail carries the task's description and checklist; only a handoff note is the task's own.
+  const handoff = timeline(after.activity, it.id).filter(one => one.type === 'handoff').at(-1)
+  const note = handoff ? `\nHandoff on ${it.id} from ${handoff.author}: ${handoff.body}` : ''
+  return `${it.id} is yours, in progress.${tookOver}${where}${note}${linked ? `\n${linked}` : ''}\n\n${detail(after, find(after.items, unit.id) ?? unit, 5)}`
+}
+
+/**
+ * Takes a milestone or epic handed over whole: `actor` holds it, so its tasks close as they go and it
+ * goes to review once, and the first task ready in it is claimed. One call starts the unit.
+ */
+async function takeUnit($: EngineInterface, actor: string, snap: Snapshot, unit: Item, force: boolean, t: Target): Promise<string> {
+  if (isAgent(unit.assignee) && unit.assignee !== actor && !force)
+    fail(`${unit.id} is held by ${unit.assignee}; leave it, or pass force: true if they handed it to you`)
+  if (unit.assignee !== actor) {
+    const { script } = db.change(actor, unit, { assignee: actor })
+    if (script) await sql($, script, t)
+  }
+  const held = await refresh($, t)
+  const now = find(held.items, unit.id) ?? unit
+  const head = `${unit.id} is yours (${actor}): its tasks close as you finish them, and it goes to review once they all have.`
+  const task = readyIn(held.items, now, actor)
+  if (task) return `${head}\n${await claimTask($, actor, held, task, false, t, now)}`
+  const left = progress(held.items, now)
+  const why = left.done === left.total ? 'all its tasks are done' : 'its open tasks are held by others or wait on unfinished work'
+  return `${head} Nothing in it to start: ${why}.\n\n${detail(held, now, 5)}`
+}
+
+/**
  * Carries out one roadmap action for `actor`. Agents don't close their own work: their `done` goes to
  * review, and only the person (on the board) or the main loop passing on their approval sets done.
  */
@@ -626,21 +673,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     }
     case 'claim': {
       const it = need()
-      if (it.kind !== 'task') fail(`Only tasks are claimed; ${it.id} is a ${it.kind}. Claim its tasks one at a time.`)
-      const waiting = waitingOn(snap.items, it)
-      if (waiting.length && !a.force)
-        fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
-      const holder = (await sql($, db.claim(actor, it.id, a.force === true, it.assignee, it.status), t)) || null
-      const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${a.force ? '' : ', whose claim had gone stale'}.` : ''
-      if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
-      // Everything needed to start cold: the task as it stands, its notes, and the work already committed.
-      const after = await withHistory($, await refresh($, t), it.id, t)
-      // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
-      const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
-      const linked = refsText(refsFor(after.items, known, it))
-      const unit = unitOf(after.items, it)
-      const where = `\nWork on branch ${branchFor(unit)}${unit.id === it.id ? '' : ` (${unit.id}'s, which this task ships in)`}: switch to it, or create it from the branch you're building on. Commit as "${it.id}: …".`
-      return `${it.id} is yours (${actor}), in progress.${tookOver}${where}\n\n${detail(after, find(after.items, it.id) ?? it, 10)}${linked ? `\n${linked}` : ''}`
+      return it.kind === 'task' ? claimTask($, actor, snap, it, a.force === true, t) : takeUnit($, actor, snap, it, a.force === true, t)
     }
     case 'release': {
       const it = need()
@@ -1329,7 +1362,7 @@ export const register: Register = on => {
         'release it with a handoff note if you stop before it is done; mark it blocked with a comment saying why.',
         "Acceptance criteria: a task's checklist. Give each task you plan one; tick entries with check. A task cannot be set done while any is unchecked.",
         'Review: the user reviews what they handed you, once. A task you set done goes to review. When they hand you a whole epic or milestone',
-        '("implement E27"), first assign it to yourself (update id, assignee) so its tasks close as you go, then set it done when they all are: it goes to review.',
+        '("implement E27"), claim the epic or milestone: you hold it, so its tasks close as you go, and it claims its first ready task.',
         "Pass approved: true with status done only when the user has told you in this conversation that the work is approved; subagents can't.",
         'Branches and PRs: one per unit handed over (the epic or milestone, or a task given alone). When the unit goes to review, push its branch',
         'and open its PR (pr: id gives the branch, title and body). Name ids in commit messages, PR titles and branches ("T12: ...", "E9: ...");',
@@ -1352,6 +1385,7 @@ export const register: Register = on => {
               "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
               'update: id plus any field; empty string clears. Setting a task done takes its release note (note, section) when it has none.',
               'claim: id; takes a task and starts it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks.',
+              'On an epic or milestone handed to you, takes it whole and claims its first ready task, answering with every task in it.',
               'release: id; body leaves a handoff note for whoever picks it up next.',
               'comment: id, body. check: id, items (checklist entry numbers). remove: id; cascade for children.',
               'batch: ops, a list of these actions ({ action, ...fields }) run in order as one: every op is checked first and',
