@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps } from './pane'
-import { agentName, approvalNote, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 const noRoadmap = (on: On, ran: string[][]) => {
@@ -47,6 +47,8 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   due: null,
   priority: 'p2',
   type: 'feature',
+  note: null,
+  section: null,
   lease_at: null,
   labels: [],
   relations: [],
@@ -222,7 +224,7 @@ test('batch: ops run in order on a trial copy, then land on the database in one 
   // Each op ran on the copy; the database got one script holding all of them, guarded by the stamp.
   expect(tried.length).toBeGreaterThanOrEqual(4)
   expect(real.length).toBe(1)
-  for (const part of ["status='blocked'", "'looked at it'", 'INSERT INTO items', "priority='p1'", "VALUES ('T2', 'T9')", "!= 41 THEN json("])
+  for (const part of ["status='blocked'", "'looked at it'", 'INSERT INTO items', "priority='p1'", "VALUES ('T2', 'T9')", "= 41) THEN json_extract("])
     expect(real[0]).toContain(part)
   expect(real[0]!.match(/BEGIN/g)?.length).toBe(1)
   expect(ran.some(argv => argv[0] === 'rm' && String(argv[2]).includes('-batch-'))).toBe(true)
@@ -644,7 +646,7 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   const wrote = (needle: string) => scripts.some(one => one.includes(needle))
 
-  const toReview = await call({ action: 'update', id: 'T1', status: 'done' })
+  const toReview = await call({ action: 'update', id: 'T1', status: 'done', note: '-' })
   expect(String(toReview.result)).toContain("waiting on the user's approval")
   expect(wrote("status='review'")).toBe(true)
   expect(wrote("status='done'")).toBe(false)
@@ -653,7 +655,7 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: 'User' })).deny).toContain('act as yourself')
   expect((await call({ action: 'comment', id: 'T1', body: 'hi', as: ' USER ' })).deny).toContain('act as yourself')
   expect((await call({ action: 'update', id: 'T1', status: 'in_progress', approved: true })).deny).toContain('approved goes with status: done')
-  const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true })
+  const approved = await call({ action: 'update', id: 'T1', status: 'done', approved: true, note: '-' })
   expect(String(approved.result)).toContain('approved by the user')
   expect(wrote("status='done'")).toBe(true)
 
@@ -1089,10 +1091,10 @@ test('review at the level handed over: tasks in a handed epic close as they go; 
   on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
-  const inScope = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  const inScope = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
   expect(inScope).toContain('closed as part of E1')
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='T2'"))).toBe(true)
-  expect(String((await call({ action: 'update', id: 'T3', status: 'done' })).result)).toContain("waiting on the user's approval")
+  expect(String((await call({ action: 'update', id: 'T3', status: 'done', note: '-' })).result)).toContain("waiting on the user's approval")
   expect((await call({ action: 'update', id: 'E1', status: 'done' })).deny).toContain('closes when its tasks are done')
 })
 
@@ -1492,7 +1494,7 @@ test('branch and pull request per unit of work: named from the unit, body from i
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   expect(String((await call({ action: 'claim', id: 'T1' })).result)).toContain("Work on branch e1-agent-coordination (E1's, which this task ships in)")
   expect(String((await call({ action: 'claim', id: 'T2' })).result)).toContain('Work on branch t2-lone-fix:')
-  const done = String((await call({ action: 'update', id: 'T2', status: 'done' })).result)
+  const done = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
   expect(done).toContain('Now open its pull request')
   expect(done).toContain('gh pr create --title "T2: Lone fix"')
   const pr = String((await call({ action: 'pr', id: 'T1' })).result)
@@ -1569,5 +1571,606 @@ test('review with a pull request: checks on the card; Approve offers to merge an
   await ui.press({ key: 'request' })
   await ui.input({ key: 'changes', text: 'split the migration' } as never)
   expect(ran.some(argv => argv.join(' ') === 'gh pr comment 8 --body Changes requested: split the migration')).toBe(true)
+  await ui.unmount()
+})
+
+test('undo on the board: Undo (z) takes back the last change; a line on a card reverts that change; a refusal says why', async ($, on) => {
+  const some = [item('T1', { status: 'done' })]
+  const activity: Activity[] = [
+    { id: 6, item_id: 'T1', author: 'user', type: 'edit', body: 'priority → p1', at: '2026-10-09T10:00:00Z', op: 6, undone: null, undoable: true },
+    { id: 7, item_id: 'T1', author: 'user', type: 'status', body: 'status todo → done', at: '2026-10-09T10:01:00Z', op: 7, undone: null, undoable: true },
+    { id: 8, item_id: 'T1', author: 'claude', type: 'comment', body: 'mine', at: '2026-10-09T10:02:00Z', op: 8, undone: null, undoable: true },
+  ]
+  const stored = (id: number) => ({ ...activity.find(one => one.id === id)!, undo: `SELECT 'UNDO-${id}';`, redo: `SELECT 'REDO-${id}';`, reverts: null })
+  const writes: string[] = []
+  const toasts: string[] = []
+  let isStale = false
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    const asked = /FROM activity WHERE id IN \(([\d, ]+)\)/.exec(stdin)?.[1]
+    if (asked) return { value: { ...fakeSqlite('', null), stdout: JSON.stringify(asked.split(', ').map(Number).map(stored)) } }
+    if (stdin.startsWith('BEGIN')) {
+      writes.push(stdin)
+      if (isStale) return { value: { ...fakeSqlite('', null), exitCode: 1, stdout: '', stderr: "Error near line 3: bad JSON path: '!T1''s status has changed since; change it directly'" } }
+    }
+    return { value: fakeSqlite(stdin, { items: some, activity, seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  // The header's Undo takes back the person's newest change, not Claude's comment after it.
+  expect((await ui.find({ key: 'undo' }))?.props.hotkey).toBe('z')
+  await ui.press({ key: 'undo' })
+  expect(writes.at(-1)).toContain("SELECT 'UNDO-7';")
+  expect(writes.at(-1)).toContain('undid “status todo → done”')
+  expect(writes.at(-1)).not.toContain('UNDO-6')
+  expect(toasts.at(-1)).toBe('roadmap: Undid T1: status todo → done')
+  // On the card, each change still standing has its own revert, Claude's comment too.
+  await ui.press({ key: 'card-T1' })
+  for (const id of [6, 7, 8]) expect(await ui.find({ key: `revert-${id}` })).toBeDefined()
+  await ui.press({ key: 'revert-6' })
+  expect(writes.at(-1)).toContain("SELECT 'UNDO-6';")
+  // A change something later overwrote is refused, in the guard's words.
+  isStale = true
+  await ui.press({ key: 'revert-7' })
+  expect(toasts.at(-1)).toBe("roadmap: T1's status has changed since; change it directly")
+  await ui.unmount()
+  // Undone changes, undos and others' changes aren't the person's last change.
+  expect(lastChange({ items: some, activity: [{ ...activity[1]!, undone: 9 }, activity[0]!, activity[2]!], seen: {} }, 'user').map(one => one.id)).toEqual([6])
+  expect(lastChange({ items: some, activity: [activity[2]!], seen: {} }, 'user')).toEqual([])
+})
+
+test('export and import: the whole roadmap to a JSON file, and back only into an empty roadmap', async ($, on) => {
+  const written: Record<string, string> = {}
+  let count = '0 0'
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    if (stdin.startsWith('SELECT json_object(\'items\', (SELECT json_group_array(json_object(\'id\', id, \'kind\'')) {
+      if (stdin.includes('FROM counters')) return { value: { ...fakeSqlite('', null), stdout: JSON.stringify({ items: [{ id: 'T1', kind: 'task', title: 'kept' }], activity: [], counters: [{ prefix: 'T', n: 1 }] }) } }
+    }
+    if (stdin.startsWith('SELECT (SELECT count(*) FROM items)')) return { value: { ...fakeSqlite('', null), stdout: count } }
+    return { value: fakeSqlite(stdin, { items: [], activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.write', ($, e) => ((written[e.path] = e.text), { value: undefined }) as never)
+  on('fs.read', ($, e) => (written[e.path] === undefined ? { deny: 'ENOENT' } : { value: written[e.path] }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  expect(await call({ action: 'export' })).toBe('Exported 1 item(s) and 0 timeline entries to .claude/roadmap-export-2026-10-09.json. import (path) restores it into an empty roadmap.')
+  const file = JSON.parse(written['/work/project/.claude/roadmap-export-2026-10-09.json']!)
+  expect(file).toEqual({ roadmap: 'export', schema: VERSION, exported_at: '2026-10-09T12:00:00.000Z', tables: { items: [{ id: 'T1', kind: 'task', title: 'kept' }], activity: [], counters: [{ prefix: 'T', n: 1 }] } })
+  await call({ action: 'export', path: '~/saved.json' })
+  expect(written['/home/me/saved.json']).toBeDefined()
+  // Into a roadmap that holds anything, it is refused; into an empty one, it lands in one transaction.
+  count = '3 9'
+  expect(await call({ action: 'import', path: '~/saved.json' })).toContain('already holds 3 item(s) and 9 timeline entries')
+  count = '0 0'
+  expect(await call({ action: 'import', path: '~/saved.json' })).toBe('Imported 1 item(s) and 0 timeline entries from ~/saved.json.')
+  const landed = scripts.find(one => one.includes('INSERT OR IGNORE INTO items(id, kind, title)'))!
+  expect(landed.startsWith('BEGIN IMMEDIATE;')).toBe(true)
+  expect(landed).toContain("INSERT INTO counters(prefix, n) VALUES ('T', 1)")
+  // Not an export, or one from a newer build: refused, naming why.
+  written['/work/project/x.json'] = '{"hello": 1}'
+  expect(await call({ action: 'import', path: 'x.json' })).toBe('not a roadmap export')
+  written['/work/project/y.json'] = JSON.stringify({ roadmap: 'export', schema: VERSION + 1, exported_at: '', tables: {} })
+  expect(await call({ action: 'import', path: 'y.json' })).toContain('from a newer roadmap mod')
+  expect(await call({ action: 'import', path: 'nope.json' })).toBe('cannot read nope.json')
+})
+
+test('backups: on start, a JSON export outside the checkout when the roadmap changed, the newest twenty kept', async ($, on) => {
+  const written: string[] = []
+  const removed: string[][] = []
+  let stamp = '41'
+  let listed = Array.from({ length: 20 }, (_, i) => ({ name: `roadmap-2026-10-0${i < 9 ? i + 1 : 9}T00-00-${String(i).padStart(2, '0')}Z-a${i}.json`, kind: 'file' }))
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'rm') return (removed.push([...e.argv]), { value: { ...fakeSqlite('', null), stdout: '' } })
+    if (e.argv[0] !== 'sqlite3') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    const stdin = e.init?.stdin ?? ''
+    if (stdin.trim() === 'SELECT COALESCE(MAX(id), 0) FROM activity;') return { value: { ...fakeSqlite('', null), stdout: stamp } }
+    if (stdin.includes('FROM counters')) return { value: { ...fakeSqlite('', null), stdout: '{"items":[]}' } }
+    return { value: fakeSqlite(stdin, { items: [item('T1')], activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.list', () => ({ value: listed }) as never)
+  on('fs.write', ($, e) => (written.push(e.path), { value: undefined }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.get', () => ({ value: {} }) as never)
+  on('store.set', () => ({ value: undefined }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  expect(written).toEqual(['/home/me/.claude/roadmap-backups/-work-project/roadmap-2026-10-09T12-00-00-000Z-a41.json'])
+  // Twenty were there: the oldest goes.
+  expect(removed).toEqual([['rm', '-f', `/home/me/.claude/roadmap-backups/-work-project/${listed[0]!.name}`]])
+  // The newest backup already holds the roadmap as it stands: nothing new is written.
+  written.length = 0
+  stamp = '19'
+  listed = listed.slice(0, 20)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  expect(written).toEqual([])
+})
+
+test('release notes: an agent sets a task done with its note; the PR body lists the notes by section', async ($, on) => {
+  const some = [item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', type: 'bug', status: 'in_progress' }), item('T2', { parent: 'E1' })]
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  const call = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  // Done without a note is asked for one, naming the section its type suggests, and writes nothing.
+  scripts.length = 0
+  const asked = await call({ action: 'update', id: 'T1', status: 'done' })
+  expect(asked).toContain('T1 has no release note')
+  expect(asked).toContain('Fixed by default')
+  expect(scripts.some(one => one.startsWith('BEGIN'))).toBe(false)
+  expect(await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'nope' })).toContain('section must be one of Added, Changed, Fixed')
+  const done = await call({ action: 'update', id: 'T1', status: 'done', note: 'Cards no longer flicker', section: 'fixed' })
+  expect(done).toContain('release note: Cards no longer flicker')
+  expect(done).toContain('section → Fixed')
+  expect(scripts.some(one => one.startsWith('BEGIN') && one.includes("note='Cards no longer flicker'"))).toBe(true)
+  // "none" or "-": the work needs no line.
+  expect(await call({ action: 'update', id: 'T2', note: 'none' })).toBe('T2: no release note needed')
+  expect(await call({ action: 'update', id: 'E1', note: 'x' })).toBe('Only tasks carry a release note')
+  // The PR body: notes by section, with their task; a "-" or missing note is left out.
+  const noted = [
+    some[0]!, { ...some[1]!, note: 'Cards no longer flicker', section: 'Fixed' as const },
+    { ...some[2]!, note: 'Undo on the board' }, item('T3', { parent: 'E1', note: '-' }), item('T4', { parent: 'E1', type: 'chore', note: 'Faster tests' }),
+  ]
+  expect(pullRequest(noted, noted[0]!).body).toContain('### Release notes\n\nAdded:\n- Undo on the board (T2)\n\nChanged:\n- Faster tests (T4)\n\nFixed:\n- Cards no longer flicker (T1)')
+  expect(pullRequest([item('T9')], item('T9')).body).not.toContain('Release notes')
+})
+
+test('changelog: merged notes go under [Unreleased], each in its section, newest first; nothing twice', async ($, on) => {
+  const file = [
+    '# Changelog', '', 'Intro.', '', '## [Unreleased]', '', '### Added', '', '- Older thing.', '', '### Fixed', '', '- Old fix.', '', '## 0.4.0 - 2026-10-09', '', '### Added', '', '- Install.', '',
+  ].join('\n')
+  const out = withNotes(file, [{ section: 'Added', note: 'Undo.' }, { section: 'Changed', note: 'Faster.' }, { section: 'Fixed', note: 'Old fix.' }, { section: 'Fixed', note: 'New fix.' }])
+  expect(out.added).toEqual(['Undo.', 'Faster.', 'New fix.'])
+  expect(out.text).toBe([
+    '# Changelog', '', 'Intro.', '', '## [Unreleased]', '', '### Added', '', '- Undo.', '- Older thing.', '', '### Changed', '', '- Faster.', '', '### Fixed', '', '- New fix.', '- Old fix.', '', '## 0.4.0 - 2026-10-09', '', '### Added', '', '- Install.', '',
+  ].join('\n'))
+  expect(withNotes(out.text, [{ section: 'Added', note: 'Undo.' }])).toEqual({ text: out.text, added: [] })
+  // No [Unreleased] yet: made above the newest version. No file: made from scratch.
+  expect(withNotes('# Changelog\n\n## 0.4.0\n\n- x\n', [{ section: 'Fixed', note: 'y' }]).text).toBe('# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- y\n\n## 0.4.0\n\n- x\n')
+  expect(withNotes(undefined, [{ section: 'Added', note: 'First.' }]).text.replace(/\n*$/, '\n')).toBe('# Changelog\n\n## [Unreleased]\n\n### Added\n\n- First.\n')
+
+  // Merged work only: an open PR holds its notes back; a merged one, or none at all, lets them through.
+  const some = [
+    item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done', note: 'In an open PR' }),
+    item('E2', { assignee: 'claude' }), item('T2', { parent: 'E2', status: 'done', note: 'Merged' }),
+    item('T3', { status: 'done', note: 'Straight to main', type: 'bug' }), item('T4', { status: 'review', note: 'Not done' }), item('T5', { status: 'done', note: '-' }),
+  ]
+  const prs = parsePrs(JSON.stringify([
+    { number: 1, title: 'E1: a', headRefName: 'e1-a', state: 'OPEN', url: '' }, { number: 2, title: 'E2: b', headRefName: 'e2-b', state: 'MERGED', url: '' },
+  ]))
+  expect(mergedNotes(some, { commits: [], prs }).map(one => one.id)).toEqual(['T3', 'T2'])
+
+  const written: Record<string, string> = {}
+  on('process.run', ($, e) =>
+    e.argv[0] === 'gh' ? { value: { ...fakeSqlite('', null), stdout: JSON.stringify([{ number: 2, title: 'E2: b', headRefName: 'e2-b', state: 'MERGED', url: '' }, { number: 1, title: 'E1: a', headRefName: 'e1-a', state: 'OPEN', url: '' }]) } }
+    : e.argv[0] === 'git' ? { value: { ...fakeSqlite('', null), stdout: '' } }
+    : { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('fs.read', ($, e) => (written[e.path] === undefined ? { deny: 'ENOENT' } : { value: written[e.path] }) as never)
+  on('fs.write', ($, e) => ((written[e.path] = e.text), { value: undefined }) as never)
+  written['/work/project/CHANGELOG.md'] = '# Changelog\n\n## [Unreleased]\n\n## 0.4.0\n'
+  const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'changelog' } as never)
+  expect(reply.result).toBe('Wrote 2 note(s) into CHANGELOG.md under [Unreleased]:\n- Straight to main\n- Merged')
+  expect(written['/work/project/CHANGELOG.md']).toBe('# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Merged\n\n### Fixed\n\n- Straight to main\n\n## 0.4.0\n')
+  expect((await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'changelog' } as never)).result).toBe('CHANGELOG.md already has the notes of all merged work.')
+})
+
+test('release notes on the board: setting a task done asks for its note; the card shows it', async ($, on) => {
+  const some = [item('T1', { status: 'in_progress' }), item('T2', { note: 'Shown on the card', section: 'Changed' })]
+  const scripts: string[] = []
+  on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'set-done' })
+  // The person's done is final at once; the card then asks for the CHANGELOG line, Added for a feature.
+  expect(scripts.some(one => one.includes("status='done'"))).toBe(true)
+  expect((await ui.find({ key: 'note' }))?.props.label).toBe('Release note (Added)')
+  await ui.input({ key: 'note', text: 'Something new' } as never)
+  expect(scripts.some(one => one.includes("note='Something new'"))).toBe(true)
+  expect(await ui.find({ key: 'note' })).toBeUndefined()
+  await ui.press({ key: 'set-done' })
+  await ui.press({ key: 'note-none' })
+  expect(scripts.some(one => one.includes("note='-'"))).toBe(true)
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ type: 'Text', text: /Release note {2}\(Changed\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Shown on the card/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s card reaches it at once when set to, else with the next prompt', async ($, on) => {
+  const some = [item('T1', { assignee: 'claude', status: 'in_progress', title: 'Parser' }), item('T2', { title: 'Free' })]
+  const activity: Activity[] = []
+  const filled: string[] = []
+  const submitted: string[] = []
+  const contexts: string[] = []
+  const stored: Record<string, unknown> = {}
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    // A comment written lands in the timeline the next read sees.
+    const said = /'user', 'comment', '([^']*)'/.exec(stdin)?.[1]
+    if (stdin.startsWith('BEGIN') && said) activity.push({ id: 100 + activity.length, item_id: 'T1', author: 'user', type: 'comment', body: said, at: '2026-10-09T10:00:00Z' })
+    return { value: fakeSqlite(stdin, { items: some, activity, seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.get', ($, e) => ({ value: stored[e.key] }) as never)
+  on('store.set', ($, e) => ((stored[e.key] = e.value), { value: undefined }) as never)
+  on('prompt.fill', ($, e) => (filled.push(e.text), { isFilled: true, text: e.text, cursor: e.text.length }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), contexts.push((e.context ?? []).join('\n')), { text: e.text, origin: e.origin }))
+  // The first prompt takes the session's opening brief; news comes after.
+  await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'card-T1' })
+  await ui.press({ key: 'ask' })
+  expect(filled).toEqual(['About roadmap task T1 (Parser): '])
+  // Off by default: the comment waits, and Claude reads it in the brief of the person's next prompt.
+  expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('Waits for your prompt')
+  await ui.input({ key: 'comment', text: 'use the new lexer' } as never)
+  expect(submitted.length).toBe(1)
+  await $.prompt.submit({ text: 'next thing', wait: false, origin: { kind: 'composer' } })
+  expect(contexts.at(-1)).toContain('- T1: use the new lexer')
+  // On: the next comment starts a turn of its own, and the setting is kept.
+  await ui.press({ key: 'comment-turns' })
+  expect(stored.commentTurns).toBe(true)
+  expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('Tells it now')
+  await ui.input({ key: 'comment', text: 'and skip comments' } as never)
+  expect(submitted.at(-1)).toBe('The user commented on roadmap task T1 (Parser), which you hold: "and skip comments". Read it with the roadmap tool (show T1) and act on it, commenting back there.')
+  // A card nobody holds has no one to tell: no toggle, and no turn.
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ key: 'comment-turns' })).toBeUndefined()
+  const before = submitted.length
+  await ui.input({ key: 'comment', text: 'just a note' } as never)
+  expect(submitted.length).toBe(before)
+  await ui.unmount()
+  expect(commentNote(item('T5', { assignee: 'explore:a', title: 'X' }), 'hi')).toContain('which explore:a holds: "hi". If explore:a is still running, pass it on (SendMessage)')
+})
+
+test('merge a stack from its bottom card: in order, each after its checks pass on main; items approved; a failure stops and tells Claude', async ($, on) => {
+  const some = [
+    item('T1', { status: 'review', assignee: 'claude', title: 'Bottom' }), item('T2', { status: 'review', assignee: 'claude', title: 'Middle' }),
+    item('T3', { status: 'review', assignee: 'claude', title: 'Top' }),
+  ]
+  const pr = (number: number, id: string, branch: string, base: string) =>
+    ({ number, title: `${id}: x`, headRefName: branch, baseRefName: base, state: 'OPEN', url: `https://x/${number}`, statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }] })
+  const ghList = JSON.stringify([pr(15, 'T3', 't3-top', 't2-middle'), pr(12, 'T2', 't2-middle', 't1-bottom'), pr(11, 'T1', 't1-bottom', 'main')])
+  const ran: string[] = []
+  const scripts: string[] = []
+  const submitted: string[] = []
+  let failing = 0
+  on('process.run', ($, e) => {
+    const argv = e.argv.join(' ')
+    if (e.argv[0] === 'gh') {
+      if (e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
+      ran.push(argv)
+      if (e.argv[2] === 'view') {
+        const isFailing = Number(e.argv[3]) === failing
+        return { value: { ...fakeSqlite('', null), stdout: JSON.stringify({ mergeable: 'MERGEABLE', statusCheckRollup: [{ status: 'COMPLETED', conclusion: isFailing ? 'FAILURE' : 'SUCCESS' }] }) } }
+      }
+      return { value: { ...fakeSqlite('', null), stdout: '' } }
+    }
+    if (e.argv[0] === 'git') return { value: { ...fakeSqlite('', null), stdout: '' } }
+    scripts.push(e.init?.stdin ?? '')
+    return { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: 1 }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
+  await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'T1' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  // Only the bottom's card offers the stack; the others are stacked on another PR.
+  await ui.press({ key: 'card-T2' })
+  expect(await ui.find({ key: 'merge-stack' })).toBeUndefined()
+  await ui.press({ key: 'close' })
+  await ui.press({ key: 'card-T1' })
+  expect(await ui.find({ type: 'Text', text: /stack #11 ← #12 ← #15/ })).toBeDefined()
+  await ui.press({ key: 'merge-stack' })
+  expect(await ui.find({ type: 'Text', text: /Merge #11, then #12, then #15 into main, each once its checks pass there\?/ })).toBeDefined()
+  await ui.press({ key: 'stack-yes' })
+  expect(ran).toEqual([
+    'gh pr view 11 --json statusCheckRollup,mergeable', 'gh pr merge 11 --merge',
+    'gh pr edit 12 --base main', 'gh pr update-branch 12', 'gh pr view 12 --json statusCheckRollup,mergeable', 'gh pr merge 12 --merge',
+    'gh pr edit 15 --base main', 'gh pr update-branch 15', 'gh pr view 15 --json statusCheckRollup,mergeable', 'gh pr merge 15 --merge',
+  ])
+  for (const id of ['T1', 'T2', 'T3']) expect(scripts.some(one => one.includes(`status='done'`) && one.includes(`WHERE id='${id}'`))).toBe(true)
+  expect(submitted.at(-1)).toContain('The user merged the stack #11 ← #12 ← #15 from the board: merged #11 (t1-bottom), #12 (t2-middle), #15 (t3-top) into main')
+  await ui.press({ key: 'close' })
+  await ui.unmount()
+
+  // The top's checks fail once it is on main: the run stops there, its item stays in review, and Claude hears where.
+  ran.length = 0
+  scripts.length = 0
+  failing = 15
+  const again = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await again.press({ key: 'card-T1' })
+  await again.press({ key: 'merge-stack' })
+  await again.press({ key: 'stack-yes' })
+  expect(ran).not.toContain('gh pr merge 15 --merge')
+  expect(ran).toContain('gh pr merge 12 --merge')
+  expect(scripts.some(one => one.includes(`status='done'`) && one.includes("WHERE id='T3'"))).toBe(false)
+  expect(submitted.at(-1)).toContain('then stopped at PR #15 (branch t3-top): its checks failed on main')
+  await again.unmount()
+  expect(stackFrom({ commits: [], prs: parsePrs(ghList) }, parsePrs(ghList)[1]!).map(one => one.number)).toEqual([12])
+})
+
+test('run tasks at once: picked backlog rows each get an agent, a worktree and a branch; a blocked one starts when its blocker is done', async ($, on) => {
+  const some = [
+    item('E1', { title: 'Group' }), item('T1', { parent: 'E1', title: 'Alpha', checklist: [{ n: 1, text: 'a', done: true }, { n: 2, text: 'b', done: false }] }),
+    item('T2', { parent: 'E1', title: 'Beta' }), item('T3', { parent: 'E1', title: 'Gamma', blocked_by: ['T1'] }),
+  ]
+  const ran: string[] = []
+  const spawned: { prompt: string; description: string; cwd?: string }[] = []
+  const submitted: string[] = []
+  const stored: Record<string, unknown> = {}
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    if (e.argv[0] === 'git') {
+      ran.push(e.argv.join(' '))
+      return { value: { ...fakeSqlite('', null), stdout: e.argv[1] === 'rev-parse' ? 'origin/main\n' : '' } }
+    }
+    if (e.argv[0] === 'gh') return { value: { ...fakeSqlite('', null), stdout: '[]' } }
+    // Assignments land, so the next read sees whose each task is.
+    for (const [, who, id] of [...stdin.matchAll(/UPDATE items SET assignee='([^']*)'.*? WHERE id='(T\d)'/g)])
+      some.splice(some.findIndex(one => one.id === id), 1, { ...find(some, id!)!, assignee: who! })
+    return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.exists', () => ({ value: false }) as never)
+  on('session.root', () => ({ value: '/work/project' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('store.get', ($, e) => ({ value: stored[e.key] }) as never)
+  on('store.set', ($, e) => ((stored[e.key] = e.value), { value: undefined }) as never)
+  on('agent.spawn', ($, e) => (spawned.push({ prompt: e.prompt, description: e.description, cwd: e.cwd }), { model: 'x', agentId: `a${spawned.length}` }) as never)
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
+  on('turn.complete', () => ({ text: '' }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await ui.press({ key: 'tab-backlog' })
+  for (const id of ['T1', 'T2', 'T3']) await ui.press({ key: `pick-${id}` })
+  await ui.press({ key: 'run-picked' })
+  expect(await ui.find({ type: 'Text', text: /Run T1, T2, T3 at once, each by its own agent in its own worktree\? T3 starts when what it waits on is done\./ })).toBeDefined()
+  await ui.press({ key: 'parallel-yes' })
+  // T1 and T2 start now, each in a worktree on its own branch from the main line; T3 waits on T1.
+  expect(ran.filter(one => one.startsWith('git worktree'))).toEqual([
+    'git worktree add -b t1-alpha /work/project/.claude/worktrees/t1-alpha origin/main',
+    'git worktree add -b t2-beta /work/project/.claude/worktrees/t2-beta origin/main',
+  ])
+  // Agents a plugin spawns can't call its tool, so the main loop is asked to start them, one turn for both.
+  expect(submitted.length).toBe(1)
+  expect(submitted[0]).toContain('roadmap tasks to run at once from the board: T1, T2. Start each now as its own background agent')
+  expect(submitted[0]).toContain('--- T1\ndescription: T1 Alpha\nprompt:\nYou are working roadmap task T1: Alpha.')
+  expect(submitted[0]).toContain('Your worktree is /work/project/.claude/worktrees/t2-beta, already on branch t2-beta')
+  // The main loop's Agent call for one is put in its worktree, and named for its task.
+  const prompt = submitted[0]!.split('--- T1\ndescription: T1 Alpha\nprompt:\n')[1]!.split('\n\n--- T2')[0]!
+  await $.agent.spawn({ prompt, description: 'T1 Alpha', subagentType: 'general-purpose' } as never)
+  expect(spawned.map(one => one.cwd)).toEqual(['/work/project/.claude/worktrees/t1-alpha'])
+  // Each is assigned to its agent by name, T3 too, so the board shows whose each will be.
+  expect(some.filter(one => one.kind === 'task').map(one => one.assignee)).toEqual(['general-purpose:t1-alpha', 'general-purpose:t2-beta', 'general-purpose:t3-gamma'])
+  expect(stored.parallel).toEqual({ '/work/project': ['T3'] })
+  // The band shows each agent's task and checklist once they are under way.
+  some.splice(1, 2, { ...some[1]!, status: 'in_progress' }, { ...some[2]!, status: 'in_progress' })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const band = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'AbovePrompt', requestId: 'band', props: { bodyColumns: 100 } as never })
+  expect((await band.find({ key: 'agent-T1' }))?.text).toContain('T1 ☑1/2')
+  expect(await band.find({ key: 'agent-T2' })).toBeDefined()
+  await band.unmount()
+  // T1 done: when a turn ends (T1's agent's last), T3 starts.
+  some.splice(1, 1, { ...some[1]!, status: 'done' })
+  await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1, isAborted: false, turnId: 't', agentId: 'a1' } as never)
+  for (let i = 0; i < 100 && !submitted.at(-1)!.includes('T3'); i++) await ui.redraw()
+  expect(submitted.at(-1)).toContain('from the board: T3. Start each now')
+  expect(stored.parallel).toEqual({ '/work/project': [] })
+  await ui.unmount()
+})
+
+test('mark all read: the button by the unread count reads everything; a comment after counts again', async ($, on) => {
+  const snap: Snapshot = {
+    items: [item('T1'), item('T2')],
+    activity: [
+      { id: 3, item_id: 'T1', author: 'claude', type: 'comment', body: 'one', at: '2026-10-09T10:00:00Z' },
+      { id: 4, item_id: 'T2', author: 'claude', type: 'comment', body: 'two', at: '2026-10-09T10:00:00Z' },
+    ],
+    seen: {},
+  }
+  const scripts: string[] = []
+  on('process.run', ($, e) => {
+    const stdin = e.init?.stdin ?? ''
+    scripts.push(stdin)
+    // The database's answer: everything read, up to each item's newest entry.
+    if (stdin.startsWith("INSERT INTO reads(reader, item_id, seen) SELECT 'user'")) snap.seen = { T1: 3, T2: 4 }
+    return { value: fakeSqlite(stdin, snap) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  expect(await ui.find({ type: 'Text', text: /● 2 unread/ })).toBeDefined()
+  await ui.press({ key: 'mark-read' })
+  expect(await ui.find({ type: 'Text', text: /unread/ })).toBeUndefined()
+  expect(await ui.find({ key: 'mark-read' })).toBeUndefined()
+  expect((await ui.find({ key: 'card-T1' }))?.text).not.toContain('●')
+  // A new comment counts again.
+  snap.activity.push({ id: 5, item_id: 'T2', author: 'claude', type: 'comment', body: 'three', at: '2026-10-09T11:00:00Z' })
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  expect(await ui.find({ type: 'Text', text: /● 1 unread/ })).toBeDefined()
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('● 1')
+  await ui.unmount()
+})
+
+test('ship: versions compare, manifests bump in place, and [Unreleased] is cut with its links', async () => {
+  expect(versionOf('v0.4.0')).toEqual([0, 4, 0])
+  expect(versionOf('1.2')).toBeUndefined()
+  expect(isAfter([0, 5, 0], [0, 4, 9])).toBe(true)
+  expect(isAfter([0, 4, 0], [0, 4, 0])).toBe(false)
+  expect(isAfter([0, 3, 9], [0, 4, 0])).toBe(false)
+  expect(withVersion('{\n  "name": "x",\n  "version": "0.4.0",\n  "deps": { "version": "9" }\n}\n', '0.5.0')).toBe('{\n  "name": "x",\n  "version": "0.5.0",\n  "deps": { "version": "9" }\n}\n')
+  expect(withVersion('{}', '1.0.0')).toBeUndefined()
+  expect(webOf('git@github.com:astrosteveo/unclaude.git\n')).toBe('https://github.com/astrosteveo/unclaude')
+  expect(webOf('https://github.com/astrosteveo/unclaude.git')).toBe('https://github.com/astrosteveo/unclaude')
+  const log = '# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n'
+  const cut = cutRelease(log, '0.5.0', '2026-10-10', 'https://github.com/o/r')
+  expect(cut.notes).toBe('### Added\n\n- Undo.')
+  expect(cut.text).toBe('# Changelog\n\nIntro.\n\n## [Unreleased]\n\n## [0.5.0] - 2026-10-10\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/compare/v0.5.0...HEAD\n[0.5.0]: https://github.com/o/r/releases/tag/v0.5.0\n')
+  expect(() => cutRelease(cut.text, '0.6.0', '2026-10-11', 'https://github.com/o/r')).toThrow('nothing is under [Unreleased]')
+  // No links yet: they go at the end.
+  expect(cutRelease('# C\n\n## [Unreleased]\n\n- x\n', '0.1.0', 'd', 'https://w').text).toBe('# C\n\n## [Unreleased]\n\n## [0.1.0] - d\n\n- x\n\n[Unreleased]: https://w/compare/v0.1.0...HEAD\n[0.1.0]: https://w/releases/tag/v0.1.0\n')
+})
+
+test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or a dirty tree; tagging waits on the user', async ($, on) => {
+  const files: Record<string, string> = {
+    '/p/.claude-plugin/plugin.json': '{\n  "name": "roadmap",\n  "version": "0.4.0"\n}\n',
+    '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n',
+  }
+  const ran: string[] = []
+  let dirty = ''
+  let mergedPr = '[]'
+  on('process.run', ($, e) => {
+    const line = e.argv.join(' ')
+    if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
+      ran.push(line)
+      const stdout = line === 'git remote get-url origin' ? 'git@github.com:o/r.git\n' : line === 'git status --porcelain' ? dirty
+        : line.startsWith('gh pr create') ? 'https://github.com/o/r/pull/30\n' : line.startsWith('gh pr list --head') ? mergedPr
+        : line.startsWith('gh release create') ? 'https://github.com/o/r/releases/tag/v0.5.0\n' : ''
+      const exitCode = line.startsWith('git rev-parse -q --verify') ? 1 : 0
+      return { value: { ...fakeSqlite('', null), stdout, exitCode } }
+    }
+    return { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('session.root', () => ({ value: '/p' }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-10T09:00:00Z') }) as never)
+  on('fs.read', ($, e) => (files[e.path] === undefined ? { deny: 'ENOENT' } : { value: files[e.path] }) as never)
+  on('fs.write', ($, e) => ((files[e.path] = e.text), { value: undefined }) as never)
+  const ship = async (input: Record<string, unknown>) => {
+    const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', ...input } as never)
+    return String(reply.result ?? reply.deny)
+  }
+  expect(await ship({ version: '0.3.0' })).toBe("0.3.0 isn't after 0.4.0, the version now")
+  expect(await ship({ version: '1.0.0' })).toContain('would be the first 1.x')
+  dirty = ' M x\n'
+  expect(await ship({ version: '0.5.0' })).toBe('the working tree has changes; commit or stash them first')
+  dirty = ''
+  ran.length = 0
+  expect(await ship({ version: '0.5.0' })).toContain('Opened https://github.com/o/r/pull/30 for 0.5.0: .claude-plugin/plugin.json bumped')
+  expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state'))).toEqual([
+    'git remote get-url origin', 'git status --porcelain', 'git switch -c release-v0.5.0', 'git commit -am Release 0.5.0',
+    'git push -u origin release-v0.5.0', 'gh pr create --head release-v0.5.0 --title Release 0.5.0 --body ### Added\n\n- Undo.',
+  ])
+  expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.5.0"')
+  expect(files['/p/CHANGELOG.md']).toContain('## [Unreleased]\n\n## [0.5.0] - 2026-10-10\n\n### Added')
+  // After the merge (the manifest reads 0.5.0): no merged PR yet is said; then tagging waits on the user's say.
+  expect(await ship({ version: '0.5.0' })).toBe('no merged PR from release-v0.5.0 yet: merge the release PR first')
+  mergedPr = JSON.stringify([{ number: 30, mergeCommit: { oid: 'abc123' } }])
+  expect(await ship({ version: '0.5.0' })).toContain("Tagging v0.5.0 and publishing the release is the user's call")
+  expect(ran.some(one => one.startsWith('git tag'))).toBe(false)
+  ran.length = 0
+  expect(await ship({ version: '0.5.0', approved: true })).toBe("Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0.")
+  expect(ran).toContain('git tag -a v0.5.0 -m v0.5.0 abc123')
+  expect(ran).toContain('git push origin v0.5.0')
+  expect(ran).toContain('gh release create v0.5.0 --title v0.5.0 --verify-tag --notes ### Added\n\n- Undo.')
+  // A subagent's approval doesn't count.
+  ran.length = 0
+  expect(await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', version: '0.5.0', approved: true, agentId: 'a1' } as never).then(r => String(r.result ?? r.deny))).toContain("the user's call")
+})
+
+test('timeline: milestones and epics by due date with their progress; late work marked on the board and in the brief', async ($, on) => {
+  const some = [
+    item('M1', { title: 'Launch', due: '2026-10-20' }), item('E1', { parent: 'M1', title: 'Billing', due: '2026-10-05' }),
+    item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude' }),
+    item('T3', { parent: 'M1' }), item('M2', { title: 'Later' }), item('T4', { parent: 'M2' }),
+  ]
+  const now = Date.parse('2026-10-09T12:00:00Z')
+  expect(dueOf(some, find(some, 'T2')!)).toBe('2026-10-05')
+  expect(dueOf(some, find(some, 'T3')!)).toBe('2026-10-20')
+  expect(dueOf(some, find(some, 'T4')!)).toBeUndefined()
+  expect(['T1', 'T2', 'T3', 'T4', 'E1', 'M1'].filter(id => isLate(some, find(some, id)!, now))).toEqual(['T2', 'E1'])
+  expect(isLate(some, find(some, 'T2')!, 0)).toBe(false)
+  expect(timelineOf(some).map(one => one.id)).toEqual(['M1', 'E1', 'M2'])
+  expect(timelineOf([item('M1'), item('M2', { due: '2026-01-01' }), item('E2', { parent: 'M2' }), item('E1', { parent: 'M2', due: '2026-02-01' }), item('E3')]).map(one => one.id))
+    .toEqual(['M2', 'E1', 'E2', 'M1', 'E3'])
+  // The brief names what is overdue, by its own date.
+  expect(brief({ items: some, activity: [], seen: {} }, 'claude', [], now)).toContain('Overdue (past their due date, not done; today is 2026-10-09):\n- E1')
+
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('clock.now', () => ({ value: now }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock' } as never,
+  })
+  // On the board, a task past its (inherited) date is marked late.
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('⚠late')
+  expect((await ui.find({ key: 'card-T3' }))?.text).not.toContain('late')
+  await ui.press({ key: 'tab-timeline' })
+  expect((await ui.find({ key: 'time-E1' }))?.text).toContain('2026-10-05  ▓▓▓▓▓░░░░░ 1/2  4 days late, 1 open')
+  expect((await ui.find({ key: 'time-M1' }))?.text).toContain('2026-10-20  ▓▓▓░░░░░░░ 1/3  in 11 days')
+  expect((await ui.find({ key: 'time-M2' }))?.text).toContain('no due date')
+  // A row opens its card.
+  await ui.press({ key: 'time-M1' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
   await ui.unmount()
 })

@@ -23,16 +23,20 @@ Answer `y` to add the marketplace, then pick a scope (user scope makes it availa
 Ask Claude to plan something, for example *"plan the v2 release as milestones, epics and tasks, with a checklist on each task"*, and then:
 
 - **`/roadmap`** opens the board. Columns are Todo, In progress, Blocked, Review and Done, and a Tree tab shows the full hierarchy.
-- **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `e` edits it, `x` closes it, `n` adds an item, `f` filters, and `v` steps through board, tree and backlog. Hand to Claude, Assign me and Unassign have no keys on purpose: Tab to them and press Enter (Hand to Claude then asks you to confirm).
+- **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `e` edits it, `x` closes it, `n` adds an item, `f` filters, and `v` steps through board, tree, backlog and timeline. Hand to Claude, Assign me and Unassign have no keys on purpose: Tab to them and press Enter (Hand to Claude then asks you to confirm).
+- **Timeline** (fourth tab) lists milestones by due date, each followed by its epics, with a progress bar and how it stands: *in 11 days*, or *4 days late, 1 open* in red. Tasks past their due date (their own or one above them) are marked `⚠late` on the board, and Claude's brief lists what is overdue.
 - **Backlog** (third tab) is for triage: todo tasks nobody holds, those without an epic first, then by priority. Each row has a priority picker and a `→ Claude` button.
 - **New items:** `n` opens a form (kind, priority, type, where it goes, then the title; Enter creates it). On an open epic or milestone, `n` adds under it.
 - **Edit** a card with `e`: Tab into its title, description (one line; ask Claude for longer text), due date, labels, priority, type and parent, and press Enter on a field to save it. On a task, edit mode also lists the checklist (reword an entry, or empty it to drop it), an Add criterion field, and Blocked by (task ids, comma-separated). `e` again leaves edit mode.
 - **Filter** with `f`: type words to search, or narrow with `@claude` (`@none` for unassigned), `#label`, `p0`–`p3`, `bug`/`feature`/`chore`, a status (`todo`, `wip`, `blocked`, `review`, `done`) or `under:E3`. The filter applies to the board, tree and backlog; Clear removes it.
-- **Comments** you post on a card reach Claude with your next prompt. A `● N` badge marks cards with comments you haven't read yet.
-- **Review:** you review what you hand over, once. Hand Claude a task and it goes to Review when finished, not Done. Hand it a whole epic or milestone (Hand to Claude on its card, or "implement E27" in chat) and its tasks close as Claude goes; the epic or milestone goes to Review when they're all done. Open the card and press `a` to approve, or `c` to send it back with what needs changing (Claude picks it up again). When the item has an open pull request, its card shows the PR and its checks; `a` then asks whether to approve and merge it, or approve only, and `c` also posts your note on the PR. You can also tell Claude in chat that it's approved.
+- **Comments** you post on a card reach Claude with your next prompt. On a card an agent holds, the button beside the comment field switches to *Tells it now*: then each comment starts a turn at once (the setting is kept). A `● N` badge marks cards with comments you haven't read yet; *Mark all read*, by the unread count in the header, clears them all.
+- **Ask Claude** on a card puts *"About roadmap task T12 (…): "* in the prompt box; press Esc to finish the question there and send it.
+- **Review:** you review what you hand over, once. Hand Claude a task and it goes to Review when finished, not Done. Hand it a whole epic or milestone (Hand to Claude on its card, or "implement E27" in chat) and its tasks close as Claude goes; the epic or milestone goes to Review when they're all done. Open the card and press `a` to approve, or `c` to send it back with what needs changing (Claude picks it up again). When the item has an open pull request, its card shows the PR and its checks; `a` then asks whether to approve and merge it, or approve only, and `c` also posts your note on the PR. You can also tell Claude in chat that it's approved. When PRs are stacked (each based on the branch of the one before), the bottom one's card shows the stack (`#11 ← #12 ← #15`) and offers *Merge the stack*. It merges them in order: each one above the bottom is moved onto main, brought up to date with it, and merged only once its checks pass there. Each merged PR's items are approved. A failure stops the run where it is, and Claude is told why.
+- **Undo** with `z` (or Undo in the header): it takes back your last change on the board (a status, a field, a tick, a comment, a new item, a removal), and pressing it again goes further back. Every change in a card's Activity has its own `↶ undo`, Claude's too, and an undo has a `↷ redo`. An undo is refused when something changed the same thing since, so later work is never lost. Merges can't be undone.
 - **Priority and type:** each task has a priority (`p0` urgent to `p3` can wait, `p2` by default) and a type (feature, bug or chore). Cards show them when they differ from the defaults, with `p0` in red and `p1` in yellow.
 - **Labels and links:** tasks can carry labels (`#ui`, `#auth`), relate to other items (shown on both), or be marked a duplicate of another, which closes them. They show in the card's Links section.
-- **The band** above the prompt shows what an agent is working on. Press it to open that task.
+- **Run tasks at once:** tick rows in the Backlog (☐) and press *Run N at once…*, or press *Run its tasks at once…* on an epic or milestone. Each task gets its own git worktree (`.claude/worktrees/<branch>`), on its own branch named for the task, made from the main line, and its own agent, started by Claude. Agents claim their tasks, commit, open their PRs and set them done with release notes, side by side. A task waiting on another starts by itself once that one is done (approved). Up to four run at once; the rest wait their turn.
+- **The band** above the prompt shows what an agent is working on (with several at once, each one's task and checklist). Press it to open that task.
 
 What Claude does with it:
 
@@ -44,11 +48,19 @@ What Claude does with it:
 - Searches with `find`: by status, assignee (`none` for unassigned), priority, type, labels, a subtree (`under`) or words in titles, descriptions and comments.
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Works on one branch per unit you hand over, named after it (`e9-agent-coordination`, or `t47-no-stray-hand-offs` for a task on its own). When the unit goes to Review, Claude is told to push the branch and open its pull request, titled with the unit's id, with a body listing its tasks and checklists (the `pr` action gives the branch, title and body).
+- Gives each task a release note when it sets it done: one line for the CHANGELOG (`note`), and its section (Added, Changed or Fixed; by default Fixed for a bug, Changed for a chore, Added otherwise), or `-` when the work needs no line. A done without one is refused until it has one. When you set a task done on the board, its card asks for the note too (or None needed, or Later). The notes go in the pull request's body, and the `changelog` action writes the notes of merged work into `CHANGELOG.md` under `[Unreleased]`, each in its section, skipping any already there.
+- Ships a release when you ask for one (`ship` with a version): it bumps `.claude-plugin/plugin.json` and `package.json` (those the project has), turns the CHANGELOG's `[Unreleased]` into that version with today's date and links, and opens a PR on a `release-v<version>` branch. Once that PR has merged and you say so, `ship` again tags the merge and publishes the GitHub release from the version's notes. It refuses a version that isn't higher, and a first `1.0` unless you've asked for one.
 - Puts task ids in commit messages (`T12: ...`) and epic or milestone ids in PR titles and branches (`E9: ...`, `e9-agent-coordination`). Commits and PRs show up on the items they name.
 
 ## How it's stored
 
 Everything lives in `.claude/roadmap.db` (SQLite) in your project, shared by every Claude Code session and agent working there. Writes are transactions, so concurrent agents don't lose each other's changes. The file is binary, so it belongs in `.gitignore`. If it isn't ignored, the board offers to add it once (press `g`), or you can turn the offer down. The schema is versioned: a newer build of the mod migrates older databases on first use, and an older build refuses a newer database instead of corrupting it.
+
+### Backups
+
+Because the database is ignored by git and lives in one checkout, deleting or re-cloning the folder would lose it. So the mod backs it up on its own: when the roadmap has changed, at most every 10 minutes while a session is open, it writes a JSON export to `~/.claude/roadmap-backups/<project path>/`, named by time, and keeps the newest 20. Set `ROADMAP_BACKUP_DIR` to keep them somewhere else (a synced folder, say), or to `off` to turn them off.
+
+To restore one, start from an empty roadmap (move `.claude/roadmap.db` aside if there is one) and ask Claude to *"import the roadmap from ~/.claude/roadmap-backups/…/roadmap-….json"*. You can also ask for an export at any time (`export`, to `.claude/roadmap-export-<date>.json` or a path you name). An export holds everything: items, checklists, labels, links, the whole timeline and read marks. Ids carry on where they left off.
 
 ## Development
 
@@ -57,9 +69,10 @@ claude --plugin-dir .                  # run a session with this checkout loaded
 claude plugin validate .               # what the engine sees and would refuse
 claude plugin test .                   # unit and UI tests (hooks/*.test.ts)
 node --test tests/sql.integration.mjs  # the generated SQL against a real sqlite3
+node --test tests/register.e2e.mjs     # the roadmap tool end to end (hooks/register.tsx) against a real sqlite3
 ```
 
-CI runs all three on every push to `main` and on pull requests (`.github/workflows/test.yml`).
+CI runs all four on every push to `main` and on pull requests (`.github/workflows/test.yml`).
 
 This roadmap was built by working from itself: its own milestones are in this repo's `.claude/roadmap.db` (not committed).
 

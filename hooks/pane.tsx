@@ -3,7 +3,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
 import {
-  backlog, find, GLYPH, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
+  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, timelineOf, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, rows, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn,
 } from './model'
 
@@ -11,7 +11,7 @@ export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yello
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog']]
+const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog'], ['timeline', 'Timeline']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -64,6 +64,18 @@ export type PaneState = {
   handing: string | null
   /** The item waiting on a yes before it is approved and its pull request merged. */
   merging: string | null
+  /** The item whose card asks before merging its stack of PRs. */
+  stacking: string | null
+  /** What a stack being merged is doing now; empty when none is. */
+  stackRun: string
+  /** Backlog rows picked to run in parallel. */
+  picked: string[]
+  /** The tasks waiting on a yes before they are handed out to run in parallel. */
+  parallelAsk: string[] | null
+  /** Whether a comment on an agent's card starts a turn at once. */
+  commentTurns: boolean
+  /** The task whose card asks for its release note, having just been set done. */
+  noting: string | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
@@ -94,6 +106,28 @@ export type PaneActions = {
   setDraft: (draft: Draft | null) => void
   create: (draft: Draft, title: string) => void
   setEditing: (isOn: boolean) => void
+  /** Takes back the person's last change, or the logged entries `ids`. */
+  undo: (ids?: number[]) => void
+  /** Marks every comment on the board as read by the person. */
+  markAllRead: () => void
+  /** Asks to confirm merging the stack on an item's card (null drops the question). */
+  askStack: (id: string | null) => void
+  /** Merges a stack of PRs, bottom first. */
+  mergeStack: (stack: Pr[]) => void
+  /** Sets which backlog rows are picked to run in parallel. */
+  setPicked: (ids: string[]) => void
+  /** Asks to confirm handing tasks out to run in parallel (null drops the question). */
+  askParallel: (ids: string[] | null) => void
+  /** Hands tasks out to run in parallel, each to its own agent in its own worktree. */
+  runParallel: (ids: string[]) => void
+  /** Posts the person's comment on an item (starting a turn when set to). */
+  comment: (item: Item, body: string) => void
+  /** Puts a prompt about an item in the prompt box. */
+  askClaude: (item: Item) => void
+  /** Sets whether comments on an agent's card start a turn. */
+  setCommentTurns: (isOn: boolean) => void
+  /** Asks for a task's release note on its card (null drops the question). */
+  setNoting: (id: string | null) => void
   /** Moves the keyboard ring to an element of the pane. */
   focus: (key: string) => void
   addIgnore: () => void
@@ -131,7 +165,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -162,8 +196,10 @@ export function drawPane(
   }
 
   const card = (item: Item, room: number) => {
-    const who = item.assignee ? ` @${item.assignee}` : ''
+    const fullWho = item.assignee ? ` @${item.assignee}` : ''
     const stale = isStale(item, now) ? ' ⌛stale' : ''
+    // Past when it was due, its own date or one above it.
+    const late = isLate(items, item, now) ? ' ⚠late' : ''
     const news = badge(item)
     const waits = waitingOn(items, item).map(one => one.id)
     const wait = waits.length ? ` ⧗${waits.join(',')}` : ''
@@ -175,7 +211,11 @@ export function drawPane(
     // Work in review shows the pull request an Approve would merge.
     const pr = statusOf(items, item) === 'review' ? openPrOf(known, item) : undefined
     const prTag = pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : ''
-    const extra = item.id.length + who.length + stale.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
+    const marked = item.id.length + stale.length + late.length + news.length + wait.length + ticks.length + tag.length + prTag.length + 1
+    // A readable title comes first: a long name (a parallel task's agent) is cut short to make room for it.
+    const whoRoom = Math.max(8, room - marked - 12)
+    const who = fullWho.length > whoRoom ? `${fullWho.slice(0, whoRoom - 1)}…` : fullWho
+    const extra = marked + who.length
     const title = item.title.length + extra > room ? item.title.slice(0, Math.max(4, room - extra - 1)) + '…' : item.title
     return (
       <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
@@ -192,6 +232,7 @@ export function drawPane(
         <Text color="red" dimColor>
           {stale}
         </Text>
+        <Text color="red">{late}</Text>
         <Text color="magenta" bold>
           {news}
         </Text>
@@ -199,6 +240,9 @@ export function drawPane(
     )
   }
 
+  // What Undo would take back: the person's last change still standing.
+  const undoable = lastChange(snap, USER)
+  const canUndo = undoable.length > 0
   const unreadTotal = items.reduce((sum, item) => sum + unread(snap, item.id, USER).length, 0)
   const nextView = VIEWS[(VIEWS.findIndex(([one]) => one === mode) + 1) % VIEWS.length]![0]
   const doneCount = items.filter(i => i.kind === 'task' && i.status === 'done').length
@@ -219,9 +263,12 @@ export function drawPane(
           ● {unreadTotal} unread
         </Text>
       )}
+      {unreadTotal > 0 && <Button key="mark-read" label="Mark all read" onPress={() => act.markAllRead()} />}
       {!isFiltering && <Button key="filter" label={filter ? `Filter: ${filter}` : 'Filter'} hotkey="f" variant={filter ? 'primary' : 'secondary'}
         onPress={() => act.setFiltering(true)} />}
       {filter && !isFiltering && <Button key="filter-clear" label="Clear" onPress={() => act.setFilter('')} />}
+      {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
+      {stackRun && <Text color="yellow">Merging a stack: {stackRun}</Text>}
       {/* With a card open, n adds under it (on the card's bar) instead. */}
       {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
     </Box>
@@ -299,18 +346,43 @@ export function drawPane(
     </Box>
   )
 
+  // Handing several out at once takes a yes, naming them and what waits.
+  const confirmParallel = (ids: string[], key: string) => {
+    const waits = ids.filter(id => { const one = find(items, id); return one && waitingOn(items, one).length > 0 })
+    return (
+      <Box key={key} flexDirection="row" columnGap={1} flexWrap="wrap">
+        <Text color="yellow">
+          Run {ids.join(', ')} at once, each by its own agent in its own worktree?{waits.length ? ` ${waits.join(', ')} ${waits.length === 1 ? 'starts' : 'start'} when what ${waits.length === 1 ? 'it waits' : 'they wait'} on is done.` : ''}
+        </Text>
+        <Button key="parallel-yes" label="Yes, start them" onPress={() => act.runParallel(ids)} />
+        <Button key="parallel-cancel" label="Cancel" onPress={() => act.askParallel(null)} />
+      </Box>
+    )
+  }
+
   // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
   const triageAll = backlog(items).filter(isShown)
   const triage = isDocked ? triageAll.slice(0, Math.max(1, Math.floor((topRows - 1) / 2))) : triageAll
   const backlogView = (
     <Box flexDirection="column">
       {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
+      {/* Picked rows run at once: each its own agent, worktree and branch. */}
+      {picked.length > 0 && (parallelAsk && !pick ? confirmParallel(parallelAsk, 'parallel-confirm') : (
+        <Box key="picked-row" flexDirection="row" columnGap={1}>
+          <Button key="run-picked" label={`Run ${picked.length} at once…`} variant="primary" onPress={() => act.askParallel(picked)} />
+          <Button key="unpick" label="Clear picks" onPress={() => act.setPicked([])} />
+        </Box>
+      ))}
       {triage.length < triageAll.length && <Text key="backlog-more" dimColor>…{triageAll.length - triage.length} more (close the card to see them all)</Text>}
       {triage.map(task => {
         const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
         const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
         const row = (
           <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
+            <Button key={`pick-${task.id}`} plain
+              onPress={() => act.setPicked(picked.includes(task.id) ? picked.filter(id => id !== task.id) : [...picked, task.id])}>
+              <Text color={picked.includes(task.id) ? 'green' : undefined}>{picked.includes(task.id) ? '☑' : '☐'}</Text>
+            </Button>
             {Select ? (
               <Select key={`prio-${task.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={task.priority}
                 onSelect={(value: string) => act.userAct({ action: 'update', id: task.id, priority: value })} />
@@ -334,6 +406,42 @@ export function drawPane(
           </Box>
         ) : row
       })}
+    </Box>
+  )
+
+  // The timeline: milestones and epics by due date, each with its progress and how it stands against the date.
+  const today = now > 0 ? dateOf(now) : undefined
+  const timelineAll = timelineOf(items).filter(one => !query || subtree(items, one.id).some(id => isShown(find(items, id)!)))
+  const timelineShown = isDocked ? timelineAll.slice(0, Math.max(1, topRows - 1)) : timelineAll
+  const BAR = 10
+  const timelineView = (
+    <Box flexDirection="column">
+      {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
+      {timelineShown.map(one => {
+        const p = progress(items, one)
+        const st = statusOf(items, one)
+        const filled = p.total ? Math.round((p.done / p.total) * BAR) : 0
+        const days = one.due && today ? daysBetween(today, one.due) : undefined
+        const late = isLate(items, one, now)
+        const open = p.total - p.done
+        const when = days === undefined ? '' : st === 'done' ? '' : late ? `${-days} day${days === -1 ? '' : 's'} late, ${open} open` : days === 0 ? 'due today' : `in ${days} day${days === 1 ? '' : 's'}`
+        const isUnder = Boolean(one.parent && find(items, one.parent))
+        // An epic without a date of its own goes by its milestone's.
+        const date = one.due ? `  ${one.due}` : isUnder ? '' : '  no due date'
+        const fixed = (isUnder ? 2 : 0) + 2 + one.id.length + 1 + date.length + 2 + BAR + ` ${p.done}/${p.total}`.length + (when ? when.length + 2 : 0)
+        const title = one.title.length + fixed > width - 1 ? `${one.title.slice(0, Math.max(8, width - fixed - 2))}…` : one.title
+        return (
+          <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
+            {isUnder ? '  ' : ''}
+            <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
+            <Text dimColor>{date}  </Text>
+            <Text color="green">{'▓'.repeat(filled)}</Text>
+            <Text dimColor>{'░'.repeat(BAR - filled)} {p.done}/{p.total}</Text>
+            <Text color={late ? 'red' : undefined} dimColor={!late} bold={late}>{when ? `  ${when}` : ''}</Text>
+          </Button>
+        )
+      })}
+      {timelineShown.length < timelineAll.length && <Text key="timeline-more" dimColor>…{timelineAll.length - timelineShown.length} more (close the card to see them all)</Text>}
     </Box>
   )
 
@@ -392,6 +500,8 @@ export function drawPane(
             field('edit-labels', 'Labels', item.labels.join(', '), v => save({ labels: v ? v.split(',') : [] }), 'ui, auth'),
             choice('edit-priority', 'Priority', item.priority, PRIORITIES.map(one => ({ value: one })), v => save({ priority: v })),
             choice('edit-type', 'Type', item.type, TYPES.map(one => ({ value: one })), v => save({ type: v })),
+            field('edit-note', 'Release note', item.note ?? '', v => save({ note: v }), 'one line for the CHANGELOG; - for none; empty clears'),
+            choice('edit-section', 'Section', sectionFor(item), SECTIONS.map(one => ({ value: one })), v => save({ section: v })),
             // The checklist as written: reword an entry in place, empty it to drop it, or add one at the end.
             // An entry left as it was keeps its tick.
             ...item.checklist.map(c => field(`edit-check-${c.n}`, `Criterion ${c.n}`, c.text, v => save({
@@ -413,6 +523,8 @@ export function drawPane(
     if (!isEditing) section('description', 'Description', item.description
       ? wrap(item.description, inner - 2).map((line, i) => ({ key: `desc-${i}`, rows: 1, node: <Text key={`desc-${i}`}>  {line}</Text> }))
       : [])
+    if (!isEditing && item.note && item.note !== '-') section('note', `Release note  (${sectionFor(item)})`, wrap(item.note, inner - 2)
+      .map((line, i) => ({ key: `note-${i}`, rows: 1, node: <Text key={`note-${i}`}>  {line}</Text> })))
     const checks = item.checklist ?? []
     section('criteria', `Acceptance criteria  ${checks.filter(c => c.done).length}/${checks.length}`, checks.map(c => ({
       key: `check-${c.n}`, rows: wrap(c.text, inner - 2).length, node: (
@@ -479,8 +591,16 @@ export function drawPane(
     section('activity', 'Activity', [
       ...(Input
         ? [{ key: 'comment', rows: 1, node: (
-            <Input key="comment" label="Comment" placeholder="A note for Claude; Enter posts it"
-              onSubmit={(value: string) => (value.trim() && act.userAct({ action: 'comment', id: item.id, body: value }))} />
+            <Box key="comment-row" flexDirection="row" columnGap={1}>
+              <Input key="comment" label="Comment"
+                placeholder={isAgent(item.assignee) && commentTurns ? `${item.assignee} hears it at once; Enter posts it` : 'A note for Claude; Enter posts it'}
+                onSubmit={(value: string) => act.comment(item, value)} />
+              {/* Held by an agent: whether it hears now, or with the person's next prompt. */}
+              {isAgent(item.assignee) && (
+                <Button key="comment-turns" label={commentTurns ? 'Tells it now' : 'Waits for your prompt'}
+                  variant={commentTurns ? 'primary' : 'secondary'} onPress={() => act.setCommentTurns(!commentTurns)} />
+              )}
+            </Box>
           ) }]
         : []),
       // Comments and handoff notes read as messages, author over body; what the tracker did reads as one dim line.
@@ -489,21 +609,33 @@ export function drawPane(
         .map(one => {
           const when = one.at.slice(5, 16).replace('T', ' ')
           const who = <Text color={one.author === USER ? 'magenta' : 'cyan'}>{one.author}</Text>
+          // A change still standing can be taken back from its line; an undo, made again the same way.
+          const revert = one.undoable && !one.undone
+            ? <Button key={`revert-${one.id}`} plain onPress={() => act.undo([one.id])}><Text dimColor> {one.type === 'undo' ? '↷ redo' : '↶ undo'}</Text></Button>
+            : null
           return isMessage(one)
             ? { key: `act-${one.id}`, rows: 1 + tall(one.body, 2), node: (
                 <Box key={`act-${one.id}`} flexDirection="column">
-                  <Text>
-                    {who}
-                    {one.type === 'handoff' && <Text color="yellow"> handoff</Text>}
-                    <Text dimColor> {when}</Text>
-                  </Text>
+                  <Box flexDirection="row">
+                    <Text>
+                      {who}
+                      {one.type === 'handoff' && <Text color="yellow"> handoff</Text>}
+                      <Text dimColor> {when}</Text>
+                    </Text>
+                    {revert}
+                  </Box>
                   <Text>  {one.body}</Text>
                 </Box>
               ) }
-            : { key: `act-${one.id}`, rows: tall(`${when} ${one.author} ${one.body}`), node: (
-                <Text key={`act-${one.id}`} dimColor>
-                  {when} {one.author} {one.body}
-                </Text>
+            : { key: `act-${one.id}`, rows: tall(`${when} ${one.author} ${one.body} ↶ undo`), node: (
+                <Box key={`act-${one.id}`} flexDirection="row">
+                  <Box flexShrink={1}>
+                    <Text dimColor>
+                      {when} {one.author} {one.body}
+                    </Text>
+                  </Box>
+                  {revert}
+                </Box>
               ) }
         }),
     ])
@@ -534,34 +666,44 @@ export function drawPane(
   const headerRows = flowRows([
     ...VIEWS.map(([, label]) => label.length + 4),
     `${doneCount}/${taskCount} tasks done`.length,
-    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length] : []),
+    ...(unreadTotal > 0 ? [`● ${unreadTotal} unread`.length, 'Mark all read'.length + 4] : []),
     ...(!isFiltering ? [(filter ? `Filter: ${filter}` : 'Filter').length + 4] : []),
     ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
+    ...(canUndo ? ['Undo'.length + 4] : []),
+    ...(stackRun ? [`Merging a stack: ${stackRun}`.length] : []),
   ], width)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
   // Work in review waits on the person, not on Claude: its card approves it or asks for changes instead.
   const isHandable = status !== 'done' && status !== 'review'
+  // A milestone's or epic's tasks that could run at once: todo, and nobody's yet.
+  const openUnder = item && item.kind !== 'task'
+    ? subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task' && one.status === 'todo' && !one.assignee).map(one => one.id)
+    : []
   // The pull request the item under review ships in, which Approve can merge.
   const reviewPr = isReview && item ? openPrOf(known, item) : undefined
   // The card's pull request, held under the bar with the buttons that act on it; and the one it is stacked on.
   const cardPr = item ? openPrOf(known, item) : undefined
   const under = cardPr && stackedOn(known, cardPr)
+  // The bottom of a stack merges the whole of it.
+  const stack = cardPr ? stackFrom(known, cardPr) : []
+  const isStack = stack.length > 1
   const prText = cardPr
-    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  stacked on #${under.number}: merge that first` : ''}`
+    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  stacked on #${under.number}: merge that first` : ''}${isStack ? `  stack ${stackText(stack)} [ Merge the stack ]` : ''}${stackRun ? `  ${stackRun}` : ''}`
     : ''
   const prRows = cardPr ? tall(prText) : 0
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id || stacking === item.id ? 1 :
+        parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
     ? ['Tab/↑↓ move', item.kind === 'task' ? `1–${STATUSES.length} status` : '', isReview ? 'a approve · c request changes' : '', isEditing ? 'e done editing' : 'e edit', 'x close']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Tab/↑↓ move', 'Enter opens', 'n new', 'f filter', canUndo ? 'z undo' : '', mode === 'board' ? 't p b r d jump to a column' : '', `v ${nextView}`]
   )
     .filter(Boolean)
     .join(' · ')
@@ -616,7 +758,11 @@ export function drawPane(
             {STATUSES.map((one, i) => (
               <Button key={`set-${one}`} label={item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]}
                 hotkey={String(i + 1)} variant={item.status === one ? 'primary' : 'secondary'}
-                onPress={() => act.userAct({ action: 'update', id: item.id, status: one })} />
+                onPress={() => {
+                  act.userAct({ action: 'update', id: item.id, status: one })
+                  // Done, and nothing for the CHANGELOG yet: the card asks for its line.
+                  if (one === 'done' && !item.note && Input) act.setNoting(item.id)
+                }} />
             ))}
           </Box>
         ) : (
@@ -631,7 +777,27 @@ export function drawPane(
             </Text>
           </Box>
         )}
-        {handing === item.id ? (
+        {parallelAsk && item.kind !== 'task' ? (
+          confirmParallel(parallelAsk, 'parallel-confirm')
+        ) : stacking === item.id && isStack ? (
+          <Box key="stack-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
+            <Text color="yellow">
+              Merge {stack.map(pr => `#${pr.number}`).join(', then ')} into {stack[0]!.base || 'main'}, each once its checks pass there?
+            </Text>
+            <Button key="stack-yes" label="Merge the stack" onPress={() => act.mergeStack(stack)} />
+            <Button key="stack-cancel" label="Cancel" onPress={() => act.askStack(null)} />
+          </Box>
+        ) : noting === item.id && Input ? (
+          <Box key="note-row" flexDirection="row" columnGap={1}>
+            <Input key="note" label={`Release note (${sectionFor(item)})`} placeholder="One line for the CHANGELOG; Enter saves it" autoFocus submitLabel="save"
+              onSubmit={(value: string) => {
+                if (value.trim()) act.userAct({ action: 'update', id: item.id, note: value.trim() })
+                act.setNoting(null)
+              }} />
+            <Button key="note-none" label="None needed" onPress={() => (act.userAct({ action: 'update', id: item.id, note: '-' }), act.setNoting(null))} />
+            <Button key="note-skip" label="Later" onPress={() => act.setNoting(null)} />
+          </Box>
+        ) : handing === item.id ? (
           confirmHand(item)
         ) : merging === item.id && reviewPr ? (
           <Box key="merge-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
@@ -664,7 +830,9 @@ export function drawPane(
               onPress={() => act.setRequesting(true)} />
           )}
           {isHandable && <Button key="hand" label="Hand to Claude" onPress={() => act.askHand(item.id)} />}
+          <Button key="ask" label="Ask Claude" onPress={() => act.askClaude(item)} />
           {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
+          {openUnder.length > 1 && <Button key="run-parallel" label="Run its tasks at once…" onPress={() => act.askParallel(openUnder)} />}
           {(Input || Select) && (
             <Button key="edit" label={isEditing ? 'Done editing' : 'Edit'} hotkey="e" variant={isEditing ? 'primary' : 'secondary'}
               onPress={() => act.setEditing(!isEditing)} />
@@ -676,7 +844,7 @@ export function drawPane(
         )}
       </Box>
       {cardPr && (
-        <Box key="pr-line">
+        <Box key="pr-line" flexDirection="row" flexWrap="wrap" columnGap={1}>
         <Text>
           <Link href={cardPr.url}>PR #{cardPr.number}</Link>
           <Text color="green"> [open]</Text>
@@ -684,7 +852,10 @@ export function drawPane(
           <Text dimColor> {cardPr.branch} → </Text>
           <Text>{cardPr.base || '?'}</Text>
           {under && <Text color="yellow">  stacked on #{under.number}: merge that first</Text>}
+          {isStack && <Text dimColor>  stack {stackText(stack)}</Text>}
+          {stackRun && <Text color="yellow">  {stackRun}</Text>}
         </Text>
+        {isStack && !stackRun && <Button key="merge-stack" label="Merge the stack" onPress={() => act.askStack(item.id)} />}
         </Box>
       )}
       {!isCompact && (
@@ -778,12 +949,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'tree' ? tree : backlogView}
+                {mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : backlogView)
+            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView)
           )
         )}
         {items.length > 0 && !trouble && (
@@ -794,4 +965,60 @@ export function drawPane(
       </Box>
       ),
   }
+}
+
+/**
+ * The band above the prompt: what the agents are working on right now, pressable to open it. `working`
+ * is their tasks under way, the latest first; several (tasks run in parallel) are shown side by side.
+ */
+export function drawBand(els: Elements[keyof Elements], e: EventOf['ui.render'], snap: Snapshot, working: Item[], show: (id: string) => void): RenderElement {
+  const { Box, Button, Text } = els
+  const task = working[0]!
+  const room = ((e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 80) - 1
+  // Several agents at once (tasks run in parallel): each one's task and checklist, side by side, as many as fit.
+  if (working.length > 1) {
+    const ticksOf = (one: Item) => (one.checklist.length ? ` ☑${one.checklist.filter(c => c.done).length}/${one.checklist.length}` : '')
+    const head = `◐ ${working.length} agents: `
+    let used = head.length
+    const shown = working.filter(one => {
+      const width = `${one.id}${ticksOf(one)} · `.length
+      return (used += width) <= room - 8
+    })
+    return (
+      <Box flexDirection="row">
+        <Text color={COLOR.in_progress}>◐</Text>
+        <Text dimColor> {working.length} agents:</Text>
+        {shown.map((one, i) => (
+          <Button key={`agent-${one.id}`} plain onPress={() => show(one.id)}>
+            {i ? <Text dimColor> ·</Text> : null} <Text>{one.id}</Text>
+            <Text dimColor>{ticksOf(one)}</Text>
+          </Button>
+        ))}
+        {shown.length < working.length && <Text dimColor> +{working.length - shown.length} more</Text>}
+      </Box>
+    )
+  }
+  const milestone = (() => {
+    let at: Item | undefined = task
+    while (at && at.kind !== 'milestone') at = find(snap.items, at.parent ?? undefined)
+    return at
+  })()
+  const list = task.checklist ?? []
+  const ticks = list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : ''
+  const where = milestone ? ` · ${milestone.id} ${progress(snap.items, milestone).done}/${progress(snap.items, milestone).total}` : ''
+  const fixed = `◐ ${task.id}  @${task.assignee}${ticks}${where}`.length
+  const title = task.title.length + fixed > room ? task.title.slice(0, Math.max(8, room - fixed - 1)) + '…' : task.title
+
+  return (
+    <Box>
+      <Button key="current" plain onPress={() => show(task.id)}>
+        <Text color={COLOR.in_progress}>◐</Text> <Text dimColor>{task.id}</Text> {title}
+        <Text color="cyan"> @{task.assignee}</Text>
+        <Text dimColor>
+          {ticks}
+          {where}
+        </Text>
+      </Button>
+    </Box>
+  )
 }

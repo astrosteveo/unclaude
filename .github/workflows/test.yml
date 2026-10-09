@@ -25,3 +25,5 @@ jobs:
         run: claude plugin test .
       - name: Generated SQL against a real sqlite3
         run: node --test tests/sql.integration.mjs
+      - name: The roadmap tool end to end, against a real sqlite3
+        run: node --test tests/register.e2e.mjs

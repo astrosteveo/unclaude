@@ -1,4 +1,4 @@
-import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
+import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Section, Snapshot, Status } from '../types'
 
 // The person at the board, and the main loop's agent; subagents go by names from agentName.
 export const USER = 'user'
@@ -9,6 +9,19 @@ export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', 
 export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In progress', blocked: 'Blocked', review: 'Review', done: 'Done' }
 export const PRIORITIES: Priority[] = ['p0', 'p1', 'p2', 'p3']
 export const TYPES: IssueType[] = ['feature', 'bug', 'chore']
+export const SECTIONS: Section[] = ['Added', 'Changed', 'Fixed']
+// The order Keep a Changelog puts its sections in, those this mod writes among them.
+const SECTION_ORDER = ['Added', 'Changed', 'Deprecated', 'Removed', 'Fixed', 'Security']
+
+/** A section as given (`fixed`, `Fixed`), or undefined when it is none of them. */
+export const sectionOf = (text: string | undefined): Section | undefined =>
+  SECTIONS.find(one => one.toLowerCase() === text?.trim().toLowerCase())
+
+/** The section a task's note goes under: its own, else what its type suggests (a bug is a fix). */
+export const sectionFor = (item: Item): Section => item.section ?? (item.type === 'bug' ? 'Fixed' : item.type === 'chore' ? 'Changed' : 'Added')
+
+/** Whether a task has a note worth a CHANGELOG line (not none, and not `-`, none needed). */
+export const hasNote = (item: Item) => Boolean(item.note && item.note !== '-')
 /** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
 export const marks = (item: Item) =>
   [item.priority && item.priority !== 'p2' ? item.priority : '', item.type && item.type !== 'feature' ? item.type : ''].filter(Boolean)
@@ -373,6 +386,18 @@ export const unread = (snap: Snapshot, id: string, reader: string) =>
     one => one.item_id === id && one.author !== reader && isMessage(one) && one.id > (snap.seen[id] ?? 0),
   )
 
+/**
+ * What `who`'s Undo takes back: their latest change still standing, every entry of the write it was
+ * (its op). Undos are passed over, so pressing Undo again walks further back.
+ */
+export function lastChange(snap: Snapshot, who: string): Activity[] {
+  const mine = snap.activity.filter(one => one.author === who && !one.undone && one.type !== 'undo')
+  const newest = mine.reduce<Activity | undefined>((max, one) => (!max || one.id > max.id ? one : max), undefined)
+  // One logged before undo existed can't be taken back, and Undo never skips it for an older one.
+  if (!newest?.undoable) return []
+  return newest.op ? mine.filter(one => one.op === newest.op && one.undoable).sort((a, b) => a.id - b.id) : [newest]
+}
+
 /** Whether an entry is something someone wrote (a comment or a handoff note), not a change the tracker logged. */
 export const isMessage = (one: Activity) => one.type === 'comment' || one.type === 'handoff'
 
@@ -441,6 +466,35 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   ]
 }
 
+/** The date of a clock reading, as due dates are written (YYYY-MM-DD). */
+export const dateOf = (now: number) => new Date(now).toISOString().slice(0, 10)
+
+/** When an item is due: its own date, else the nearest one above it. */
+export function dueOf(items: Item[], item: Item): string | undefined {
+  let at: Item | undefined = item
+  while (at && !at.due) at = find(items, at.parent ?? undefined)
+  return at?.due ?? undefined
+}
+
+/** Whether an item is past when it was due (its own date or one above it) and not done; never without a clock. */
+export const isLate = (items: Item[], item: Item, now: number) => {
+  const due = dueOf(items, item)
+  return now > 0 && due !== undefined && due < dateOf(now) && statusOf(items, item) !== 'done'
+}
+
+/** Days from date `a` to date `b` (YYYY-MM-DD): negative when `b` is before `a`. */
+export const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000)
+
+/**
+ * The timeline: milestones (and epics under none) by due date, soonest first and undated last, each
+ * milestone followed by its epics in the same order.
+ */
+export function timelineOf(items: Item[]): Item[] {
+  const byDue = (list: Item[]) => [...list].sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999') || byId(a, b))
+  const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, one.parent ?? undefined)))
+  return top.flatMap(one => [one, ...(one.kind === 'milestone' ? byDue(childrenOf(items, one.id).filter(child => child.kind === 'epic')) : [])])
+}
+
 /** The roadmap as a short brief for an agent: its own work, what is blocked, and what changed. */
 export function brief(snap: Snapshot, actor: string, news: Activity[], now?: number, refs?: Refs): string | undefined {
   if (snap.items.length === 0) return undefined
@@ -464,6 +518,9 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   if (stale.length)
     parts.push(`Stale claims (holder silent over ${LEASE_MS / 60_000} min; claiming takes one over):\n` + list(stale))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
+  // Dated items past their date: a milestone, epic or task with a due date of its own.
+  const late = now === undefined ? [] : items.filter(item => item.due && isLate(items, item, now)).sort((a, b) => a.due!.localeCompare(b.due!))
+  if (late.length) parts.push(`Overdue (past their due date, not done; today is ${dateOf(now!)}):\n` + list(late))
   if (review.length) {
     // Each with its pull request, or a note that it still needs one.
     const pr = (item: Item) => {
@@ -511,6 +568,59 @@ export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): 
   return `The user approved ${what} on the board; it is done. No pull request was merged with it. Say in a line or two what is next on the roadmap.`
 }
 
+/** The agent type a task run in parallel goes to, and the most such agents working at once. */
+export const WORKER_TYPE = 'general-purpose'
+export const WORKERS_MAX = 4
+
+/** What a parallel task's agent is spawned as: its task, by id and title. */
+export const workerTask = (task: Item) => `${task.id} ${task.title}`
+
+/** The name a parallel task's agent goes by on the board, as its own calls will be named. */
+export const workerName = (task: Item) => agentName(WORKER_TYPE, workerTask(task))
+
+/** The first turn of a parallel task's agent, which starts in the worktree made for it, on its branch. */
+export function workerPrompt(task: Item, branch: string, dir: string): string {
+  return [
+    `You are working roadmap task ${task.id}: ${task.title}. The user handed out several tasks to run at once, each to its own agent in its own git worktree.`,
+    `Your worktree is ${dir}, already on branch ${branch}, made from the main line. Work only there; other agents work in the other worktrees.`,
+    `1. Claim the task with the roadmap tool (claim ${task.id}); it is assigned to you, and the claim starts it. Read what it asks (show ${task.id}).`,
+    '2. Do the work. Tick its checklist as each criterion is met (check), and comment on decisions and findings.',
+    `3. Commit as "${task.id}: ...". If the repository has a remote, push the branch and open its pull request (pr ${task.id} gives the title and body; base it on the main line).`,
+    `4. Set ${task.id} done with its release note (note, section). It goes to the user's review.`,
+    `If you cannot finish, release ${task.id} with a handoff note saying where you got to. Don't remove the worktree.`,
+  ].join('\n')
+}
+
+/** A parallel task's prompt, recognised as the main loop's Agent call passes it on: the task and its worktree. */
+export function workerOf(prompt: string): { id: string; dir: string } | undefined {
+  const found = /^You are working roadmap task (\w+):[\s\S]*?\nYour worktree is (.+?), already on branch /.exec(prompt)
+  return found ? { id: found[1]!, dir: found[2]! } : undefined
+}
+
+/**
+ * The turn asking the main loop to start parallel tasks: agents a plugin spawns can't call the plugin's
+ * own tool, so the main loop's Agent tool starts them, each prompt passed on as written.
+ */
+export function workersNote(work: { task: Item; prompt: string }[]): string {
+  return [
+    `The user handed out roadmap tasks to run at once from the board: ${work.map(one => one.task.id).join(', ')}. Start each now as its own background agent: ` +
+      `one Agent call per task, all in this one message, subagent_type "${WORKER_TYPE}", run_in_background true, the description given, and the prompt exactly as written ` +
+      '(its worktree and branch are made). Then say in a line which started; their progress shows on the board.',
+    ...work.map(one => `--- ${one.task.id}\ndescription: ${workerTask(one.task)}\nprompt:\n${one.prompt}`),
+  ].join('\n\n')
+}
+
+/** The prompt Ask Claude puts in the box for the person to finish: which item, by id and title. */
+export const askAbout = (item: Item) => `About roadmap ${item.kind} ${item.id} (${item.title}): `
+
+/** The turn a comment starts when the person sends it to the agent holding the item. */
+export function commentNote(item: Item, body: string): string {
+  const what = `roadmap ${item.kind} ${item.id} (${item.title})`
+  return item.assignee === CLAUDE
+    ? `The user commented on ${what}, which you hold: "${body}". Read it with the roadmap tool (show ${item.id}) and act on it, commenting back there.`
+    : `The user commented on ${what}, which ${item.assignee} holds: "${body}". If ${item.assignee} is still running, pass it on (SendMessage); otherwise act on it yourself. Comment back on ${item.id}.`
+}
+
 /** Lowercase words joined by hyphens, cut at a word boundary to at most `cap` characters. */
 function slug(text: string, cap: number): string {
   const full = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -543,6 +653,13 @@ export function pullRequest(items: Item[], item: Item): { branch: string; title:
       .join('\n')
       .trim(),
   )
+  // The tasks' release notes, as they will read in the CHANGELOG.
+  const noted = tasks.filter(hasNote)
+  if (noted.length)
+    parts.push(['### Release notes', ...SECTIONS.flatMap(section => {
+      const some = noted.filter(task => sectionFor(task) === section)
+      return some.length ? ['', `${section}:`, ...some.map(task => `- ${task.note} (${task.id})`)] : []
+    })].join('\n'))
   parts.push(`Tracked on the roadmap as ${item.id}${item.parent ? `, in ${path(items, item)}` : ''}.`)
   return { branch: branchFor(item), title: `${item.id}: ${item.title}`, body: parts.filter(Boolean).join('\n\n') }
 }
@@ -612,6 +729,46 @@ export const openPrOf = (refs: Refs, item: Item): Pr | undefined =>
 export const stackedOn = (refs: Refs, pr: Pr): Pr | undefined =>
   pr.base ? refs.prs.find(one => one.state === 'open' && one.number !== pr.number && one.branch === pr.base) : undefined
 
+/**
+ * The stack `pr` is the bottom of: it, then each open PR based on the branch of the one before (the
+ * lowest-numbered where two are), up to the top. Just `[pr]` when nothing is stacked on it, or when it
+ * is itself stacked on another open PR (only a stack's bottom merges it).
+ */
+export function stackFrom(refs: Refs, pr: Pr): Pr[] {
+  if (stackedOn(refs, pr)) return [pr]
+  const out = [pr]
+  for (;;) {
+    const top = out.at(-1)!
+    const next = refs.prs
+      .filter(one => one.state === 'open' && one.base === top.branch && !out.includes(one))
+      .sort((a, b) => a.number - b.number)[0]
+    if (!next) return out
+    out.push(next)
+  }
+}
+
+/** A stack as the card shows it: `#11 ← #12 ← #15`, bottom first. */
+export const stackText = (stack: Pr[]) => stack.map(pr => `#${pr.number}`).join(' ← ')
+
+/**
+ * The turn telling Claude how merging a stack from the board went: all merged into `base`, so it brings
+ * the checkout up to date; or stopped at a PR, with why, so it finds out and fixes what it can.
+ */
+export function stackNote(stack: Pr[], merged: Pr[], base: string, failure?: { at: Pr; why: string }): string {
+  const done = merged.length ? `merged ${merged.map(pr => `#${pr.number} (${pr.branch})`).join(', ')} into ${base}` : 'merged none of it'
+  if (failure)
+    return (
+      `The user merged the stack ${stackText(stack)} from the board, bottom first: it ${done}, then stopped at PR #${failure.at.number} ` +
+      `(branch ${failure.at.branch}): ${failure.why}. What is left stays in review. Find out why (failing checks on ${base}, a conflict, branch protection), ` +
+      `fix what you can on ${failure.at.branch}, bring the checkout up to date with ${base}, and tell the user whether the rest is ready to merge.`
+    )
+  return (
+    `The user merged the stack ${stackText(stack)} from the board: ${done}, each after its checks passed on ${base}; their items are approved. ` +
+    `Bring the checkout up to date: switch to ${base} and pull, delete the local branches ${stack.map(pr => pr.branch).join(', ')}, ` +
+    'then say in a line or two what is next on the roadmap.'
+  )
+}
+
 /** Whether a branch is the repository's main line, where a merged pull request's work is done. */
 export const isMainLine = (branch: string) => branch === 'main' || branch === 'master'
 
@@ -663,4 +820,114 @@ export function withIgnore(text: string | undefined): string {
   const base = text ?? ''
   const gap = base === '' || base.endsWith('\n') ? '' : '\n'
   return `${base}${gap}# The roadmap tracker's database (binary, per checkout).\n${IGNORE_LINE}\n`
+}
+
+/**
+ * The release notes of merged work: done tasks with a note whose unit of work has no open pull request,
+ * and has a merged one or none at all (work committed straight to the main line).
+ */
+export function mergedNotes(items: Item[], refs: Refs): Item[] {
+  return rows(items)
+    .map(row => row.item)
+    .filter(task => task.kind === 'task' && task.status === 'done' && hasNote(task))
+    .filter(task => {
+      const unit = unitOf(items, task)
+      const prs = refs.prs.filter(pr => pr.ids.includes(unit.id))
+      return !prs.some(pr => pr.state === 'open') && (prs.length === 0 || prs.some(pr => pr.state === 'merged'))
+    })
+    // Newest first, as a CHANGELOG reads.
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || Number(b.id.slice(1)) - Number(a.id.slice(1)))
+}
+
+/**
+ * A CHANGELOG's text with `notes` added under `## [Unreleased]`, each in its section, newest first, as
+ * Keep a Changelog lays it out; the heading and sections are made when missing. A note already in the
+ * file is left out. Answers the text and the notes that went in.
+ */
+export function withNotes(text: string | undefined, notes: { section: Section; note: string }[]): { text: string; added: string[] } {
+  const before = text ?? ''
+  const fresh = notes.filter((one, i) => !before.includes(one.note) && notes.findIndex(other => other.note === one.note) === i)
+  if (fresh.length === 0) return { text: before, added: [] }
+  const lines = (before || '# Changelog\n').replace(/\r\n/g, '\n').split('\n')
+  let start = lines.findIndex(line => /^## \[?unreleased\]?/i.test(line))
+  if (start < 0) {
+    // Above the newest version, set off by blank lines.
+    const first = lines.findIndex(line => line.startsWith('## '))
+    let at = first < 0 ? lines.length : first
+    while (at > 0 && lines[at - 1]!.trim() === '') at--
+    lines.splice(at, 0, '', '## [Unreleased]', ...(first < 0 ? [] : ['']))
+    start = at + 1
+    while (start + 2 < lines.length && lines[start + 2]!.trim() === '' && lines[start + 1]!.trim() === '') lines.splice(start + 2, 1)
+  }
+  for (const section of SECTION_ORDER.filter(one => fresh.some(note => note.section === one))) {
+    const bullets = fresh.filter(one => one.section === section).map(one => `- ${one.note}`)
+    const next = lines.findIndex((line, i) => i > start && line.startsWith('## '))
+    const end = next < 0 ? lines.length : next
+    const head = lines.findIndex((line, i) => i > start && i < end && line.trim() === `### ${section}`)
+    if (head >= 0) {
+      let at = head + 1
+      while (at < end && lines[at]!.trim() === '') at++
+      if (at < end && lines[at]!.startsWith('- ')) lines.splice(at, 0, ...bullets)
+      else lines.splice(head + 1, 0, '', ...bullets)
+      continue
+    }
+    const later = lines.findIndex((line, i) => i > start && i < end && line.startsWith('### ') &&
+      SECTION_ORDER.indexOf(line.slice(4).trim()) > SECTION_ORDER.indexOf(section))
+    if (later >= 0) lines.splice(later, 0, `### ${section}`, '', ...bullets, '')
+    else {
+      let at = end
+      while (at - 1 > start && lines[at - 1]!.trim() === '') at--
+      const block = ['', `### ${section}`, '', ...bullets]
+      lines.splice(at, 0, ...block)
+      // A blank line between it and whatever follows (the next version's heading).
+      const after = at + block.length
+      if (after < lines.length && lines[after]!.trim() !== '') lines.splice(after, 0, '')
+    }
+  }
+  return { text: lines.join('\n'), added: fresh.map(one => one.note) }
+}
+
+/** A version as `[major, minor, patch]`, from `1.2.3` or `v1.2.3`; undefined when it is not one. */
+export function versionOf(text: string | undefined): [number, number, number] | undefined {
+  const found = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(text?.trim() ?? '')
+  return found ? [Number(found[1]), Number(found[2]), Number(found[3])] : undefined
+}
+
+/** Whether version `a` comes after `b`. */
+export const isAfter = (a: [number, number, number], b: [number, number, number]) => (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0
+
+/** A manifest's text (plugin.json, package.json) with its version set, the rest as it was; undefined when it has none. */
+export function withVersion(text: string, version: string): string | undefined {
+  const pattern = /("version"\s*:\s*")([^"]*)(")/
+  return pattern.test(text) ? text.replace(pattern, `$1${version}$3`) : undefined
+}
+
+/** The repository's web address from a git remote (`git@github.com:o/r.git`, `https://github.com/o/r.git`). */
+export const webOf = (remote: string) =>
+  remote.trim().replace(/^git@([^:]+):/, 'https://$1/').replace(/\.git$/, '').replace(/\/+$/, '')
+
+/**
+ * A CHANGELOG with its [Unreleased] section cut as `version`, dated `date`, under a fresh empty
+ * [Unreleased], and its links pointing [Unreleased] at what comes after the version's tag. Answers the
+ * text and the version's notes (what [Unreleased] held), or throws when there is nothing to release.
+ */
+export function cutRelease(text: string, version: string, date: string, web: string): { text: string; notes: string } {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const start = lines.findIndex(line => /^## \[?unreleased\]?/i.test(line))
+  if (start < 0) throw new Error('the CHANGELOG has no [Unreleased] section to release')
+  const next = lines.findIndex((line, i) => i > start && line.startsWith('## '))
+  const links = lines.findIndex((line, i) => i > start && /^\[[^\]]+\]: \S/.test(line))
+  const end = next >= 0 ? next : links >= 0 ? links : lines.length
+  const notes = lines.slice(start + 1, end).join('\n').trim()
+  if (!notes) throw new Error('nothing is under [Unreleased] in the CHANGELOG; there is nothing to release')
+  lines.splice(start, 1, '## [Unreleased]', '', `## [${version}] - ${date}`)
+  // The links: [Unreleased] now compares against this version's tag, which gets one of its own.
+  const ours = [`[Unreleased]: ${web}/compare/v${version}...HEAD`, `[${version}]: ${web}/releases/tag/v${version}`]
+  const old = lines.findIndex(line => /^\[unreleased\]: /i.test(line))
+  if (old >= 0) lines.splice(old, 1, ...ours)
+  else {
+    while (lines.length && lines.at(-1)!.trim() === '') lines.pop()
+    lines.push('', ...ours, '')
+  }
+  return { text: lines.join('\n'), notes }
 }

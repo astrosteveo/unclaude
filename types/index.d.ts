@@ -4,6 +4,8 @@ export type Status = 'todo' | 'in_progress' | 'blocked' | 'review' | 'done'
 export type Priority = 'p0' | 'p1' | 'p2' | 'p3'
 /** What sort of work an item is, as Jira's issue type. */
 export type IssueType = 'feature' | 'bug' | 'chore'
+/** A CHANGELOG section a task's release note goes under. */
+export type Section = 'Added' | 'Changed' | 'Fixed'
 /** A link other than blocked-by: this item relates to, or duplicates, item `id`. */
 export type Relation = { type: 'relates' | 'duplicates'; id: string }
 
@@ -18,6 +20,10 @@ export type Item = {
   due: string | null
   priority: Priority
   type: IssueType
+  /** The task's line for the CHANGELOG, as the person using the project reads it; `-` for none needed. */
+  note: string | null
+  /** The CHANGELOG section the note goes under. */
+  section: Section | null
   /** When the holder last showed signs of life; a claim gone quiet too long can be taken over. */
   lease_at: string | null
   /** Free-form tags, sorted. */
@@ -84,16 +90,25 @@ export type Activity = {
   id: number
   item_id: string
   author: string
-  /** `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. */
-  type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff'
+  /**
+   * `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. `remove`: an
+   * item removed, logged under its id; `undo`: a change taken back (or, undone itself, made again).
+   */
+  type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff' | 'remove' | 'undo'
   body: string
   at: string
+  /** The write it was logged in: entries of one op were one change, and are undone together. */
+  op?: number | null
+  /** The undo entry that took it back, while it stays taken back. */
+  undone?: number | null
+  /** Whether it can be taken back. */
+  undoable?: boolean
 }
 
 /** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
 export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number> }
 
-export type View = 'board' | 'tree' | 'backlog'
+export type View = 'board' | 'tree' | 'backlog' | 'timeline'
 
 /** The new-item form's choices so far; the title is typed last and submits it. */
 export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: string }
@@ -113,6 +128,6 @@ export type Refs = { commits: Commit[]; prs: Pr[] }
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null }
   }
 }
