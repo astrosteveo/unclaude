@@ -26,6 +26,8 @@ const requesting = atom({ plugin: 'roadmap', key: 'requesting' } as const, false
 // The board's filter as typed, and whether its field is open.
 const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
 const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
+// Whether the board's Done column shows all done work rather than the recent.
+const doneOpen = atom({ plugin: 'roadmap', key: 'doneOpen' } as const, false)
 // The new-item form's choices while it is open.
 const draft = atom({ plugin: 'roadmap', key: 'draft' } as const, null as Draft | null)
 // Whether the open card shows its fields for editing.
@@ -1544,6 +1546,7 @@ export const register: Register = on => {
       isRequesting: await read($, requesting),
       filter: await read($, filter),
       isFiltering: await read($, filtering),
+      isDoneOpen: await read($, doneOpen),
       draft: await read($, draft),
       isEditing: await read($, editing),
       handing: await read($, handing),
@@ -1577,6 +1580,7 @@ export const register: Register = on => {
       create: (choice, title) => void create($, choice, title),
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
+      setDoneOpen: isOn => void update($, doneOpen, () => isOn),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
       markAllRead: () => void sql($, db.markAllSeen(USER)).then(() => refresh($)).catch(() => undefined),

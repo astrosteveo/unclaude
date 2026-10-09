@@ -53,6 +53,13 @@ export function columnCaps(heights: Record<Status, number[]>, budget: number, is
   return caps
 }
 
+// Done shows the tasks finished in the last RECENT_DAYS, at least DONE_MIN and at most DONE_MAX of them.
+const RECENT_DAYS = 7
+const DONE_MIN = 3
+const DONE_MAX = 8
+// Rows of the pane that aren't the board's: the header, the footer and a spare.
+const BOARD_CHROME = 5
+
 // The space between board columns side by side.
 const COLUMN_GAP = 2
 
@@ -115,6 +122,8 @@ export type PaneState = {
   filter: string
   /** Whether the filter's field is open. */
   isFiltering: boolean
+  /** Whether the board's Done column shows all done work, not just the recent. */
+  isDoneOpen: boolean
   /** The new-item form, while it is open. */
   draft: Draft | null
   /** Whether the open card shows its fields for editing. */
@@ -161,6 +170,7 @@ export type PaneActions = {
   setRequesting: (isOn: boolean) => void
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
+  setDoneOpen: (isOn: boolean) => void
   /** Opens the new-item form (under `parent` when given), changes its choices, or closes it (null). */
   setDraft: (draft: Draft | null) => void
   create: (draft: Draft, title: string) => void
@@ -224,7 +234,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, draft, isEditing, handing, merging, noting, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -427,12 +437,19 @@ export function drawPane(
   const isSplit = Object.fromEntries(STATUSES.map(status =>
     [status, isWide && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
   // Docked, the board fits the rows above the card; side by side, each heading has its rule under it.
-  const caps = isDocked
-    ? columnCaps(
-      Object.fromEntries(STATUSES.map(status =>
-        [status, columns[status].map(task => cardLayout(task, roomOf(status), !isWide, isSplit[status]).rows)])) as Record<Status, number[]>,
-      isWide ? topRows - 1 : topRows, isWide)
-    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? 8 : 15])) as Record<Status, number>)
+  // Done shows the recent (the last week's, at least a few) unless opened; the rest are a press away.
+  const recentDone = columns.done.filter(task => now - Date.parse(task.updated_at) < RECENT_DAYS * 86_400_000).length
+  const doneClosed = Math.min(columns.done.length, Math.max(DONE_MIN, Math.min(recentDone, DONE_MAX)))
+  const doneShown = isDoneOpen ? columns.done.length : doneClosed
+  const heights = Object.fromEntries(STATUSES.map(status =>
+    [status, columns[status].slice(0, status === 'done' ? doneShown : undefined)
+      .map(task => cardLayout(task, roomOf(status), !isWide, isSplit[status]).rows)])) as Record<Status, number[]>
+  // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
+  // each heading has its rule under it; stacked, the blocks have a blank row between them.
+  const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
+  const caps = budget !== Infinity
+    ? columnCaps(heights, isWide ? budget - 1 : budget, isWide)
+    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : 15])) as Record<Status, number>)
   // Stacked, the empty columns fold into one line, and every card's pieces sit in slots shared by the board.
   const empties = isWide ? [] : STATUSES.filter(status => columns[status].length === 0)
   const stackSlots = isWide ? undefined : slotsOf(STATUSES.flatMap(status => columns[status].slice(0, caps[status])))
@@ -443,6 +460,11 @@ export function drawPane(
         {GLYPH[status]} {LABEL[status]}
       </Text>{' '}
       <Text dimColor>{columns[status].length}</Text>
+    </Button>
+  )
+  const doneToggle = (isDoneOpen || columns.done.length > doneClosed) && (
+    <Button key="done-toggle" plain onPress={() => act.setDoneOpen(!isDoneOpen)}>
+      <Text dimColor>{isDoneOpen ? '· recent only' : '· show all'}</Text>
     </Button>
   )
   const board = (
@@ -457,10 +479,19 @@ export function drawPane(
         const shown = column.slice(0, caps[status])
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}>
-            {heading(status)}
+            {status === 'done' && doneToggle ? (
+              <Box key="col-done-top" flexDirection="row" columnGap={1}>
+                {heading(status)}
+                {doneToggle}
+              </Box>
+            ) : heading(status)}
             {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
             {shown.map(task => card(task, roomOf(status), !isWide, isSplit[status], stackSlots))}
-            {column.length > shown.length && <Text dimColor>…{column.length - shown.length} more</Text>}
+            {column.length > shown.length && (
+              <Text dimColor>
+                …{column.length - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
+              </Text>
+            )}
           </Box>
         )
       })}

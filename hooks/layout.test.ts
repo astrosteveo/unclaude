@@ -173,3 +173,35 @@ test('narrow board: empty columns fold into one line, and every row puts its det
   expect(lines.filter(line => line.trim() === '').length).toBe(3)
   await ui.unmount()
 })
+
+test('Done shows the last week\'s work, a few at least; the rest open from its heading, narrow and wide alike', async ($, on) => {
+  const snap = bigRoadmap()
+  // Thirty done tasks, two of them finished this week.
+  for (const one of snap.items) if (one.status === 'done') one.updated_at = '2026-09-01T10:00:00Z'
+  snap.items.find(one => one.id === 'T1')!.updated_at = '2026-10-08T10:00:00Z'
+  snap.items.find(one => one.id === 'T2')!.updated_at = '2026-10-09T09:00:00Z'
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of [84, 140]) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } as never,
+    })
+    const doneCards = async () => (await ui.findAll({ type: 'Button' })).filter(one => /^card-T\d+$/.test(String(one.key)) && snap.items.find(i => i.id === String(one.key).slice(5))?.status === 'done')
+    // The two of this week and one more: at least three.
+    expect((await doneCards()).map(one => one.key)).toEqual(['card-T2', 'card-T1', expect.stringMatching(/^card-T/)])
+    expect(await ui.find({ type: 'Text', text: '…27 older' })).toBeDefined()
+    // Opened, Done takes the rows the pane has left: some narrow, where the columns stack, more side by side.
+    await ui.press({ key: 'done-toggle' })
+    expect((await doneCards()).length).toBeGreaterThan(width > 100 ? 20 : 5)
+    expect(paintPane(await ui.drawn(), width).problems).toEqual([])
+    expect(await ui.find({ type: 'Text', text: '· recent only' })).toBeDefined()
+    await ui.press({ key: 'done-toggle' })
+    expect((await doneCards()).length).toBe(3)
+    await ui.unmount()
+  }
+})
