@@ -169,6 +169,22 @@ test('the roadmap is found from the project root, wherever a shell cd took the s
   expect((context ?? []).join('\n')).not.toContain('old news')
 })
 
+test('the tool description fits the 2048 characters the model reads; each action is described on the action field', async ($, on) => {
+  let spec: { description: string; inputSchema: { properties: { action: { description: string } } } } | undefined
+  on('tool.register', ($, e) => ((spec = e as never), { value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('fs.stat', () => ({ deny: 'ENOENT' }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  expect(spec!.description.length).toBeLessThanOrEqual(2048)
+  for (const rule of ['claim a task before you start it', 'handoff note', 'blocked with a comment', 'approved: true', 'open its PR'])
+    expect(spec!.description).toContain(rule)
+  const actions = spec!.inputSchema.properties.action.description
+  for (const action of ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'])
+    expect(actions).toContain(`${action}:`)
+})
+
 test('subagents get stable, readable names', async () => {
   expect(agentName('Explore', 'Find auth handlers in src/')).toBe('explore:find-auth-handlers-in-src')
   expect(agentName('general-purpose', 'Refactor the very long module name that goes on and on')).toBe('general-purpose:refactor-the-very-long-module')
@@ -1204,8 +1220,34 @@ test('edit a card\'s checklist and blockers: reword, drop, add, and set what it 
   await ui.unmount()
 })
 
-test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work', async ($, on) => {
-  const some = [item('T1'), item('T2', { status: 'done' })]
+test("approving the person's own work starts no turn; an agent's approvals each start their own", async ($, on) => {
+  const some = [item('T1', { status: 'review', assignee: 'user' }), item('T2', { status: 'review', assignee: 'claude' }), item('T3', { status: 'review', assignee: 'explore:a' })]
+  const submitted: string[] = []
+  on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
+  })
+  for (const id of ['T1', 'T2', 'T3']) {
+    await ui.press({ key: `card-${id}` })
+    await ui.press({ key: 'approve' })
+    await ui.press({ key: 'close' })
+  }
+  expect(submitted.map(text => /roadmap task (T\d)/.exec(text)?.[1])).toEqual(['T2', 'T3'])
+  await ui.unmount()
+})
+
+test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done work or work in review', async ($, on) => {
+  const some = [
+    item('T1'), item('T2', { status: 'done' }), item('T3', { status: 'review', assignee: 'claude' }),
+    item('T4', { status: 'blocked' }), item('T5', { status: 'in_progress', assignee: 'claude' }),
+    item('E1', { assignee: 'claude' }), item('T6', { parent: 'E1', status: 'done' }),
+  ]
   let submitted = ''
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -1231,6 +1273,19 @@ test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done
   await ui.press({ key: 'close' })
   await ui.press({ key: 'card-T2' })
   expect(await ui.find({ key: 'hand' })).toBeUndefined()
+  // In review the card approves or asks for changes; handing it over again would only repeat the first ask.
+  for (const id of ['T3', 'E1']) {
+    await ui.press({ key: 'close' })
+    await ui.press({ key: `card-${id}` })
+    expect(await ui.find({ key: 'hand' })).toBeUndefined()
+    expect(await ui.find({ key: 'approve' })).toBeDefined()
+    expect(await ui.find({ key: 'request' })).toBeDefined()
+  }
+  for (const id of ['T4', 'T5']) {
+    await ui.press({ key: 'close' })
+    await ui.press({ key: `card-${id}` })
+    expect(await ui.find({ key: 'hand' })).toBeDefined()
+  }
   await ui.unmount()
 })
 
@@ -1286,7 +1341,7 @@ test('branch and pull request per unit of work: named from the unit, body from i
   expect(pr).toContain('Title: E1: Agent coordination!')
 })
 
-test('review with a pull request: checks on the card; Approve offers to merge; changes go on the PR too', async ($, on) => {
+test('review with a pull request: checks on the card; Approve offers to merge and tells Claude how it went; changes go on the PR too', async ($, on) => {
   expect(checksOf([])).toBe('none')
   expect(checksOf([{ status: 'COMPLETED', conclusion: 'SUCCESS' }, { state: 'SUCCESS' }])).toBe('pass')
   expect(checksOf([{ status: 'IN_PROGRESS', conclusion: '' }, { status: 'COMPLETED', conclusion: 'SUCCESS' }])).toBe('pending')
@@ -1312,7 +1367,8 @@ test('review with a pull request: checks on the card; Approve offers to merge; c
   on('ui.focus', () => ({}))
   on('ui.toast', () => ({ value: undefined }) as never)
   on('clock.now', () => ({ value: 1 }) as never)
-  on('prompt.submit', ($, e) => ({ text: e.text, origin: e.origin }))
+  const submitted: string[] = []
+  on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text, origin: e.origin }))
   // `show` asks git and gh afresh, which is how the board learns of the PR here.
   await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'show', id: 'E1' } as never)
   await $.command.run({ command: 'roadmap', args: '' } as never)
@@ -1331,17 +1387,25 @@ test('review with a pull request: checks on the card; Approve offers to merge; c
   await ui.press({ key: 'merge-yes' })
   expect(ran.some(argv => argv.join(' ') === 'gh pr merge 8 --merge')).toBe(true)
   expect(wrote("status='done'")).toBe(false)
+  // Claude hears of the failure, with gh's reason, so it can deal with it.
+  expect(submitted.at(-1)).toContain('merging PR #8 (branch e1-things) failed: not mergeable')
+  expect(submitted.at(-1)).toContain('E1 stays in review')
   // Merged: approved, with a note saying so.
   mergeExit = 0
   await ui.press({ key: 'approve' })
   await ui.press({ key: 'merge-yes' })
   expect(wrote('Approved; merged PR #8.')).toBe(true)
   expect(wrote("status='done'")).toBe(true)
+  // And of the merge, to bring the checkout up to date.
+  expect(submitted.at(-1)).toContain('approved roadmap epic E1 (E1 title) on the board and merged PR #8 (branch e1-things)')
+  expect(submitted.at(-1)).toContain('switch to main and pull, delete the local branch e1-things')
   // Approve only never merges.
   const merges = ran.filter(argv => argv[2] === 'merge').length
   await ui.press({ key: 'approve' })
   await ui.press({ key: 'merge-no' })
   expect(ran.filter(argv => argv[2] === 'merge').length).toBe(merges)
+  expect(submitted.at(-1)).toContain('No pull request was merged with it')
+  expect(submitted.length).toBe(3)
   // Request changes puts the note on the PR too.
   await ui.press({ key: 'request' })
   await ui.input({ key: 'changes', text: 'split the migration' } as never)

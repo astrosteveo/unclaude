@@ -487,12 +487,14 @@ export function drawPane(
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
+  // Work in review waits on the person, not on Claude: its card approves it or asks for changes instead.
+  const isHandable = status !== 'done' && status !== 'review'
   // The pull request the item under review ships in, which Approve can merge.
   const reviewPr = isReview && item ? openPrOf(known, item) : undefined
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows(STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one]))) : 1) +
-      (isRequesting || handing === item.id || merging === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(status !== 'done' ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
+      (isRequesting || handing === item.id || merging === item.id ? 1 : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), ...(item.kind !== 'task' ? ['Add item'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
   const footer = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
@@ -589,7 +591,7 @@ export function drawPane(
             <Button key="request" label="Request changes" hotkey="c"
               onPress={() => act.setRequesting(true)} />
           )}
-          {status !== 'done' && <Button key="hand" label="Hand to Claude" onPress={() => act.askHand(item.id)} />}
+          {isHandable && <Button key="hand" label="Hand to Claude" onPress={() => act.askHand(item.id)} />}
           {item.kind !== 'task' && <Button key="new-under" label="Add item" hotkey="n" onPress={() => act.setDraft(newDraft(item))} />}
           {(Input || Select) && (
             <Button key="edit" label={isEditing ? 'Done editing' : 'Edit'} hotkey="e" variant={isEditing ? 'primary' : 'secondary'}

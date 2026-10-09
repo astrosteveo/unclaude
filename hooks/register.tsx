@@ -6,7 +6,7 @@ import type { IgnoreAnswer } from './model'
 import * as db from './db'
 import { COLOR, drawPane, type PaneActions, type PaneState } from './pane'
 import {
-  agentName, brief, handedScope, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
+  agentName, approvalNote, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
   parseGitLog, parsePrs, refsFor, refsText, STATUSES, subtree, USER, waitingOn,
 } from './model'
 
@@ -643,8 +643,11 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
       (err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }),
     )
     if (ran.exitCode !== 0) {
-      $.ui.toast(`roadmap: PR #${pr.number} was not merged, so ${item.id} stays in review: ${ran.stderr.trim() || `exit ${ran.exitCode}`}`)
+      const why = ran.stderr.trim() || `exit ${ran.exitCode}`
+      $.ui.toast(`roadmap: PR #${pr.number} was not merged, so ${item.id} stays in review: ${why}. Claude is looking into it.`)
       await focusOn($, 'close')
+      // Whoever opened the pull request deals with what stopped it.
+      await $.prompt.submit({ text: approvalNote(item, pr, why) }).catch(() => undefined)
       return
     }
     await userAct($, { action: 'comment', id: item.id, body: `Approved; merged PR #${pr.number}.` })
@@ -652,6 +655,9 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
   }
   await userAct($, { action: 'update', id: item.id, status: 'done' })
   await focusOn($, 'close')
+  // An agent's work: it hears at once, to bring the checkout up to date. Each approval is its own turn,
+  // taken in order once the session is idle. The person's own work needs no word.
+  if (isAgent(item.assignee)) await $.prompt.submit({ text: approvalNote(item, pr) }).catch(() => undefined)
 }
 
 /** Sends a task back from review with what needs changing, and puts its agent back on it. */
@@ -706,31 +712,41 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'roadmap',
       isDeferred: false,
+      // The model reads only the first 2048 characters of this; what each action takes is on `action` below.
       description: [
-        "The project's shared tracker, a lightweight Jira kept in .claude/roadmap.db that you, the user and other agents all work from.",
-        'Hierarchy: milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
-        'Actions: show (whole tree, or one item with its activity), next (your open tasks, then unassigned ones by priority and due date),',
-        'find (any of kind, status, assignee ("none" for unassigned), priority, type, labels, under (an id: its subtree), text (title, description, comments)),',
-        'add (kind, title; optional parent, description, due, status, assignee, priority, type), update (id plus any field; empty string clears),',
-        'claim (id: take a task and start it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks), release (id; body leaves a handoff note for whoever picks it up next),',
-        'comment (id, body), remove (id; cascade for children).',
-        'plan (tree; optional parent): add a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
-        "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
-        'Dependencies: blocked_by lists the tasks a task waits on; relates_to and duplicates link items otherwise, and labels tag them. Acceptance criteria: a task\'s checklist; check (id, items) ticks entries,',
-        'and a task cannot be set done while any is unchecked. Give each task you plan a checklist of what done means.',
-        'Review: the user reviews what they handed you, once. A task you set done goes to review; but when they hand you a whole epic or milestone',
+        "The project's shared tracker (.claude/roadmap.db), a lightweight Jira that you, the user and other agents all work from.",
+        'Milestone > epic > task (ids M1, E1, T1; never reused). Epics sit under milestones; tasks under epics or milestones.',
+        'Milestone and epic status roll up from their tasks. Each action and what it takes is listed on the action field.',
+        'Working rules: claim a task before you start it (claim names the branch to work on); comment on decisions and findings;',
+        'release it with a handoff note if you stop before it is done; mark it blocked with a comment saying why.',
+        "Acceptance criteria: a task's checklist. Give each task you plan one; tick entries with check. A task cannot be set done while any is unchecked.",
+        'Review: the user reviews what they handed you, once. A task you set done goes to review. When they hand you a whole epic or milestone',
         '("implement E27"), first assign it to yourself (update id, assignee) so its tasks close as you go, then set it done when they all are: it goes to review.',
         "Pass approved: true with status done only when the user has told you in this conversation that the work is approved; subagents can't.",
-        'Branches and PRs: one per unit handed over (the epic or milestone, or a task given alone). claim names the branch to work on; when the unit goes to review,',
-        'push it and open its PR (pr: id gives the branch, title and body). Name the unit in the PR title ("E9: ...").',
-        'Name the task id in commit messages and PR titles or branches (e.g. "T12: ..."); show lists the commits and PRs that name it.',
-        'Milestone and epic status roll up from their tasks. Working rules: claim a task before you start it; comment on decisions,',
-        'findings and handoff notes; mark it done when finished, or blocked with a comment saying why. Subagents are named from their type and task automatically.',
+        'Branches and PRs: one per unit handed over (the epic or milestone, or a task given alone). When the unit goes to review, push its branch',
+        'and open its PR (pr: id gives the branch, title and body). Name ids in commit messages, PR titles and branches ("T12: ...", "E9: ...");',
+        'show lists the commits and PRs that name an item. Subagents are named from their type and task automatically.',
       ].join(' '),
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'] },
+          action: {
+            type: 'string',
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove'],
+            description: [
+              'show: the whole tree, or one item (id) with its activity and linked commits and PRs.',
+              'next: your open tasks, then unassigned ones by priority and due date.',
+              'find: any of kind, status, assignee ("none" for unassigned), priority, type, labels, under (an id: its subtree), text (title, description, comments).',
+              'pr: the branch, title and body for the pull request of the unit an item ships in.',
+              'add: kind, title; optional parent, description, due, status, assignee, priority, type, labels, checklist, blocked_by, relates_to, duplicates.',
+              'plan: tree (optional parent): a whole breakdown in one call, checked in full before anything is written. Each node takes the add fields',
+              "plus ref, children and blocked_by naming other nodes' refs or existing task ids; the answer maps each ref to its new id.",
+              'update: id plus any field; empty string clears.',
+              'claim: id; takes a task and starts it, answering with its detail; refused when someone else holds it or it waits on unfinished tasks.',
+              'release: id; body leaves a handoff note for whoever picks it up next.',
+              'comment: id, body. check: id, items (checklist entry numbers). remove: id; cascade for children.',
+            ].join(' '),
+          },
           id: { type: 'string', description: 'Item id, e.g. T12' },
           kind: { type: 'string', enum: KINDS },
           title: { type: 'string' },

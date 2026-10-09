@@ -6,6 +6,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Added
 
+- Approving an agent's work on the board tells it at once, in a turn of its own: that its pull request was merged, so it brings the checkout up to date (switches to main, pulls, deletes the merged branch, checks stacked PRs); or that the merge failed, with gh's reason, so it finds out why. Approving your own work stays quiet.
 - Tasks have a priority (`p0`–`p3`, `p2` by default) and a type (feature, bug or chore). Claude sets them with `add` or `update`, `next` offers higher-priority work first, and cards show a priority or type that isn't the default.
 - Review acts on the pull request. A card shows its PRs with their checks (running, passed or failing). Approving an item whose PR is open asks whether to merge it (`gh pr merge --merge`) or approve only; if the merge fails, the item stays in review. Request changes also posts the note on the PR. Nothing is merged or posted without the person's press.
 - The board's header wraps instead of squeezing its counts when the filter and buttons crowd it.
@@ -26,6 +27,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Fixed
 
+- The roadmap tool's description fits the 2048 characters the model reads. It ran to 2598, so the model never saw the pull request guidance or the working rules (claim before starting, comment on decisions, say why something is blocked). What each action takes now sits on the `action` field.
 - The roadmap is found from the project root, however far a shell `cd` moved the session. Before, the database, git and gh were looked for from the session's current directory, so after a `cd` into a subfolder the tool failed ("unable to open database") and the board read as empty. Coming back, the next brief replayed old changes as new; it no longer does.
 - Old activity no longer drops out of view. The board's snapshot was the newest 500 entries across the whole roadmap, so past that, older items lost their timeline and handoff notes, and `find` stopped matching their comments. The snapshot now carries each item's newest 20 entries and its latest handoff note; `show` and `claim` read the item's whole timeline, and `find` searches every comment ever written.
 - An `add` or `update` that fails writes nothing. Before, a bad related or duplicate id, or a checklist on an epic, failed after the item was added, so a retry added it twice; and an `update` with a bad blocker or link had already written its other fields.
@@ -35,6 +37,7 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ### Changed
 
+- A card in review offers Approve and Request changes, and no longer Hand to Claude, which only resent the first ask.
 - Status roll-ups and item lookups are indexed once per snapshot, so a board of a couple of thousand items draws in milliseconds. Before, each roll-up walked the whole roadmap again.
 - An `update` that sets several things (fields, checklist, blockers, labels, links) is written as one transaction in one sqlite3 run: it lands whole or not at all.
 - Handing work to Claude takes a confirm step (on a card or a backlog row), and the `h`, `m` and `u` keys are gone, so a stray key or an extra Enter no longer hands off or reassigns a task. A card never opens with focus on Hand to Claude, and a finished item doesn't offer it.
