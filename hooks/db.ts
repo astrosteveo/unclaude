@@ -97,8 +97,12 @@ export function q(value: string | number | null | undefined): string {
     .join('||char(10)||')
 }
 
-/** The sqlite3 command line a script runs under; the script goes on stdin. */
-export const ARGV = ['sqlite3', '-batch', '-bail', '-noheader', '-list', '-cmd', '.timeout 5000', DB]
+/**
+ * The sqlite3 command line a script runs under; the script goes on stdin. Safe mode refuses .shell,
+ * .system and the like: undo runs SQL read back out of the database, which a cloned repository or an
+ * imported export could have written, and a dot-command line there would otherwise run as a command.
+ */
+export const ARGV = ['sqlite3', '-safe', '-batch', '-bail', '-noheader', '-list', '-cmd', '.timeout 5000', DB]
 
 /** The command line for the database at `path` (a batch's trial copy, say) in place of DB. */
 export const argvFor = (path: string) => [...ARGV.slice(0, -1), path]

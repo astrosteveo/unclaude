@@ -1879,11 +1879,13 @@ test('merge a stack from its bottom card: in order, each after its checks pass o
   const scripts: string[] = []
   const submitted: string[] = []
   let failing = 0
+  let isGarbled = false
   on('process.run', ($, e) => {
     const argv = e.argv.join(' ')
     if (e.argv[0] === 'gh') {
       if (e.argv[2] === 'list') return { value: { ...fakeSqlite('', null), stdout: ghList } }
       ran.push(argv)
+      if (e.argv[2] === 'view' && isGarbled) return { value: { ...fakeSqlite('', null), stdout: 'warning: not JSON' } }
       if (e.argv[2] === 'view') {
         const isFailing = Number(e.argv[3]) === failing
         return { value: { ...fakeSqlite('', null), stdout: JSON.stringify({ mergeable: 'MERGEABLE', statusCheckRollup: [{ status: 'COMPLETED', conclusion: isFailing ? 'FAILURE' : 'SUCCESS' }] }) } }
@@ -1941,7 +1943,28 @@ test('merge a stack from its bottom card: in order, each after its checks pass o
   expect(ran).toContain('gh pr merge 12 --merge')
   expect(scripts.some(one => one.includes(`status='done'`) && one.includes("WHERE id='T3'"))).toBe(false)
   expect(submitted.at(-1)).toContain('then stopped at PR #15 (branch t3-top): its checks failed on main')
+  await again.press({ key: 'close' })
   await again.unmount()
+
+  // gh answers something that isn't JSON: the run stops there and says so, and a later run isn't refused as already merging.
+  failing = 0
+  isGarbled = true
+  ran.length = 0
+  const garbled = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await garbled.press({ key: 'card-T1' })
+  await garbled.press({ key: 'merge-stack' })
+  await garbled.press({ key: 'stack-yes' })
+  expect(ran).toEqual(['gh pr view 11 --json statusCheckRollup,mergeable'])
+  expect(submitted.at(-1)).toContain('stopped at PR #11')
+  isGarbled = false
+  ran.length = 0
+  await garbled.press({ key: 'merge-stack' })
+  await garbled.press({ key: 'stack-yes' })
+  expect(ran).toContain('gh pr merge 11 --merge')
+  await garbled.unmount()
   expect(stackFrom({ commits: [], prs: parsePrs(ghList) }, parsePrs(ghList)[1]!).map(one => one.number)).toEqual([12])
 })
 
@@ -2085,11 +2108,15 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   const ran: string[] = []
   let dirty = ''
   let mergedPr = '[]'
+  let branch = 'main'
+  let behind = '0'
   on('process.run', ($, e) => {
     const line = e.argv.join(' ')
     if (e.argv[0] === 'git' || e.argv[0] === 'gh') {
       ran.push(line)
       const stdout = line === 'git remote get-url origin' ? 'git@github.com:o/r.git\n' : line === 'git status --porcelain' ? dirty
+        : line === 'git symbolic-ref --short refs/remotes/origin/HEAD' ? 'origin/main\n' : line === 'git rev-parse --abbrev-ref HEAD' ? `${branch}\n`
+        : line.startsWith('git rev-list --count') ? `${behind}\n`
         : line.startsWith('gh pr create') ? 'https://github.com/o/r/pull/30\n' : line.startsWith('gh pr list --head') ? mergedPr
         : line.startsWith('gh release create') ? 'https://github.com/o/r/releases/tag/v0.5.0\n' : ''
       const exitCode = line.startsWith('git rev-parse -q --verify') ? 1 : 0
@@ -2111,11 +2138,20 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   dirty = ' M x\n'
   expect(await ship({ version: '0.5.0' })).toBe('the working tree has changes; commit or stash them first')
   dirty = ''
+  // Cut from the main line only, and only once it is up to date with origin.
+  branch = 'feature-x'
+  expect(await ship({ version: '0.5.0' })).toBe('the checkout is on feature-x; a release is cut from main: switch to it and pull first')
+  branch = 'main'
+  behind = '2'
+  expect(await ship({ version: '0.5.0' })).toBe('main is 2 commit(s) behind origin/main; pull first')
+  behind = '0'
+  expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.4.0"')
   ran.length = 0
   expect(await ship({ version: '0.5.0' })).toContain('Opened https://github.com/o/r/pull/30 for 0.5.0: .claude-plugin/plugin.json bumped')
   expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state'))).toEqual([
-    'git remote get-url origin', 'git status --porcelain', 'git switch -c release-v0.5.0', 'git commit -am Release 0.5.0',
-    'git push -u origin release-v0.5.0', 'gh pr create --head release-v0.5.0 --title Release 0.5.0 --body ### Added\n\n- Undo.',
+    'git remote get-url origin', 'git status --porcelain', 'git symbolic-ref --short refs/remotes/origin/HEAD', 'git rev-parse --abbrev-ref HEAD',
+    'git fetch origin main', 'git rev-list --count HEAD..origin/main', 'git switch -c release-v0.5.0', 'git commit -am Release 0.5.0',
+    'git push -u origin release-v0.5.0', 'git switch main', 'gh pr create --head release-v0.5.0 --title Release 0.5.0 --body ### Added\n\n- Undo.',
   ])
   expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.5.0"')
   expect(files['/p/CHANGELOG.md']).toContain('## [Unreleased]\n\n## [0.5.0] - 2026-10-10\n\n### Added')
