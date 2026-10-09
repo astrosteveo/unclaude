@@ -4,6 +4,8 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-09
+
 ### Added
 
 - A Timeline tab: milestones by due date, each followed by its epics, with progress bars and how each stands against its date (*in 11 days*, or *4 days late, 1 open*). Tasks past their due date, their own or inherited, are marked `⚠late` on the board, and the session brief lists overdue items.
@@ -95,4 +97,5 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/commits/main
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.5.0
