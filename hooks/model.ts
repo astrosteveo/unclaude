@@ -1,5 +1,8 @@
 import type { Activity, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Snapshot, Status } from '../types'
 
+// The person at the board, and the main loop's agent; subagents go by names from agentName.
+export const USER = 'user'
+export const CLAUDE = 'claude'
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
 export const STATUSES: Status[] = ['todo', 'in_progress', 'blocked', 'review', 'done']
 export const GLYPH: Record<Status, string> = { todo: '○', in_progress: '◐', blocked: '✗', review: '◉', done: '●' }
