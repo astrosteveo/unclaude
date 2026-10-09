@@ -903,7 +903,14 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
     if (pushed.exitCode !== 0) fail(`pushing ${tag} failed: ${whyNot(pushed)}`)
     const out = await gh($, ['release', 'create', tag, '--title', tag, '--verify-tag', '--notes', body || `Release ${version}.`])
     if (out.exitCode !== 0) fail(`${tag} is tagged and pushed, but gh release create failed: ${whyNot(out)}`)
-    return `Released ${version}: tagged ${tag} on PR #${merged!.number}'s merge and published ${out.stdout.trim() || 'the GitHub release'}.`
+    // The release branch has done its work: gone here and on origin. A branch that won't go never fails the release.
+    const local = await git($, ['branch', '-D', branch]).catch(() => undefined)
+    // GitHub may have deleted it on the merge already.
+    const onOrigin = (await git($, ['ls-remote', '--heads', 'origin', branch]).catch(() => undefined))?.stdout.trim()
+    const remote = onOrigin ? await git($, ['push', 'origin', '--delete', branch]).catch(() => undefined) : { exitCode: 0 }
+    const left = [local?.exitCode === 0 ? '' : 'here', remote?.exitCode === 0 ? '' : 'on origin'].filter(Boolean)
+    return `Released ${version}: tagged ${tag} on PR #${merged!.number}'s merge and published ${out.stdout.trim() || 'the GitHub release'}.` +
+      (left.length < 2 ? ` Deleted ${branch}${left.length ? ` (still ${left[0]})` : ''}.` : '')
   }
 
   if (!isAfter(wanted, current)) fail(`${version} isn't after ${current.join('.')}, the version now`)
