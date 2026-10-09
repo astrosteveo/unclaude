@@ -872,6 +872,9 @@ const git = async ($: EngineInterface, args: string[]): Promise<Ran> =>
  * merge and publishes a GitHub release from the version's notes. Refuses a version that isn't higher,
  * and a first 1.0 without the user's say.
  */
+// The branch installs come from (`/plugin marketplace add <owner>/<repo>#stable`): ship moves it to each release.
+const STABLE = 'stable'
+
 async function ship($: EngineInterface, items: Item[], raw: string | undefined, approved: boolean): Promise<string> {
   const wanted = versionOf(raw) ?? fail('version is required, as 1.2.3')
   const version = wanted.join('.')
@@ -903,13 +906,17 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
     if (pushed.exitCode !== 0) fail(`pushing ${tag} failed: ${whyNot(pushed)}`)
     const out = await gh($, ['release', 'create', tag, '--title', tag, '--verify-tag', '--notes', body || `Release ${version}.`])
     if (out.exitCode !== 0) fail(`${tag} is tagged and pushed, but gh release create failed: ${whyNot(out)}`)
+    // What installs get: the stable branch, moved here and only here, to the release (a fast-forward; a
+    // stable that went elsewhere is left alone and said so).
+    const stable = await git($, ['push', 'origin', `${merged!.mergeCommit!.oid!}:refs/heads/${STABLE}`]).catch(() => undefined)
+    const served = stable?.exitCode === 0 ? ` ${STABLE} now serves ${version}.` : ` ${STABLE} was not moved (${stable ? whyNot(stable) : 'git failed'}): installs still get the release before.`
     // The release branch has done its work: gone here and on origin. A branch that won't go never fails the release.
     const local = await git($, ['branch', '-D', branch]).catch(() => undefined)
     // GitHub may have deleted it on the merge already.
     const onOrigin = (await git($, ['ls-remote', '--heads', 'origin', branch]).catch(() => undefined))?.stdout.trim()
     const remote = onOrigin ? await git($, ['push', 'origin', '--delete', branch]).catch(() => undefined) : { exitCode: 0 }
     const left = [local?.exitCode === 0 ? '' : 'here', remote?.exitCode === 0 ? '' : 'on origin'].filter(Boolean)
-    return `Released ${version}: tagged ${tag} on PR #${merged!.number}'s merge and published ${out.stdout.trim() || 'the GitHub release'}.` +
+    return `Released ${version}: tagged ${tag} on PR #${merged!.number}'s merge and published ${out.stdout.trim() || 'the GitHub release'}.${served}` +
       (left.length < 2 ? ` Deleted ${branch}${left.length ? ` (still ${left[0]})` : ''}.` : '')
   }
 

@@ -11,10 +11,11 @@ A lightweight Jira for Claude Code. Milestones, epics and tasks live in your pro
 In a Claude Code session in your terminal:
 
 ```
-/plugin install roadmap --marketplace astrosteveo/unclaude
+/plugin marketplace add astrosteveo/unclaude#stable
+/plugin install roadmap@unclaude
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope makes it available in every project).
+Pick a scope when asked (user scope makes it available in every project). `#stable` gets you the latest release: the `stable` branch moves only when a version is released, while `main` is where work lands between releases. To update later, refresh the marketplace with `/plugin marketplace update unclaude` and then update the plugin (`claude plugin update roadmap@unclaude`), or turn on auto-update for the marketplace under `/plugin`.
 
 **Requires** the `sqlite3` command line tool (`pacman -S sqlite`, `apt install sqlite3`, `dnf install sqlite`, `brew install sqlite`). If `git` and `gh` are available, they're used to link commits and pull requests to tasks.
 
@@ -93,7 +94,7 @@ What Claude does with it:
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
 - Works on one branch per unit you hand over, named after it (`e9-agent-coordination`, or `t47-no-stray-hand-offs` for a task on its own). When the unit goes to Review, Claude is told to push the branch and open its pull request, titled with the unit's id, with a body listing its tasks and checklists (the `pr` action gives the branch, title and body).
 - Gives each task a release note when it sets it done: one line for the CHANGELOG (`note`), and its section (Added, Changed or Fixed; by default Fixed for a bug, Changed for a chore, Added otherwise), or `-` when the work needs no line. A done without one is refused until it has one. When you set a task done on the board, its card asks for the note too (or None needed, or Later). The notes go in the pull request's body, and the `changelog` action writes the notes of merged work into `CHANGELOG.md` under `[Unreleased]`, each in its section, skipping any already there.
-- Ships a release when you ask for one (`ship` with a version): it bumps `.claude-plugin/plugin.json` and `package.json` (those the project has), writes the release notes of merged work that aren't in the CHANGELOG yet under `[Unreleased]` (so running `changelog` first is optional), turns `[Unreleased]` into that version with today's date and links, and opens a PR on a `release-v<version>` branch. Once that PR has merged and you say so, `ship` again tags the merge and publishes the GitHub release from the version's notes. Then it deletes the release branch, here and on origin. It refuses a version that isn't higher, and a first `1.0` unless you've asked for one.
+- Ships a release when you ask for one (`ship` with a version): it bumps `.claude-plugin/plugin.json` and `package.json` (those the project has), writes the release notes of merged work that aren't in the CHANGELOG yet under `[Unreleased]` (so running `changelog` first is optional), turns `[Unreleased]` into that version with today's date and links, and opens a PR on a `release-v<version>` branch. Once that PR has merged and you say so, `ship` again tags the merge, publishes the GitHub release from the version's notes, and moves the `stable` branch (what installs get) to it. Then it deletes the release branch, here and on origin. It refuses a version that isn't higher, and a first `1.0` unless you've asked for one.
 - Puts task ids in commit messages (`T12: ...`) and epic or milestone ids in PR titles and branches (`E9: ...`, `e9-agent-coordination`). Commits and PRs show up on the items they name.
 
 ## How it's stored
