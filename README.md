@@ -144,6 +144,7 @@ claude plugin validate .               # what the engine sees and would refuse
 claude plugin test .                   # unit and UI tests (hooks/*.test.ts)
 node --test tests/sql.integration.mjs  # the generated SQL against a real sqlite3
 node --test tests/register.e2e.mjs     # the roadmap tool end to end (hooks/register.tsx) against a real sqlite3
+tsc --noEmit -p .                      # type check (needs the API types a session lays in .claude-plugin/types/)
 ```
 
 `node bench/tokens/run.mjs` measures what the mod costs an agent. It runs the same small epic headless with this checkout loaded and without the mod, 3 runs each, and tabulates turns, tool calls, tokens and cost. These are real runs, billed to your own account: about $1.50 for the default small epic, and about $5 with `--scenario notes`, a heavier epic whose tasks each touch several files of a small API.
