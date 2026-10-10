@@ -158,7 +158,7 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 
 ### Added
 
-- Install from the `astrosteveo/unclaude` marketplace: `/plugin install roadmap --marketplace astrosteveo/unclaude`.
+- Install from the `astrosteveo/roadmap` marketplace: `/plugin install roadmap --marketplace astrosteveo/roadmap`.
 - Schema versions. A newer version of the plugin upgrades an older `roadmap.db` the first time it opens it, and an older version refuses to open a newer database instead of damaging it.
 - MIT license.
 
@@ -188,12 +188,12 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.2...HEAD
-[0.7.2]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.2
-[0.7.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.1
-[0.7.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.0
-[0.6.3]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.3
-[0.6.2]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.2
-[0.6.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.1
-[0.6.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.0
-[0.5.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.5.0
+[Unreleased]: https://github.com/astrosteveo/roadmap/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/astrosteveo/roadmap/releases/tag/v0.7.2
+[0.7.1]: https://github.com/astrosteveo/roadmap/releases/tag/v0.7.1
+[0.7.0]: https://github.com/astrosteveo/roadmap/releases/tag/v0.7.0
+[0.6.3]: https://github.com/astrosteveo/roadmap/releases/tag/v0.6.3
+[0.6.2]: https://github.com/astrosteveo/roadmap/releases/tag/v0.6.2
+[0.6.1]: https://github.com/astrosteveo/roadmap/releases/tag/v0.6.1
+[0.6.0]: https://github.com/astrosteveo/roadmap/releases/tag/v0.6.0
+[0.5.0]: https://github.com/astrosteveo/roadmap/releases/tag/v0.5.0
