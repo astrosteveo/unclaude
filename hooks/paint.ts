@@ -81,7 +81,7 @@ function natural(node: Node): number {
   const children = kids(node).filter(child => textOf(child) !== '' || (typeof child === 'object' && child?.type === 'Box'))
   const gap = num(props.columnGap ?? props.gap)
   const inner = props.flexDirection === 'row'
-    ? children.reduce((sum, child) => sum + natural(child), 0) + gap * Math.max(0, children.length - 1)
+    ? children.reduce<number>((sum, child) => sum + natural(child), 0) + gap * Math.max(0, children.length - 1)
     : Math.max(0, ...children.map(natural))
   return inner + edge.x
 }
@@ -109,7 +109,7 @@ export function paint(node: Node, width: number, problems: string[] = [], path =
     if (typeof style === 'string' && style.startsWith('truncate')) return text.split('\n').map(line => [...line].slice(0, width).join(''))
     return wrap(text, width)
   }
-  const props = node.props ?? {}
+  const props = (node as { props?: Record<string, unknown> }).props ?? {}
   const here = `${path} > ${keyOf(node)}`
   const outer = typeof props.width === 'number' ? props.width : width
   if (outer > width) problems.push(`${here} is ${outer} wide in ${width}`)

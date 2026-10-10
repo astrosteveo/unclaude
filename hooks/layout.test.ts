@@ -593,7 +593,7 @@ test('needs you: work in review, unread comments, stale claims and late work hea
     item('T4', { due: '2026-10-01', title: 'Overdue' }),
     item('T5', { title: 'Talked about' }),
   ]
-  const activity = [
+  const activity: Activity[] = [
     { id: 1, item_id: 'T5', author: 'claude', type: 'comment', body: 'a question', at: '2026-10-09T10:00:00Z' },
     { id: 2, item_id: 'T2', author: 'claude', type: 'comment', body: 'ready', at: '2026-10-09T10:00:00Z' },
   ]
@@ -734,7 +734,7 @@ test('scrolling moves a line at a time, through wrapped blocks too: a block cut 
     title: 'Wrapped', description: long,
     checklist: [1, 2, 3, 4].map(n => ({ n, text: `criterion ${n} that is long enough to wrap onto a second line in a narrow card`, done: false })),
   })]
-  const activity = [1, 2, 3, 4, 5].map(id => ({ id, item_id: 'T1', author: 'claude', type: 'comment', body: `comment ${id}: ${'words that wrap '.repeat(6)}`, at: '2026-10-09T10:00:00Z' }))
+  const activity = [1, 2, 3, 4, 5].map((id): Activity => ({ id, item_id: 'T1', author: 'claude', type: 'comment', body: `comment ${id}: ${'words that wrap '.repeat(6)}`, at: '2026-10-09T10:00:00Z' }))
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity, seen: {} }) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
