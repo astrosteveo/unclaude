@@ -4,6 +4,12 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-10
+
+### Fixed
+
+- Closing a docked card puts the focus ring back on that card, even when the list is slow to redraw.
+
 ## [0.7.0] - 2026-10-10
 
 ### Added
@@ -173,7 +179,8 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.1
 [0.7.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.0
 [0.6.3]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.3
 [0.6.2]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.2
