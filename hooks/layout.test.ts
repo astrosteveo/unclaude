@@ -747,3 +747,43 @@ test('scrolling moves a line at a time, through wrapped blocks too: a block cut 
   }
   await ui.unmount()
 })
+
+test('with a card docked, the wheel moves what is under it: the list in its frame above, or the card; the one in use is outlined', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const rows = 44
+  const props = { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: rows } } as never
+  const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props })
+  await ui.press({ key: 'tab-plan' })
+  await ui.press({ key: 'row-T5' })
+  const wheel = async (row: number, by = 2) => {
+    await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by, bodyRows: rows, contentRows: rows, pointer: { row, column: 10 }, origin: { kind: 'person' } } as never)
+    await ui.redraw(props)
+  }
+  const frames = async () => {
+    const drawn = await ui.drawn()
+    const top = await ui.find({ key: 'top' })
+    const card = await ui.find({ key: 'detail' })
+    return { list: top?.props.borderColor, card: card?.props.borderColor, text: paintPane(drawn, 84).lines.join('\n'), problems: paintPane(drawn, 84).problems }
+  }
+  // Opened, the card is the one in use; the list is framed too, its outline dim.
+  let now = await frames()
+  expect(now.problems).toEqual([])
+  expect([now.list, now.card]).toEqual([undefined, 'cyan'])
+  expect(now.text).toMatch(/↓ \d+ more lines below · scroll down/)
+  // The wheel over the list (a row inside its frame) scrolls it, and lights it.
+  await wheel(5)
+  now = await frames()
+  expect([now.list, now.card]).toEqual(['cyan', undefined])
+  expect(now.text).toMatch(/↑ 2 more lines above · scroll up/)
+  // Over the card, the card scrolls and is lit again; the list keeps its place.
+  await wheel(rows - 6, 3)
+  now = await frames()
+  expect([now.list, now.card]).toEqual([undefined, 'cyan'])
+  expect(now.text).toMatch(/↑ 2 more lines above · scroll up/)
+  await ui.unmount()
+})
