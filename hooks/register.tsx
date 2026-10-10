@@ -36,6 +36,8 @@ const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
 const viewScrolled = atom({ plugin: 'roadmap', key: 'viewScrolled' } as const, {} as Record<string, number>)
 // With a card docked under the list, which one the wheel last moved: the card when it opens.
 const region = atom({ plugin: 'roadmap', key: 'region' } as const, 'card' as 'list' | 'card')
+// The list's rows over a docked card, as set with the divider; null sizes them by the card.
+const split = atom({ plugin: 'roadmap', key: 'split' } as const, null as number | null)
 // Where the docked list's frame ends, in body rows, as last drawn.
 let listEnd = 0
 // How far the tab showing can scroll, as last drawn.
@@ -1813,6 +1815,7 @@ export const register: Register = on => {
       scrolledTo: await read($, scrolled),
       viewScrolledTo: (await read($, viewScrolled))[await read($, view)] ?? 0,
       region: await read($, region),
+      split: await read($, split),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
     }
@@ -1837,6 +1840,7 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
       setTriaging: one => void update($, triaging, () => one).then(() => focusOn($, one ? 'triage-input' : 'tab-inbox')),
+      setSplit: rows => void update($, split, () => rows),
       setZoom: level => void update($, zoom, () => level % 3),
       showRelease: version => void (async () => {
         // The newest version shows open by itself; any other opens by being flipped.

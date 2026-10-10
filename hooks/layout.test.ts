@@ -787,3 +787,48 @@ test('with a card docked, the wheel moves what is under it: the list in its fram
   expect(now.text).toMatch(/↑ 2 more lines above · scroll up/)
   await ui.unmount()
 })
+
+test('docked, the card takes the rows its content needs and the list the rest; the divider (k/j) sets the split until auto', async ($, on) => {
+  const snap = bigRoadmap()
+  snap.items.push(item('T99', { title: 'Tiny', updated_at: '2026-10-09T23:00:00Z' }))
+  snap.items.find(one => one.id === 'T3')!.updated_at = '2026-10-09T23:00:00Z'
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const rows = 50
+  const props = { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: rows } } as never
+  const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props })
+  await ui.press({ key: 'tab-board' })
+  const listRows = async () => Number((await ui.find({ key: 'top' }))?.props.height)
+  const fits = async () => {
+    const { lines, problems } = paintPane(await ui.drawn(), 84)
+    expect(problems).toEqual([])
+    expect(lines.length).toBe(rows)
+  }
+  // A short card leaves the list most of the pane; a long one takes more, the list keeping at least 8.
+  await ui.press({ key: 'card-T99' })
+  const short = await listRows()
+  await fits()
+  await ui.press({ key: 'card-T3' })
+  const long = await listRows()
+  await fits()
+  expect(short).toBeGreaterThan(long)
+  expect(long).toBeGreaterThanOrEqual(8)
+  // The divider: k moves it up (the card gets more), j down; the split holds across cards until auto.
+  expect((await ui.find({ key: 'split-up' }))?.props.hotkey).toBe('k')
+  await ui.press({ key: 'split-down' })
+  await ui.press({ key: 'split-down' })
+  const set = await listRows()
+  expect(set).toBe(long + 4)
+  await ui.press({ key: 'card-T99' })
+  expect(await listRows()).toBe(set)
+  await fits()
+  await ui.press({ key: 'split-up' })
+  expect(await listRows()).toBe(set - 2)
+  await ui.press({ key: 'split-auto' })
+  expect(await listRows()).toBe(short)
+  expect(await ui.find({ key: 'split-auto' })).toBeUndefined()
+  await ui.unmount()
+})

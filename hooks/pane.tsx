@@ -19,9 +19,8 @@ const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running'
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
 // Checks as one mark after a PR number on a board row.
 const CHECK_MARK: Record<Checks, string> = { none: '', pending: ' …', pass: ' ✓', fail: ' ✗' }
-// Docked cards: the fewest body rows that hold a board above a card, and the board's share of them.
+// Docked cards: the fewest body rows that hold a board above a card.
 const DOCK_MIN_ROWS = 30
-const DOCK_SHARE = 0.4
 
 /**
  * How many cards of each column fit in `budget` rows, given the rows each card takes (a card wraps in a
@@ -91,6 +90,10 @@ const EMPTY = { parent: null, milestone: null } as Item
 
 // The outline of the frame in use, when a card is docked under the list.
 const ACTIVE = 'cyan'
+// Docked: the list's fewest rows (its frame included), the divider's row, and how far one press moves it.
+const LIST_MIN = 8
+const DIVIDER_ROWS = 1
+const SPLIT_STEP = 2
 
 // The space between board columns side by side.
 const COLUMN_GAP = 2
@@ -194,6 +197,8 @@ export type PaneState = {
   viewScrolledTo: number
   /** With a card docked under the list, which of the two the wheel last moved (the card when it opens). */
   region: 'list' | 'card'
+  /** The list's rows with a card docked, as the person set them with the divider; null sizes by the card. */
+  split: number | null
   /** The clock, for stale claims; 0 when it can't be read. */
   now: number
 }
@@ -221,6 +226,8 @@ export type PaneActions = {
   setFiling: (isOn: boolean) => void
   setReleasing: (isOn: boolean) => void
   setZoom: (zoom: number) => void
+  /** Sets the list's rows over a docked card (the divider); null to size them by the card again. */
+  setSplit: (rows: number | null) => void
   setTriaging: (one: { id: string; mode: 'into' | 'drop' } | null) => void
   /** Opens the Releases tab on `version`, unfolded. */
   showRelease: (version: string) => void
@@ -321,7 +328,7 @@ export function drawPane(
     return { nodes, total, above, below }
   }
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, region, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, region, split, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -348,8 +355,6 @@ export function drawPane(
   const isWide = width >= 100
   // A tab longer than its room scrolls (the wheel moves it): under the header, or docked, in its frame over a card.
   const canScroll = e.surface === 'terminal' && bodyRows !== undefined && !draft && !isCompact && (!(pick && find(items, pick)) || isDocked)
-  // Docked, the list's frame: its rows, borders included.
-  const topRows = isDocked ? Math.max(8, Math.floor(bodyRows! * DOCK_SHARE)) : Infinity
   // Pressing the open card again closes it.
   const choose = (id: string | null) => () => (id !== null && id === pick ? act.closeDetail(id) : act.open(id))
   const badge = (item: Item) => {
@@ -1428,6 +1433,19 @@ export function drawPane(
   ).filter(Boolean)
   const footerHints = fitHints(hints, paneWidth, paneWidth >= 100 ? 1 : 2)
   const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), paneWidth)
+  // Docked, the list's frame and the card share the rows between the header and the hints, a divider between
+  // them. The card takes what its content needs (its chrome and sections, measured as drawn), leaving the list
+  // at least LIST_MIN; or, moved with the divider, the split the person set (`split`, the list's rows).
+  const overList = headerRows + (filterRow ? 1 : 0) + (fileRow ? 1 : 0) + (isIgnoreOffered ? 2 : 0)
+  const cardChrome = 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info))
+  const sectionsRows = sections.reduce((sum, row) => sum + Math.max(1, paint(row.node as never, inner).length), 0)
+  const shared = isDocked ? bodyRows! - overList - footerRows - 1 - DIVIDER_ROWS : 0
+  const cardFloor = cardChrome + 4
+  const topRows = !isDocked
+    ? Infinity
+    : split !== null
+      ? Math.max(LIST_MIN, Math.min(split, shared - cardFloor))
+      : Math.max(LIST_MIN, shared - Math.min(cardChrome + sectionsRows, shared - LIST_MIN))
   // The rows a tab has under the header and above the hints, when it can scroll.
   const viewSpace = !canScroll
     ? Infinity
@@ -1440,10 +1458,10 @@ export function drawPane(
     ? Math.max(0, ...STATUSES.map(status => Math.min(columns[status].length, caps[status]) - wideCap(status)))
     : 0
   const wideFrom = Math.min(state.viewScrolledTo, wideMax)
-  const fixed = (isCompact ? 0 : headerRows) + (isDocked ? topRows : 0) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
+  const fixed = (isCompact ? 0 : headerRows) + (isDocked ? overList - headerRows + topRows + DIVIDER_ROWS : 0) + cardChrome + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   // The card's sections, measured as drawn, in a window a line at a time; the marks take a line each.
-  const total = sections.reduce((sum, row) => sum + Math.max(1, paint(row.node as never, inner).length), 0)
+  const total = sectionsRows
   const isScrolling = space < total
   const scrollMax = isScrolling ? total - (space - 2) : 0
   const want = isScrolling ? Math.min(state.scrolledTo, scrollMax) : 0
@@ -1741,6 +1759,20 @@ export function drawPane(
               <Box key="top" flexDirection="column" height={topRows} borderStyle="round" paddingX={1}
                 borderColor={region === 'list' ? ACTIVE : undefined} borderDimColor={region !== 'list'}>
                 {scrolledView}
+              </Box>
+              {/* The divider: ▲ gives the card more room, ▼ the list; auto goes back to sizing by the card. */}
+              <Box key="divider" flexDirection="row" columnGap={1} justifyContent="center">
+                <Button key="split-up" plain hotkey="k" onPress={() => act.setSplit(Math.max(LIST_MIN, topRows - SPLIT_STEP))}>
+                  <Text dimColor>▲</Text>
+                </Button>
+                <Button key="split-down" plain hotkey="j" onPress={() => act.setSplit(topRows + SPLIT_STEP)}>
+                  <Text dimColor>▼</Text>
+                </Button>
+                {split !== null && (
+                  <Button key="split-auto" plain onPress={() => act.setSplit(null)}>
+                    <Text dimColor>auto</Text>
+                  </Button>
+                )}
               </Box>
               {pad > 0 && <Box key="card-pad" height={pad} />}
               {panel}
