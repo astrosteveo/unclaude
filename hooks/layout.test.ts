@@ -869,7 +869,8 @@ test('tables: a header over aligned columns in Plan, the Inbox, Releases and the
       const at = lines.findIndex(line => row.test(line))
       expect(at).toBeGreaterThan(-1)
       const idAt = lines[at]!.indexOf('ID')
-      for (const line of lines.slice(at + 1, at + 6).filter(line => line.trim())) expect(line[idAt]).not.toBe(' ')
+      // (An inbox item's note sits indented under it.)
+      for (const line of lines.slice(at + 1, at + 6).filter(line => line.trim() && !(tab === 'tab-inbox' && line.startsWith('  ')))) expect(`${tab} ${width}: ${line}`).not.toMatch(new RegExp(`^${tab} ${width}: .{${idAt}} `))
     }
     await ui.press({ key: 'tab-roadmap' })
     if (width < 100) expect(paintPane(await ui.drawn(), width).lines.some(line => /^\s*Name\s+Due\s+Progress/.test(line))).toBe(true)
