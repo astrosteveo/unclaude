@@ -32,6 +32,8 @@ const filing = atom({ plugin: 'roadmap', key: 'filing' } as const, false)
 const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
 // The roadmap's zoom: 0 shows all the dated work; each step closer around today.
 const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
+// The inbox item whose row asks where it goes (Into…) or why it's dropped (Drop…).
+const triaging = atom({ plugin: 'roadmap', key: 'triaging' } as const, null as { id: string; mode: 'into' | 'drop' } | null)
 // The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
 const flipped = atom({ plugin: 'roadmap', key: 'flipped' } as const, [] as string[])
 // Whether the board's Done column shows all done work rather than the recent.
@@ -429,7 +431,7 @@ async function poll($: EngineInterface) {
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship' | 'file'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship' | 'file' | 'triage'
   id?: string
   ids?: string[] | string
   ref?: string
@@ -463,6 +465,8 @@ type Input = {
   wontdo?: string
   milestone?: string
   start?: string
+  into?: string
+  fold?: 'comment' | 'checklist'
   section?: string
   version?: string
 }
@@ -895,6 +899,44 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const title = a.title?.trim() || fail('file takes a title: what to sort later')
       const id = await sql($, db.fileInbox(actor, title, a.description?.trim() || null), t)
       return `Filed ${id} to the inbox: ${title}`
+    }
+    case 'triage': {
+      const waiting = (snap.inbox ?? []).filter(one => one.state === 'open')
+      if (!a.id) {
+        if (waiting.length === 0) return 'The inbox is empty.'
+        return [
+          `The inbox (${waiting.length}): propose to the user what each becomes (a task or epic, and where; part of existing work; or dropped), and triage each once they agree.`,
+          ...waiting.map(one => `- ${one.id} ${one.title}${one.body ? `: ${one.body.replace(/\s+/g, ' ')}` : ''} (${one.author}, ${one.at.slice(0, 10)})`),
+        ].join('\n')
+      }
+      const one = (snap.inbox ?? []).find(item => item.id.toUpperCase() === a.id!.trim().toUpperCase()) ?? fail(`No inbox item ${a.id}`)
+      if (one.state !== 'open') fail(`${one.id} was already ${one.state === 'dropped' ? 'dropped' : `sorted into ${one.became}`}`)
+      const filed = `Filed to the inbox as ${one.id} by ${one.author} on ${one.at.slice(0, 10)}.`
+      const ways = [a.kind !== undefined, a.into !== undefined, a.wontdo !== undefined].filter(Boolean).length
+      if (ways !== 1) fail('triage takes one of: kind (it becomes a task or epic), into (it joins existing work), wontdo (it is dropped, with the reason)')
+      if (a.wontdo !== undefined) {
+        const reason = a.wontdo.trim() || fail('wontdo takes the reason it is dropped')
+        await sql($, db.resolveInbox(one.id, 'dropped', null, reason), t)
+        return `${one.id} dropped: ${reason}`
+      }
+      if (a.into !== undefined) {
+        const target = find(snap.items, a.into.trim()) ?? fail(`No item ${a.into}`)
+        const isEntry = a.fold === 'checklist'
+        if (isEntry && target.kind !== 'task') fail('Only tasks carry a checklist; fold it in as a comment instead')
+        const script = isEntry
+          ? db.setChecklist(actor, target, [...target.checklist.map(c => c.text), one.title]).script
+          : db.comment(actor, target.id, `${one.title}${one.body ? `\n\n${one.body}` : ''}\n\n(${filed})`)
+        await sql($, db.atomic([script, db.resolveInbox(one.id, 'triaged', target.id, null)]), t)
+        return `${one.id} joined ${target.id} as ${isEntry ? 'a checklist entry' : 'a comment'}.`
+      }
+      if (a.kind !== 'task' && a.kind !== 'epic') fail('An inbox item becomes a task or an epic')
+      const reply = await act($, actor, {
+        action: 'add', kind: a.kind, title: a.title?.trim() || one.title, description: [one.body, filed].filter(Boolean).join('\n\n'),
+        parent: a.parent, milestone: a.milestone, priority: a.priority, type: a.type,
+      }, isSubagent, t)
+      const made = /Added (\w+)/.exec(reply)?.[1] ?? fail(`could not make ${one.id} into a ${a.kind}: ${reply}`)
+      await sql($, db.resolveInbox(one.id, 'triaged', made, null), t)
+      return `${one.id} became ${made}: ${a.title?.trim() || one.title}`
     }
     case 'ship':
       return ship($, snap.items, a.version, a.approved === true && !isSubagent)
@@ -1487,12 +1529,13 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
 /** Adds what the new-item form describes, as the person, and opens it. */
 async function create($: EngineInterface, choice: Draft, title: string) {
   try {
-    const reply = await act($, USER, {
-      action: 'add', kind: choice.kind, title, parent: choice.parent || undefined,
-      ...(choice.kind === 'task' ? { priority: choice.priority, type: choice.type } : {}),
-    })
+    // Made from an inbox item, it is that item triaged: its text comes along and the inbox marks it sorted.
+    const fields = { title, parent: choice.parent || undefined, ...(choice.kind === 'task' ? { priority: choice.priority, type: choice.type } : {}) }
+    const reply = choice.from
+      ? await act($, USER, { action: 'triage', id: choice.from, kind: choice.kind, ...fields })
+      : await act($, USER, { action: 'add', kind: choice.kind, ...fields })
     await update($, draft, () => null)
-    const id = /^Added (\w+)/.exec(reply)?.[1]
+    const id = /^Added (\w+)/.exec(reply)?.[1] ?? / became (\w+)/.exec(reply)?.[1]
     await refresh($)
     if (id) await open($, id)
   } catch (err) {
@@ -1533,7 +1576,7 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship', 'file'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship', 'file', 'triage'],
             description: [
               'show: the tree, or id: one item with its tasks, activity, commits and PRs. next: what to pick up.',
               'find: kind, status, assignee ("none"), priority, type, labels, under (an id), milestone, text.',
@@ -1544,6 +1587,7 @@ export const register: Register = on => {
               'batch: ops, each { action, ...fields }; an add may carry a ref for later ops. export, import (into an empty roadmap): path.',
               'changelog: merged notes into CHANGELOG.md. ship: version, only when the user asks for a release; again with approved once merged, to tag.',
               "file: title (and description): to the inbox, for the user to sort; for what you notice but weren't asked to do.",
+              'triage: no id lists the inbox, to propose a sort to the user; with id (I3) once they agree: kind (and parent, milestone, priority, type, title) makes it a task or epic, into (an id; fold: checklist for a task entry) joins it to that, wontdo drops it.',
             ].join(' '),
           },
           id: { type: 'string' },
@@ -1564,6 +1608,8 @@ export const register: Register = on => {
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}" or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'YYYY-MM-DD' },
           start: { type: 'string', description: 'YYYY-MM-DD: when a milestone or epic starts, for the roadmap' },
+          into: { type: 'string', description: 'triage: the item an inbox item joins' },
+          fold: { type: 'string', enum: ['comment', 'checklist'], description: 'triage with into: as a comment (default) or a checklist entry' },
           under: { type: 'string' },
           text: { type: 'string' },
           tree: {
@@ -1729,6 +1775,7 @@ export const register: Register = on => {
       isFiling: await read($, filing),
       isReleasing: await read($, releasing),
       zoom: await read($, zoom),
+      triaging: await read($, triaging),
       isDoneOpen: await read($, doneOpen),
       flipped: await read($, flipped),
       draft: await read($, draft),
@@ -1766,6 +1813,7 @@ export const register: Register = on => {
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
+      setTriaging: one => void update($, triaging, () => one).then(() => focusOn($, one ? 'triage-input' : 'tab-inbox')),
       setZoom: level => void update($, zoom, () => level % 3),
       showRelease: version => void (async () => {
         // The newest version shows open by itself; any other opens by being flipped.

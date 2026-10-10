@@ -511,6 +511,12 @@ SELECT ${id};
 COMMIT;`
 }
 
+/** Sorts an inbox item: triaged into the item `became`, or dropped with `reason`; only while it is open. */
+export const resolveInbox = (id: string, state: 'triaged' | 'dropped', became: string | null, reason: string | null) => `BEGIN IMMEDIATE;
+${guard(`EXISTS (SELECT 1 FROM inbox WHERE id=${q(id)} AND state='open')`, `${id} was sorted meanwhile; nothing was changed`)}
+UPDATE inbox SET state=${q(state)}, became=${q(became)}, reason=${q(reason)} WHERE id=${q(id)};
+COMMIT;`
+
 /** Records a release and what it shipped, replacing any record of that version. */
 export function recordRelease(r: Release): string {
   const rows = r.tasks.map(one => `INSERT INTO shipped(version, item_id, note, section) VALUES (${q(r.version)}, ${q(one.id)}, ${q(one.note)}, ${q(one.section)});`)

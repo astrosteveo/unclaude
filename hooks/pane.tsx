@@ -155,6 +155,8 @@ export type PaneState = {
   isReleasing: boolean
   /** The roadmap's zoom: 0 shows all the dated work; each step closer around today. */
   zoom: number
+  /** The inbox item whose row asks where it goes or why it's dropped. */
+  triaging: { id: string; mode: 'into' | 'drop' } | null
   /** Whether the board's Done column shows all done work, not just the recent. */
   isDoneOpen: boolean
   /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
@@ -210,6 +212,7 @@ export type PaneActions = {
   setFiling: (isOn: boolean) => void
   setReleasing: (isOn: boolean) => void
   setZoom: (zoom: number) => void
+  setTriaging: (one: { id: string; mode: 'into' | 'drop' } | null) => void
   /** Opens the Releases tab on `version`, unfolded. */
   showRelease: (version: string) => void
   /** Runs ship from the board: the release PR for `version`, or (`publish`, once it has merged) its tag and release. */
@@ -283,7 +286,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -521,12 +524,39 @@ export function drawPane(
       {waiting.map(one => {
         const by = ` — ${one.author}, ${one.at.slice(5, 10)}`
         const room = Math.max(8, width - one.id.length - 1 - by.length)
+        const asking = triaging?.id === one.id ? triaging.mode : null
         return (
           <Box key={`inbox-${one.id}`} flexDirection="column">
             <Text>
               <Text dimColor>{one.id}</Text> {one.title.length > room ? `${one.title.slice(0, room - 1)}…` : one.title}
               <Text dimColor>{by}</Text>
             </Text>
+            {/* Sorting it: into a new task or epic (the form, its title filled in), into existing work, or dropped. */}
+            {asking && Input ? (
+              <Box key={`triage-row-${one.id}`} flexDirection="row" columnGap={1}>
+                <Input key="triage-input" label={asking === 'into' ? 'Into' : "Drop, because"} autoFocus
+                  placeholder={asking === 'into' ? "an id, as a comment; or 'T12 checklist' for an entry" : 'why it won’t be done'}
+                  submitLabel={asking === 'into' ? 'join' : 'drop'}
+                  onSubmit={(value: string) => {
+                    const text = value.trim()
+                    const into = /^(\S+)(\s+checklist)?$/i.exec(text)
+                    if (asking === 'into' && into)
+                      act.userAct({ action: 'triage', id: one.id, into: into[1], ...(into[2] ? { fold: 'checklist' } : {}) })
+                    else if (asking === 'drop' && text) act.userAct({ action: 'triage', id: one.id, wontdo: text })
+                    act.setTriaging(null)
+                  }} />
+                <Button key="triage-cancel" label="Cancel" onPress={() => act.setTriaging(null)} />
+              </Box>
+            ) : (
+              <Box key={`triage-${one.id}`} flexDirection="row" columnGap={1} flexWrap="wrap">
+                <Button key={`to-task-${one.id}`} label="→ Task"
+                  onPress={() => act.setDraft({ kind: 'task', priority: 'p2', type: 'feature', parent: '', from: one.id, title: one.title })} />
+                <Button key={`to-epic-${one.id}`} label="→ Epic"
+                  onPress={() => act.setDraft({ kind: 'epic', priority: 'p2', type: 'feature', parent: '', from: one.id, title: one.title })} />
+                <Button key={`into-${one.id}`} label="Into…" onPress={() => act.setTriaging({ id: one.id, mode: 'into' })} />
+                <Button key={`drop-${one.id}`} label="Drop…" onPress={() => act.setTriaging({ id: one.id, mode: 'drop' })} />
+              </Box>
+            )}
             {one.body ? (
               <Text dimColor>
                 {'  '}
@@ -1488,10 +1518,10 @@ export function drawPane(
   const homes = draft ? homesFor(items, draft.kind) : []
   const form = draft && (
     <Box key="new-form" flexDirection="column" borderStyle="round" paddingX={1}>
-      <Text bold>New {draft.kind}</Text>
+      <Text bold>New {draft.kind}{draft.from ? ` from ${draft.from}` : ''}</Text>
       {Select ? (
         <Box key="new-choices" flexDirection="row" columnGap={2} flexWrap="wrap">
-          <Select key="new-kind" label="Kind" options={KINDS.map(one => ({ value: one }))} value={draft.kind}
+          <Select key="new-kind" label="Kind" options={KINDS.filter(one => !draft.from || one !== 'milestone').map(one => ({ value: one }))} value={draft.kind}
             onSelect={(value: string) => act.setDraft(fitDraft({ ...draft, kind: value as Draft['kind'] }))} />
           {draft.kind === 'task' && (
             <Select key="new-priority" label="Priority" options={PRIORITIES.map(one => ({ value: one }))} value={draft.priority}
@@ -1511,7 +1541,7 @@ export function drawPane(
         <Text dimColor>{draft.kind}{draft.parent ? ` under ${draft.parent}` : ''}</Text>
       )}
       {Input && (
-        <Input key="new-title" label="Title" placeholder="What it is; Enter creates it" autoFocus submitLabel="create"
+        <Input key="new-title" label="Title" placeholder="What it is; Enter creates it" autoFocus submitLabel="create" value={draft.title}
           onSubmit={(value: string) => value.trim() && act.create(draft, value.trim())} />
       )}
       <Button key="new-cancel" label="Cancel" onPress={() => act.setDraft(null)} />

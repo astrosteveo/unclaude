@@ -133,7 +133,11 @@ export type Release = { version: string; tag: string | null; at: string; pr: num
 export type View = 'board' | 'plan' | 'timeline' | 'inbox' | 'releases'
 
 /** The new-item form's choices so far; the title is typed last and submits it. */
-export type Draft = { kind: Kind; priority: Priority; type: IssueType; parent: string }
+export type Draft = {
+  kind: Kind; priority: Priority; type: IssueType; parent: string
+  /** The inbox item it is made from, when triaging one; its title starts as the item's. */
+  from?: string; title?: string
+}
 
 /** A commit whose message names roadmap ids. */
 export type Commit = { hash: string; author: string; date: string; subject: string; ids: string[] }
@@ -150,6 +154,6 @@ export type Refs = { commits: Commit[]; prs: Pr[]; /** The version the stable br
 
 declare module 'claude-code' {
   interface PluginState {
-    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null; filing: boolean; releasing: boolean; zoom: number }
+    roadmap: { snapshot: Snapshot; view: View; selected: string | null; problem: string | null; refs: Refs; scrolled: number; ignoreOffer: boolean; requesting: boolean; filter: string; filtering: boolean; draft: Draft | null; editing: boolean; handing: string | null; merging: string | null; noting: string | null; commentTurns: boolean; stacking: string | null; stackRun: string; picked: string[]; parallelAsk: string[] | null; doneOpen: boolean; flipped: string[]; dropping: string | null; filing: boolean; releasing: boolean; zoom: number; triaging: { id: string; mode: 'into' | 'drop' } | null }
   }
 }

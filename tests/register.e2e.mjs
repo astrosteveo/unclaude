@@ -449,3 +449,35 @@ test('start dates: milestones and epics take one on add, update and plan; a task
   await ok({ action: 'update', id: 'E1', start: '' })
   assert.equal(query("SELECT COALESCE(start, '-') FROM items WHERE id='E1';"), '-')
 })
+
+test('triage: the inbox is listed to propose a sort; an item becomes a task or epic, joins existing work, or is dropped; several at once', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1' })
+  await ok({ action: 'add', kind: 'epic', title: 'Board', parent: 'M1' })
+  await ok({ action: 'add', kind: 'task', title: 'Cards', parent: 'E1', checklist: ['draw'] })
+  for (const title of ['Export to CSV', 'Flicker on resize', 'Cards need a footer', 'Mention it in the README', 'Dark mode', 'Fix typo'])
+    await ok({ action: 'file', title, description: title === 'Flicker on resize' ? 'Seen at 84 columns.' : undefined })
+  const listed = await ok({ action: 'triage' })
+  assert.match(listed, /^The inbox \(6\): propose to the user/)
+  assert.match(listed, /- I2 Flicker on resize: Seen at 84 columns\. \(claude, /)
+  // A task, under an epic, with its text and where it came from.
+  assert.match(await ok({ action: 'triage', id: 'I2', kind: 'task', parent: 'E1', priority: 'p1', type: 'bug' }), /^I2 became T2: Flicker on resize$/)
+  assert.equal(query("SELECT parent || ' ' || priority || ' ' || type FROM items WHERE id='T2';"), 'E1 p1 bug')
+  assert.match(query("SELECT description FROM items WHERE id='T2';"), /^Seen at 84 columns\.\n\nFiled to the inbox as I2 by claude on \d{4}-\d{2}-\d{2}\.$/)
+  // An epic targeting a milestone, retitled.
+  assert.match(await ok({ action: 'triage', id: 'I1', kind: 'epic', milestone: 'M1', title: 'Export' }), /^I1 became E2: Export$/)
+  // Into existing work: a checklist entry, or a comment.
+  assert.match(await ok({ action: 'triage', id: 'I3', into: 'T1', fold: 'checklist' }), /joined T1 as a checklist entry/)
+  assert.equal(query("SELECT group_concat(text, '|') FROM (SELECT text FROM checks WHERE item_id='T1' ORDER BY n);"), 'draw|Cards need a footer')
+  assert.match(await ok({ action: 'triage', id: 'I4', into: 'E1' }), /joined E1 as a comment/)
+  assert.match(query("SELECT body FROM activity WHERE item_id='E1' AND type='comment';"), /^Mention it in the README\n\n\(Filed to the inbox as I4/)
+  // Dropped, with a reason; a second sort is refused.
+  assert.equal(await ok({ action: 'triage', id: 'I5', wontdo: 'not now' }), 'I5 dropped: not now')
+  assert.match((await call({ action: 'triage', id: 'I5', kind: 'task' })).text, /already dropped/)
+  assert.match((await call({ action: 'triage', id: 'I6' })).text, /triage takes one of/)
+  // Several at once in a batch, all or nothing.
+  await ok({ action: 'file', title: 'Another' })
+  await ok({ action: 'batch', ops: [{ action: 'triage', id: 'I6', kind: 'task' }, { action: 'triage', id: 'I7', wontdo: 'dupe' }] })
+  assert.equal(query("SELECT group_concat(id || ' ' || state || ' ' || COALESCE(became, '-'), '; ') FROM inbox;"),
+    'I1 triaged E2; I2 triaged T2; I3 triaged T1; I4 triaged E1; I5 dropped -; I6 triaged T3; I7 dropped -')
+  assert.equal(await ok({ action: 'triage' }), 'The inbox is empty.')
+})

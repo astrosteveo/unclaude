@@ -531,3 +531,39 @@ test('releases on the roadmap: a tick at each release\'s date, named for its ver
   expect(text).toMatch(/▾ v0\.6\.0[^\n]*\n *- A\./)
   await ui.unmount()
 })
+
+test('triage in the Inbox: → Task opens the form with the title filled in and sorts the item; Into… and Drop… ask, then sort it', async ($, on) => {
+  const snap = bigRoadmap()
+  const ran: string[] = []
+  // A new item answers with its id, as sqlite3 does.
+  on('process.run', ($, e) => (ran.push(e.init?.stdin ?? ''), {
+    value: (e.init?.stdin ?? '').includes('INSERT INTO items') ? { exitCode: 0, stdout: 'T99\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } : fake(e.init?.stdin, snap),
+  }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-inbox' })
+  expect(paintPane(await ui.drawn(), 100).problems).toEqual([])
+  await ui.press({ key: 'to-task-I1' })
+  expect((await ui.find({ key: 'new-title' }))?.props.value).toBe(snap.inbox![0]!.title)
+  ran.length = 0
+  await ui.input({ key: 'new-title', text: 'Export, as a task' })
+  // Made from I1: the item goes in with its new title and I1 is marked sorted, in one go.
+  expect(ran.some(one => one.includes("'Export, as a task'"))).toBe(true)
+  expect(ran.some(one => one.includes("UPDATE inbox SET state='triaged'") && one.includes("WHERE id='I1'"))).toBe(true)
+  await ui.press({ key: 'into-I2' })
+  ran.length = 0
+  await ui.input({ key: 'triage-input', text: 'T7 checklist' })
+  expect(ran.some(one => one.includes("INSERT INTO checks") && one.includes("UPDATE inbox SET state='triaged', became='T7'"))).toBe(true)
+  await ui.press({ key: 'drop-I3' })
+  ran.length = 0
+  await ui.input({ key: 'triage-input', text: 'not worth it' })
+  expect(ran.some(one => one.includes("UPDATE inbox SET state='dropped', became=NULL, reason='not worth it' WHERE id='I3'"))).toBe(true)
+  await ui.unmount()
+})
