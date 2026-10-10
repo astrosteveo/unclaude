@@ -957,3 +957,29 @@ test('opened from the board, a card stays in sight in the docked list above it, 
     await ui.unmount()
   }
 })
+
+test('opened from Plan or Roadmap, a row stays in sight in the docked list above the card, so pressing it again closes it', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of [84, 180])
+    for (const [tab, prefix] of [['tab-plan', 'row-'], ['tab-roadmap', 'time-']] as const) {
+      const ui = await $.ui.mount({
+        plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+        props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+      })
+      await ui.press({ key: tab })
+      // The last row drawn: docked, the list shrinks, and it would go out of sight.
+      const keys = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith(prefix))
+      const last = keys.at(-1)!
+      await ui.press({ key: last })
+      expect(await ui.find({ key: 'detail' })).toBeDefined()
+      expect(`${tab} ${width}: ${(await ui.find({ key: `${last}-open` })) ? last : 'gone'}`).toBe(`${tab} ${width}: ${last}`)
+      await ui.press({ key: `${last}-open` })
+      expect(await ui.find({ key: 'detail' })).toBeUndefined()
+      await ui.unmount()
+    }
+})

@@ -1905,10 +1905,12 @@ export function drawPane(
   const viewTotal = viewRows.reduce((sum, row) => sum + row.rows, 0)
   const isViewScrolling = canScroll && !(mode === 'board' && isWide) && viewTotal > viewSpace
   const viewMax = isViewScrolling ? viewTotal - (viewSpace - 2) : mode === 'board' && isWide ? wideMax : 0
-  // Just opened and docked, the open item's row is held in sight: the window moves as little as it must.
+  // Just opened and docked, the open item's row is held in sight: the window moves as little as it must. Its
+  // button is keyed apart while open (rowKey).
   const isRow = (node: unknown): boolean => {
     const key = String((node as { props?: { key?: unknown } } | null)?.props?.key ?? '')
-    return (pick !== null && /^(card|row|time|need)-/.test(key) && key.endsWith(`-${pick}`)) || kids(node as never).some(isRow)
+    return (pick !== null && /^(card|row|time|need)-/.test(key) && (key.endsWith(`-${pick}`) || key.endsWith(`-${pick}-open`)))
+      || kids(node as never).some(isRow)
   }
   const pickRow = isDocked && state.isRevealing && isViewScrolling ? viewRows.findIndex(row => isRow(row.node)) : -1
   const viewAt = !isViewScrolling
