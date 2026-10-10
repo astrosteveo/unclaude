@@ -1,9 +1,10 @@
 /**
- * A rough terminal paint of a drawn tree, for the layout tests: the kit hands back the tree a render
- * hook returned, never the terminal's paint, so this lays it out much as Ink does (boxes in rows and
- * columns, text wrapped at word boundaries) and reports where it can't fit: a row whose children are
- * wider than it, a box whose content is taller than the height it was given, a line wider than the pane.
- * It is a model, not Ink: close enough to catch a column that runs into a card, not a pixel test.
+ * A rough model of how the terminal draws a rendered tree, for the layout tests. The test kit returns the
+ * tree a render hook returned, not what the terminal drew, so this lays the tree out much as Ink does
+ * (boxes in rows and columns, text wrapped at word boundaries) and reports where it doesn't fit: a row
+ * whose children are wider than it, a box whose content is taller than the height it was given, a line
+ * wider than the pane. It is a model, not Ink: close enough to catch a column that overlaps a card, but
+ * not exact to the cell.
  */
 
 type Node = { type: string; props?: Record<string, unknown>; children?: Child[] } | string | number | null | undefined | boolean
@@ -51,7 +52,7 @@ const isInline = (node: Node) =>
   node === null || node === undefined || typeof node !== 'object' || node.type === 'Text' || node.type === 'Link' ||
   (node.type === 'Button' && Boolean(node.props?.plain) && kids(node).length > 0)
 
-/** What an inline node says, flattened. */
+/** The text an inline node shows, flattened. */
 function textOf(node: Node): string {
   if (node === null || node === undefined || typeof node === 'boolean') return ''
   if (typeof node !== 'object') return String(node)
@@ -100,7 +101,7 @@ const keyOf = (node: Node) => (node && typeof node === 'object' ? String(node.pr
 /** Paints `node` into `width` columns. */
 export function paint(node: Node, width: number, problems: string[] = [], path = 'pane'): string[] {
   if (node === null || node === undefined || typeof node === 'boolean') return []
-  // A Box drawn `display: "none"` takes no room (a hover may show it, over the rest).
+  // A Box drawn with `display: "none"` takes no room (a hover may show it, on top of the rest).
   if (typeof node === 'object' && node.props?.display === 'none') return []
   if (isInline(node) || (typeof node === 'object' && node.type !== 'Box')) {
     const text = textOf(node)

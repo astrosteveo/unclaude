@@ -104,7 +104,7 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
         if (SHOW === `${view} ${width}x${height}`) found.push(...plain.lines.map(line => `|${line}`))
         for (const problem of plain.problems) found.push(`${view} ${width}x${height}: ${problem}`)
         if (row === null) continue
-        // A short pane shows the board's first screen; its first card stands in when T5 is further down.
+        // A short pane shows the board's first screen; its first card is used instead when T5 is further down.
         const first = view === 'board' ? (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).find(key => key.startsWith('card-')) : undefined
         const target = view === 'board' && !(await ui.find({ key: row })) && first ? first : row
         if (!(await ui.find({ key: target }))) {
@@ -313,7 +313,7 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   const { lines } = paintPane(await ui.drawn(), 84)
   const rows = lines.filter(line => /[▓░]/.test(line) && !line.includes('done'))
   expect(new Set(rows.map(line => line.search(/[▓░]/))).size).toBe(1)
-  expect(rows.find(line => line.includes('M3 Undated'))).toMatch(/M3 Undated +— +░/)
+  expect(rows.find(line => line.includes('M3 Undated'))).toMatch(/M3 Undated +- +░/)
   await ui.unmount()
 })
 
@@ -346,7 +346,7 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   expect((await ui.find({ key: 'set-wontdo' }))?.props.variant).toBe('primary')
   expect((await ui.find({ key: 'set-done' }))?.props.variant).toBe('secondary')
   await ui.press({ key: 'close' })
-  // Dropping an open task asks why, then closes it so.
+  // Dropping an open task asks for a reason, then closes it as won't do.
   await ui.press({ key: 'row-T3' })
   await ui.press({ key: 'set-wontdo' })
   ran.length = 0
@@ -358,7 +358,7 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   await ui.unmount()
 })
 
-test('inbox: i files a line from any tab; the Inbox tab lists what waits, with who filed it, and counts it', async ($, on) => {
+test('inbox: i files a line from any tab; the Inbox tab lists unsorted items with who filed each, and counts them', async ($, on) => {
   const snap = bigRoadmap()
   const ran: string[] = []
   on('process.run', ($, e) => (ran.push(e.init?.stdin ?? ''), { value: fake(e.init?.stdin, snap) }))
@@ -385,7 +385,7 @@ test('inbox: i files a line from any tab; the Inbox tab lists what waits, with w
   await ui.unmount()
 })
 
-test('releases on the board: a done card and its plan row name the version it shipped in, or say unreleased; the card says so too', async ($, on) => {
+test('releases on the board: a done card and its Plan row show the version it shipped in, or unreleased; the open card shows it too', async ($, on) => {
   const items = [
     item('T1', { status: 'done', title: 'Shipped one', note: 'One.' }),
     item('T2', { status: 'done', title: 'Merged one', note: 'Two.' }),
@@ -456,7 +456,7 @@ test('releases tab: what the next release carries by section, each version newes
   // Newest open with its notes, stable marked; the older one folded to its line.
   expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +#33 +stable ●\n *Changed\n *- Installs get releases\./)
   expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 #31 *\n/)
-  // Release… suggests the next minor (an Added note waits) and runs ship with what is typed.
+  // Release… suggests the next minor (there is an unreleased Added note) and runs ship with what is typed.
   await ui.press({ key: 'release' })
   expect((await ui.find({ key: 'release-version' }))?.props.value).toBe('0.7.0')
   await ui.input({ key: 'release-version', text: '0.7.0' })
@@ -584,7 +584,7 @@ test('triage in the Inbox: → Task opens the form with the title filled in and 
   await ui.unmount()
 })
 
-test('needs you: work in review, unread comments, stale claims and late work head the Inbox, each once, opening its card; they agree with the board', async ($, on) => {
+test('needs you: work in review, unread comments, inactive claims and late work are listed first in the Inbox, once each, and open their card; the list matches the board', async ($, on) => {
   const items = [
     item('E1', { title: 'Handed', assignee: 'claude' }),
     item('T1', { parent: 'E1', status: 'done' }),
@@ -617,7 +617,7 @@ test('needs you: work in review, unread comments, stale claims and late work hea
   expect(needs).toEqual([
     'E1: review  E1 Handed',
     'T2: review · 1 unread  T2 Reviewed',
-    'T3: stale claim  T3 Quiet',
+    'T3: inactive claim  T3 Quiet',
     'T4: late  T4 Overdue',
     'T5: 1 unread  T5 Talked about',
   ])
@@ -791,15 +791,15 @@ test('with a card docked, the wheel moves what is under it: the list in its fram
   expect(now.problems).toEqual([])
   expect([now.list, now.card]).toEqual([undefined, 'cyan'])
   expect(now.text).toMatch(/↓ \d+ more lines below · scroll down/)
-  // Both frames dim; the one under the pointer lights up (the surface applies it, no hook runs).
+  // Both frames are dim; the one under the pointer is highlighted (the terminal does this; no hook runs).
   for (const key of ['top', 'detail']) expect([key, (await ui.find({ key }))?.props.borderDimColor]).toEqual([key, true])
   expect(JSON.stringify(await ui.drawn())).toContain('"hover":{"borderColor":"cyan","borderDimColor":false}')
-  // The wheel over the list (a row inside its frame) scrolls it, and lights it.
+  // The wheel over the list (a row inside its frame) scrolls it and highlights it.
   await wheel(5)
   now = await frames()
   expect([now.list, now.card]).toEqual(['cyan', undefined])
   expect(now.text).toMatch(/↑ 2 more lines above · scroll up/)
-  // Over the card, the card scrolls and is lit again; the list keeps its place.
+  // Over the card, the card scrolls and is highlighted again; the list keeps its place.
   await wheel(rows - 6, 3)
   now = await frames()
   expect([now.list, now.card]).toEqual([undefined, 'cyan'])
@@ -891,7 +891,7 @@ test('tables: a header over aligned columns in Plan, the Inbox, Releases and the
   }
 })
 
-test('a board card lights whole under the pointer, its pieces keeping their colours on a faint block; v steps the tabs from out of sight', async ($, on) => {
+test('a board card is highlighted as a whole under the pointer, and its parts keep their colours on a faint background; v moves to the next tab though no tab shows the key', async ($, on) => {
   const snap = bigRoadmap()
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -904,8 +904,8 @@ test('a board card lights whole under the pointer, its pieces keeping their colo
   })
   await ui.press({ key: 'tab-board' })
   const box = JSON.stringify(await ui.find({ key: 'card-box-T5' }))
-  // Under the pointer the button inverts: every piece's hover colour is the one faint grey (the block, once
-  // inverted), and its background its own colour (its text, once inverted), so the colour coding stays.
+  // Under the pointer the button is inverted: every part's hover colour is the same faint grey (the background,
+  // once inverted), and its background is its own colour (its text, once inverted), so the colour coding is kept.
   const colours = new Set([...box.matchAll(/"hover":\{"color":"([^"]+)"/g)].map(one => one[1]))
   expect([...colours]).toEqual(['ansi256(237)'])
   const backgrounds = new Set([...box.matchAll(/"hover":\{[^}]*"backgroundColor":"([^"]+)"/g)].map(one => one[1]))

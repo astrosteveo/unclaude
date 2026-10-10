@@ -1,15 +1,16 @@
 #!/usr/bin/env node
-// What the mod costs an agent: the same small epic, run headless with the roadmap mod and without it.
+// Measures what the roadmap plugin costs an agent. It runs the same small epic headless, with the plugin and without it.
 //
 //   node bench/tokens/run.mjs [--scenario small] [--runs 3] [--arms with,without] [--model <model>] [--out <dir>]
-//   node bench/tokens/run.mjs --report <dir>     (tabulate a finished run again)
+//   node bench/tokens/run.mjs --report <dir>     (print the table for a finished run again)
 //
-// A scenario (scenarios/<name>/) is a project and an epic for it: template/, epic.md and seed.sql. Each
-// run copies template/ into its own git repository. The "with" arm loads this checkout with
-// --plugin-dir and gets the epic from seed.sql (no model call); the "without" arm gets epic.md in the
-// prompt. Both arms turn off an installed roadmap@unclaude, so the only difference is this checkout.
-// Each arm first runs a one-word warm-up (see WARM), whose cost is left out of the table.
-// Runs go in parallel and spend real tokens on your own credential.
+// A scenario (scenarios/<name>/) holds a project and an epic for it: template/, epic.md and seed.sql.
+// Each run copies template/ into its own git repository. The "with" arm loads this checkout with
+// --plugin-dir and gets the epic from seed.sql, which is written straight into the roadmap database
+// (no model call). The "without" arm gets epic.md in the prompt. Both arms turn off an installed
+// roadmap@unclaude, so the only difference between them is this checkout.
+// Each arm first runs a one-word warm-up (see WARM), and the warm-up's cost is left out of the table.
+// Runs go in parallel and spend real tokens on your own account.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -41,7 +42,7 @@ const SCENARIO = join(HERE, 'scenarios', opt.scenario)
 
 const sh = (cmd, args, cwd, input) => spawnSync(cmd, args, { cwd, input, encoding: 'utf8' })
 
-/** A fresh copy of the template as a git repository, with the epic on its roadmap for the "with" arm. */
+/** Copies the template into a new git repository and, for the "with" arm, puts the epic on its roadmap. */
 function prepare(dir, arm) {
   cpSync(join(SCENARIO, 'template'), dir, { recursive: true })
   sh('git', ['init', '-q', '-b', 'main'], dir)
@@ -50,13 +51,14 @@ function prepare(dir, arm) {
   if (arm === 'with') {
     mkdirSync(join(dir, '.claude'))
     const seeded = sh('sqlite3', [join(dir, '.claude/roadmap.db')], dir, readFileSync(join(SCENARIO, 'seed.sql'), 'utf8'))
-    if (seeded.status !== 0) throw new Error(`seeding failed: ${seeded.stderr}`)
+    if (seeded.status !== 0) throw new Error(`could not load seed.sql into the roadmap database: ${seeded.stderr}`)
   }
 }
 
-// A warm-up says one word per arm first. A session's first turn reads the tools and system prompt from
-// the prompt cache when an earlier session left them there; without it, runs started together all pay
-// to write that prefix, and an arm whose tools just changed (this checkout's) pays where the other doesn't.
+// Before the real runs, each arm runs one session that replies with a single word. A session's first turn
+// reads the tools and system prompt from the prompt cache when an earlier session put them there. Without
+// the warm-up, runs started together would all pay to write them to the cache, and the arm whose tools just
+// changed (the one loading this checkout) would pay for that while the other arm doesn't.
 const WARM = 'Reply with the single word ok.'
 
 function launch(out, arm, n, prompt = PROMPTS[arm](), file = `${arm}-${n}.jsonl`) {
@@ -80,7 +82,7 @@ function launch(out, arm, n, prompt = PROMPTS[arm](), file = `${arm}-${n}.jsonl`
   })
 }
 
-/** One run's numbers, from its transcript and what it left in its repository. */
+/** Reads one run's numbers from its transcript and from what it left in its repository. */
 function measure(out, name) {
   const dir = join(out, name)
   const events = readFileSync(join(out, `${name}.jsonl`), 'utf8').split('\n').filter(Boolean).flatMap(line => {
@@ -118,7 +120,7 @@ function report(out) {
   const rows = names.map(name => measure(out, name))
   const head = ['run', ...COLUMNS, 'tests', 'commits', 'roadmap state']
   const table = [head, ...rows.map(r => [
-    r.name + (r.loaded === (r.arm === 'with') ? '' : ' (WRONG ARM)'),
+    r.name + (r.loaded === (r.arm === 'with') ? '' : r.loaded ? ' (WRONG ARM: plugin loaded)' : ' (WRONG ARM: plugin not loaded)'),
     ...COLUMNS.map(k => fmt(k, r[k])),
     `${r.pass}/${r.pass + r.fail}`,
     String(r.commits),
@@ -143,8 +145,8 @@ if (opt.report) {
   const out = resolve(opt.out ?? join(tmpdir(), `roadmap-bench-${opt.scenario}-${new Date().toISOString().replace(/[:.]/g, '-')}`))
   mkdirSync(out, { recursive: true })
   const arms = opt.arms.split(',').map(a => a.trim()).filter(a => a in PROMPTS)
-  if (!existsSync(SCENARIO)) throw new Error(`no scenario ${opt.scenario}: ${readdirSync(join(HERE, 'scenarios')).join(', ')}`)
-  console.error(`bench: ${opt.scenario}, ${arms.join(' + ')} x ${opt.runs} runs in ${out}`)
+  if (!existsSync(SCENARIO)) throw new Error(`there is no scenario named ${opt.scenario}. The scenarios are: ${readdirSync(join(HERE, 'scenarios')).join(', ')}`)
+  console.error(`bench: scenario ${opt.scenario}, arms ${arms.join(' + ')}, ${opt.runs} runs each, writing to ${out}`)
   await Promise.all(arms.map(arm => launch(out, arm, 'warm', WARM, `${arm}-warm.log`)))
   const jobs = arms.flatMap(arm => Array.from({ length: Number(opt.runs) }, (_, i) => launch(out, arm, i + 1)))
   await Promise.all(jobs)

@@ -1,4 +1,4 @@
-Epic E1 "String utilities" — add three small utilities to textkit, each exported from src/index.js.
+Epic E1 "String utilities": Add three small utilities to textkit, each exported from src/index.js.
 
 T1 slugify: add slugify(text) in src/slugify.js.
   Checklist:

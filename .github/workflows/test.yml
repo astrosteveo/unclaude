@@ -12,18 +12,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # The SQL tests lean on Node's own TypeScript stripping and module.registerHooks.
+          # The SQL tests need Node's built-in TypeScript stripping and module.registerHooks.
           node-version: 24
       - name: Install sqlite3
         run: sudo apt-get update && sudo apt-get install -y sqlite3
       - name: Install Claude Code
-        # Pinned to the build the mod's types were written against; plugin validate and test need no sign-in.
+        # Pinned to the Claude Code version the plugin's types were written for. plugin validate and plugin test don't need a sign-in.
         run: npm install -g @anthropic-ai/claude-code@2.1.295
-      - name: Validate the mod
+      - name: Validate the plugin
         run: claude plugin validate .
-      - name: Unit and UI tests
+      - name: Run the unit and UI tests
         run: claude plugin test .
-      - name: Generated SQL against a real sqlite3
+      - name: Run the generated SQL against a real sqlite3
         run: node --test tests/sql.integration.mjs
-      - name: The roadmap tool end to end, against a real sqlite3
+      - name: Test the roadmap tool end to end against a real sqlite3
         run: node --test tests/register.e2e.mjs

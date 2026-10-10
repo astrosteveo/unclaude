@@ -1,6 +1,6 @@
 import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Release, Section, Snapshot, Status } from '../types'
 
-// The person at the board, and the main loop's agent; subagents go by names from agentName.
+// The names for the person using the board and for the main Claude session. Subagents get names from agentName.
 export const USER = 'user'
 export const CLAUDE = 'claude'
 export const KINDS: Kind[] = ['milestone', 'epic', 'task']
@@ -10,7 +10,7 @@ export const LABEL: Record<Status, string> = { todo: 'Todo', in_progress: 'In pr
 export const PRIORITIES: Priority[] = ['p0', 'p1', 'p2', 'p3']
 export const TYPES: IssueType[] = ['feature', 'bug', 'chore']
 export const SECTIONS: Section[] = ['Added', 'Changed', 'Fixed']
-// The order Keep a Changelog puts its sections in, those this mod writes among them.
+// The section order Keep a Changelog uses, which includes the sections this plugin writes.
 const SECTION_ORDER = ['Added', 'Changed', 'Deprecated', 'Removed', 'Fixed', 'Security']
 
 /** A section as given (`fixed`, `Fixed`), or undefined when it is none of them. */
@@ -20,13 +20,13 @@ export const sectionOf = (text: string | undefined): Section | undefined =>
 /** The section a task's note goes under: its own, else what its type suggests (a bug is a fix). */
 export const sectionFor = (item: Item): Section => item.section ?? (item.type === 'bug' ? 'Fixed' : item.type === 'chore' ? 'Changed' : 'Added')
 
-/** Whether a task has a note worth a CHANGELOG line (not none, and not `-`, none needed). */
 /** A task closed as won't do: closed, but dropped rather than finished. */
 export const isDropped = (item: Item) => item.resolution === 'wontdo'
+/** Whether a task has a note that belongs in the CHANGELOG (not empty, and not `-`, meaning none needed). */
 export const hasNote = (item: Item) => Boolean(item.note && item.note !== '-') && !isDropped(item)
-/** Priority and type as worth saying: the defaults (p2, feature) go without saying. */
-// How a task closed as won't do is marked.
+// The mark shown for a task closed as won't do.
 export const WONTDO_GLYPH = '✕'
+/** The priority and type worth showing: the defaults (p2, feature) are left out. */
 export const marks = (item: Item) =>
   [item.priority && item.priority !== 'p2' ? item.priority : '', item.type && item.type !== 'feature' ? item.type : ''].filter(Boolean)
 const byPriority = (a: Item, b: Item) => PRIORITIES.indexOf(a.priority ?? 'p2') - PRIORITIES.indexOf(b.priority ?? 'p2')
@@ -37,8 +37,8 @@ const PARENTS: Record<Kind, Kind[]> = { milestone: [], epic: ['milestone'], task
 export const emptySnapshot = (): Snapshot => ({ items: [], activity: [], seen: {} })
 
 /**
- * Lookups over one list of items, built the first time it is asked about. A snapshot's list is replaced
- * on every load, never changed in place, so an index stays true for as long as its list is around.
+ * Lookup tables for one list of items, built the first time they are needed. A snapshot's list is
+ * replaced on every load and never changed in place, so an index stays correct for as long as its list exists.
  */
 type Index = { byId: Map<string, Item>; children: Map<string | null, Item[]>; status: Map<Item, Status> }
 const indexes = new WeakMap<Item[], Index>()
@@ -71,7 +71,7 @@ export function targetOf(items: Item[], item: Item): string | null {
   if (item.kind === 'milestone') return item.id
   if (item.milestone) return item.milestone
   const up = find(items, item.parent ?? undefined)
-  // Under a milestone, as data from before targets had it: that milestone; under an epic, the epic's.
+  // A parent that is a milestone (data from before targets existed): that milestone. A parent epic: the epic's target.
   if (!up) return null
   return up.kind === 'milestone' ? up.id : item.kind === 'task' ? targetOf(items, up) : null
 }
@@ -79,7 +79,7 @@ export function targetOf(items: Item[], item: Item): string | null {
 export const find = (items: Item[], id: string | undefined) =>
   id === undefined ? undefined : indexOf(items).byId.get(id.toUpperCase())
 
-/** An item's children, as a list of the caller's own (free to sort). */
+/** An item's children, as a new list the caller is free to sort. */
 export const childrenOf = (items: Item[], id: string | null): Item[] => [...(indexOf(items).children.get(id) ?? [])]
 
 /**
@@ -112,12 +112,12 @@ export function checkParent(items: Item[], kind: Kind, parent: string | undefine
   return found.id
 }
 
-/** How long a claim lasts without a sign of life from its holder before anyone may take it over. */
+/** How long a claim lasts without being renewed by its holder before anyone can take it over. */
 export const LEASE_MS = 30 * 60_000
 
 /**
- * Whether a task's claim has gone quiet: in progress under someone whose last heartbeat (or, for a claim
- * made before leases, the task's last change) is older than LEASE_MS.
+ * Whether a task's claim has expired: the task is in progress and assigned, and its holder last renewed
+ * the claim (or, for a claim made before renewals existed, the task last changed) more than LEASE_MS ago.
  */
 export function isStale(item: Item, now: number): boolean {
   if (item.kind !== 'task' || item.status !== 'in_progress' || !item.assignee) return false
@@ -126,9 +126,9 @@ export function isStale(item: Item, now: number): boolean {
 }
 
 /**
- * A whole plan checked before anything is written, flattened parents first, or throws naming the first
- * problem: a bad kind or nesting, a missing title, a ref used twice, a blocker that is neither a new
- * task nor an existing one, or new tasks waiting on each other in a cycle.
+ * Checks a whole plan before anything is written and returns it flattened, parents first. Throws an
+ * error naming the first problem: a bad kind or nesting, a missing title, a ref used twice, a blocker
+ * that is neither a new task nor an existing one, or new tasks that block each other in a cycle.
  */
 export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | undefined): PlannedItem[] {
   const out: PlannedItem[] = []
@@ -144,13 +144,13 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
       if (node.priority && !PRIORITIES.includes(node.priority)) throw new Error(`${where}: priority must be one of ${PRIORITIES.join(', ')}`)
       if (node.type && !TYPES.includes(node.type)) throw new Error(`${where}: type must be one of ${TYPES.join(', ')}`)
       if (node.kind !== 'task' && (node.checklist?.length || node.blocked_by?.length))
-        throw new Error(`${where}: only tasks carry a checklist or blocked_by`)
+        throw new Error(`${where}: only tasks can have a checklist or blocked_by`)
       if (node.milestone !== undefined) {
         if (node.kind === 'milestone') throw new Error(`${where}: a milestone targets nothing`)
         const named = String(node.milestone).trim()
         const local = nodes.flatMap(function all(one: PlanNode): PlanNode[] { return [one, ...(one.children ?? []).flatMap(all)] }).find(one => one.ref === named)
         if (local ? local.kind !== 'milestone' : (find(items, named)?.kind ?? 'none') !== 'milestone')
-          throw new Error(`${where}: milestone ${named} is not a milestone here or in the plan`)
+          throw new Error(`${where}: ${named} is not an existing milestone or a milestone in the plan`)
       }
       if (parentKind === null) checkParent(items, node.kind, parentId ?? undefined)
       else if (!PARENTS[node.kind].includes(parentKind)) throw new Error(`${where}: a ${node.kind} cannot sit under a ${parentKind}`)
@@ -174,7 +174,7 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
       } else one.blockerIds.push(...checkBlockers(items, '\u0000new', [name]))
     }
   }
-  // Existing tasks can't wait on new ones, so a cycle can only run through the new tasks.
+  // Existing tasks can't be blocked by new ones, so a cycle can only go through the new tasks.
   const state = new Map<string, 'open' | 'done'>()
   const visit = (ref: string) => {
     if (state.get(ref) === 'done') return
@@ -187,7 +187,7 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
   return out
 }
 
-// Words a query reads as a status; the rest of the words are searched for.
+// Words in a query that are read as a status; the other words are searched for.
 const STATUS_WORDS: Record<string, Status> = {
   todo: 'todo', 'in-progress': 'in_progress', in_progress: 'in_progress', wip: 'in_progress', blocked: 'blocked', review: 'review', done: 'done',
 }
@@ -195,8 +195,8 @@ const STATUS_WORDS: Record<string, Status> = {
 /**
  * A query as typed on the board: `@claude` (assignee; `@none` for unassigned), `#ui` (label), `p0`–`p3`,
  * `bug`/`feature`/`chore`, a status word (`todo`, `wip`, `blocked`, `review`, `done`), `under:E3`, and
- * any other words, which must all appear in the text. Repeats of a kind widen it: `p0 p1` is either.
- * Undefined when there is nothing to look for.
+ * any other words, which must all appear in the text. Several values of one kind match any of them:
+ * `p0 p1` matches either. Undefined when there is nothing to look for.
  */
 export function parseQuery(text: string): Query | undefined {
   const q: Query = {}
@@ -219,8 +219,8 @@ export function parseQuery(text: string): Query | undefined {
 }
 
 /**
- * Whether `item` is what `query` looks for. Status is the rolled-up one, as the board shows it. Text is
- * looked for in what was written on the item: `said` (every message, by item id) when given, else the
+ * Whether `item` matches `query`. Status is the rolled-up status the board shows. Text is searched for in
+ * the comments and handoff notes on the item: in `said` (all of them, by item id) when given, else in the
  * snapshot's recent timeline.
  */
 export function matches(snap: Snapshot, item: Item, query: Query, said?: Record<string, string>): boolean {
@@ -245,16 +245,17 @@ export function matches(snap: Snapshot, item: Item, query: Query, said?: Record<
   return true
 }
 
-/** The tasks `item` waits on that are not done yet. */
+/** The tasks blocking `item` that are not done yet. */
 export const waitingOn = (items: Item[], item: Item): Item[] =>
   (item.blocked_by ?? []).map(id => find(items, id)).filter((one): one is Item => one !== undefined && one.status !== 'done')
 
-/** The tasks that wait on `item`. */
+/** The tasks that `item` blocks. */
 export const blocks = (items: Item[], item: Item): Item[] => items.filter(one => (one.blocked_by ?? []).includes(item.id))
 
 /**
  * The blocker ids to store for task `id`, normalized, or throws: each must be another task, and none may
- * already wait on `id`, directly or through others (that would be a cycle nobody can finish).
+ * already be blocked by `id`, directly or through other tasks (that would make a cycle, and none of the
+ * tasks in it could ever be finished).
  */
 export function checkBlockers(items: Item[], id: string, blockers: string[]): string[] {
   const out: string[] = []
@@ -269,7 +270,7 @@ export function checkBlockers(items: Item[], id: string, blockers: string[]): st
       const at = find(items, stack.pop())
       if (!at || seen.has(at.id)) continue
       seen.add(at.id)
-      if (at.id.toUpperCase() === id.toUpperCase()) throw new Error(`${found.id} already waits on ${id}; that would be a cycle`)
+      if (at.id.toUpperCase() === id.toUpperCase()) throw new Error(`${found.id} is already blocked by ${id}; that would be a cycle`)
       stack.push(...(at.blocked_by ?? []))
     }
     if (!out.includes(found.id)) out.push(found.id)
@@ -290,8 +291,8 @@ export function checkLinks(items: Item[], id: string, ids: string[]): string[] {
 }
 
 /**
- * An item's links other than blocked-by, read from both ends: `relates` goes both ways, so an item
- * relates to those it names and to those that name it; a duplicate names its original.
+ * An item's links other than blocked-by, read from both ends. `relates` goes both ways, so an item
+ * relates to the items it links to and the items that link to it. A duplicate links to its original.
  */
 export function linksOf(items: Item[], item: Item) {
   const out = (type: string) => (item.relations ?? []).filter(one => one.type === type).map(one => one.id)
@@ -304,7 +305,7 @@ export function linksOf(items: Item[], item: Item) {
   }
 }
 
-/** Where a new item of `kind` may go: the open milestones (and, for a task, epics) it can sit under. */
+/** Where a new item of `kind` can go: the open milestones (and, for a task, epics) it can be placed under. */
 export const homesFor = (items: Item[], kind: Kind): Item[] =>
   rows(items)
     .map(row => row.item)
@@ -338,8 +339,9 @@ export function progress(items: Item[], item: Item): { done: number; total: numb
 }
 
 /**
- * What letting go of an item changes: nobody holds it, and a task that was under way goes back to todo,
- * where `next` and the backlog offer it to the next taker. Blocked and review keep their status.
+ * What releasing an item changes: it is unassigned, and a task that was in progress goes back to todo,
+ * where `next` and the backlog show it to whoever picks up work next. Blocked and review tasks keep
+ * their status.
  */
 export const letGo = (item: Item): { assignee: null; status?: Status } =>
   item.kind === 'task' && item.status === 'in_progress' ? { assignee: null, status: 'todo' } : { assignee: null }
@@ -363,12 +365,12 @@ export function handedScope(items: Item[], item: Item): Item | undefined {
 
 /**
  * A milestone's or epic's status follows its tasks once it has any; a task's is its own. A milestone or
- * epic handed to an agent as a whole is reviewed once its tasks are all done: it reads `review` until
- * the person approves it (its own status set to done), or `in_progress` once they've asked for changes.
+ * epic handed to an agent as a whole goes to review once its tasks are all done: its status is `review`
+ * until the person approves it (its own status set to done), or `in_progress` once they've asked for changes.
  */
 export function statusOf(items: Item[], item: Item): Status {
   if (item.kind === 'task') return item.status
-  // Rolled up once per list: the board asks for every row's status, and each roll-up asks for its parts'.
+  // Computed once per list and cached: the board needs every row's status, and each one needs its parts' statuses.
   const memo = indexOf(items).status
   let status = memo.get(item)
   if (status === undefined) memo.set(item, (status = rollUp(items, item)))
@@ -381,7 +383,7 @@ function rollUp(items: Item[], item: Item): Status {
   if (tasks.every(status => status === 'done')) {
     if (isAgent(item.assignee) && item.status !== 'done' && !handedScope(items, item))
       return item.status === 'in_progress' ? 'in_progress' : 'review'
-    // Not done while a part of it still waits on the person's review.
+    // Not done while a part of it is still in review.
     const isPartInReview = childrenOf(items, item.id).some(one => one.kind !== 'task' && statusOf(items, one) === 'review')
     return isPartInReview ? 'review' : 'done'
   }
@@ -425,7 +427,7 @@ export function line(items: Item[], item: Item): string {
     item.assignee ? `@${item.assignee}` : '',
     item.due ? `due ${item.due}` : '',
     item.checklist?.length ? `${item.checklist.filter(c => c.done).length}/${item.checklist.length} checked` : '',
-    waitingOn(items, item).length ? `waiting on ${waitingOn(items, item).map(one => one.id).join(', ')}` : '',
+    waitingOn(items, item).length ? `blocked by ${waitingOn(items, item).map(one => one.id).join(', ')}` : '',
   ]
     .filter(Boolean)
     .join(', ')
@@ -440,8 +442,8 @@ export function outline(items: Item[], root: string | null = null): string {
 }
 
 /**
- * The work under a milestone or epic, as an agent starts it: each open task with its description and
- * checklist beneath its line, finished ones a line each. One show then holds the whole unit.
+ * The work under a milestone or epic, for an agent starting it: each open task's line followed by its
+ * description and checklist, and one line for each finished task. One `show` call then returns the whole unit.
  */
 export function workOutline(items: Item[], root: string): string {
   return rows(items, root)
@@ -460,7 +462,7 @@ export function workOutline(items: Item[], root: string): string {
 
 /**
  * Comments others left on an item since `reader` last opened it. Status and assignment changes are not
- * counted: the board already shows them by where the card sits and whose name is on it.
+ * counted: the board already shows them by the card's column and the name on it.
  */
 export const unread = (snap: Snapshot, id: string, reader: string) =>
   snap.activity.filter(
@@ -468,13 +470,13 @@ export const unread = (snap: Snapshot, id: string, reader: string) =>
   )
 
 /**
- * What `who`'s Undo takes back: their latest change still standing, every entry of the write it was
- * (its op). Undos are passed over, so pressing Undo again walks further back.
+ * What Undo reverts for `who`: their latest change that hasn't been undone, with every entry of the same
+ * write (its op). Undo entries are skipped, so pressing Undo again goes further back.
  */
 export function lastChange(snap: Snapshot, who: string): Activity[] {
   const mine = snap.activity.filter(one => one.author === who && !one.undone && one.type !== 'undo')
   const newest = mine.reduce<Activity | undefined>((max, one) => (!max || one.id > max.id ? one : max), undefined)
-  // One logged before undo existed can't be taken back, and Undo never skips it for an older one.
+  // A change logged before undo existed can't be undone, and Undo doesn't skip past it to an older one.
   if (!newest?.undoable) return []
   return newest.op ? mine.filter(one => one.op === newest.op && one.undoable).sort((a, b) => a.id - b.id) : [newest]
 }
@@ -491,7 +493,7 @@ export function detail(snap: Snapshot, item: Item, limit = 15, refs?: Refs): str
   if (where) parts.push(`in: ${where}`)
   const shipped = shipNote(snap, item, refs)
   if (shipped) parts.push(shipped.charAt(0).toUpperCase() + shipped.slice(1))
-  // Whoever picks the task up reads the last holder's note before anything else.
+  // The last holder's handoff note goes first, so whoever picks up the task reads it before anything else.
   const handoff = timeline(snap.activity, item.id).filter(one => one.type === 'handoff').at(-1)
   if (handoff) parts.push(`Handoff from ${handoff.author} (${handoff.at.slice(0, 16).replace('T', ' ')}):\n  ${handoff.body}`)
   if (item.description) parts.push(item.description)
@@ -514,8 +516,8 @@ export function detail(snap: Snapshot, item: Item, limit = 15, refs?: Refs): str
 }
 
 /**
- * The backlog to triage: todo tasks nobody holds, those filed under no milestone or epic first (they
- * still need a home), then by priority, then oldest first.
+ * The backlog to triage: unassigned todo tasks. Those under no milestone or epic come first (they still
+ * need to be placed), then by priority, then oldest first.
  */
 export const backlog = (items: Item[]): Item[] =>
   items
@@ -523,9 +525,9 @@ export const backlog = (items: Item[]): Item[] =>
     .sort((a, b) => Number(upOf(a) !== null) - Number(upOf(b) !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
 
 /**
- * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
- * unassigned todo tasks that wait on nothing unfinished, by priority, then due date, then others'
- * claims gone stale (given `now`), which a claim takes over.
+ * What `actor` should work on next: their own open tasks (blocked ones last), then unassigned todo tasks
+ * with no unfinished blockers, by priority and then due date, then other holders' expired claims (when
+ * `now` is given), which claiming takes over.
  */
 export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   const tasks = items.filter(item => item.kind === 'task')
@@ -535,7 +537,7 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   const free = tasks
     .filter(task => !task.assignee && task.status === 'todo' && !isWaiting(task))
     .sort((a, b) => byPriority(a, b) || due(a).localeCompare(due(b)) || byId(a, b))
-  // Work in review waits on the user, so it comes after everything an agent can move on itself.
+  // Work in review needs the user, so it comes after everything an agent can work on by itself.
   const rank: Record<Status, number> = { in_progress: 0, todo: 1, blocked: 2, review: 3, done: 4 }
   const stale = now === undefined ? [] : tasks.filter(task => task.assignee !== actor && isStale(task, now)).sort(byPriority)
   return [
@@ -546,8 +548,8 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
 }
 
 /**
- * The task in a milestone or epic for `actor` to start next: one they already have under way, else
- * the first free todo task that waits on nothing unfinished, as next orders them; never `besides`.
+ * The task in a milestone or epic for `actor` to start next: one they already have in progress, else the
+ * first unassigned todo task with no unfinished blockers, in the order `nextUp` gives; never `besides`.
  */
 export function readyIn(items: Item[], unit: Item, actor: string, besides?: string): Item | undefined {
   const under = new Set(tasksIn(items, unit).map(one => one.id).filter(id => id !== besides))
@@ -569,10 +571,10 @@ export function dueOf(items: Item[], item: Item): string | undefined {
 }
 
 /**
- * Where a milestone or epic sits on the roadmap's time axis: from its start, given or derived, to its
- * end, its due date (an epic's, else its milestone's). An epic without a start begins at its first claim
- * (the earliest claim or status change on its tasks), else when it was made; a milestone at the earliest
- * of what targets it, else when it was made. `isStartGiven` says which.
+ * Where a milestone or epic goes on the roadmap's time axis: from its start (set on it, or worked out) to
+ * its end, its due date (an epic's own, else its milestone's). An epic without a start begins at the
+ * earliest claim or status change on its tasks, else when it was created; a milestone at the earliest
+ * start of what targets it, else when it was created. `isStartGiven` is true when the start was set on it.
  */
 export function spanOf(snap: Snapshot, item: Item): { start: string; end?: string; isStartGiven: boolean } {
   const items = snap.items
@@ -602,10 +604,6 @@ export const isLate = (items: Item[], item: Item, now: number) => {
 /** Days from date `a` to date `b` (YYYY-MM-DD): negative when `b` is before `a`. */
 export const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000)
 
-/**
- * The timeline: milestones (and epics under none) by due date, soonest first and undated last, each
- * milestone followed by its epics in the same order.
- */
 /** A CHANGELOG's released versions, newest first as written: each with its date and the text under it. */
 export function changelogVersions(text: string): { version: string; date: string; body: string }[] {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
@@ -619,7 +617,7 @@ export function changelogVersions(text: string): { version: string; date: string
   return out
 }
 
-/** The tasks a release's notes carry: those whose note is in `body`, but not ones `taken` by another release. */
+/** The tasks in a release: those whose note appears in `body`, except ones `taken` by another release. */
 export function shippedIn(items: Item[], body: string, taken: Set<string> = new Set()): { id: string; note: string; section: Section | null }[] {
   return items
     .filter(task => task.kind === 'task' && hasNote(task) && !taken.has(task.id) && body.includes(task.note!))
@@ -629,15 +627,16 @@ export function shippedIn(items: Item[], body: string, taken: Set<string> = new 
 /** The release a task shipped in, from the record of releases. */
 export const releaseOf = (snap: Snapshot, id: string): Release | undefined => (snap.releases ?? []).find(one => one.tasks.some(task => task.id === id))
 
-/** Merged work no release carries yet: the tasks whose notes the next release would ship. */
+/** Merged work that isn't in a release yet: the tasks whose notes the next release would include. */
 export function unreleased(snap: Snapshot, refs: Refs): Item[] {
   const shipped = new Set((snap.releases ?? []).flatMap(one => one.tasks.map(task => task.id)))
   return mergedNotes(snap.items, refs).filter(task => !shipped.has(task.id))
 }
 
 /**
- * How an item stands against releases, in a few words, or undefined: a task "shipped in vX", or "merged,
- * not released" (given `refs`); a milestone how many of its noted tasks are out, and in which versions.
+ * An item's release status in a few words, or undefined. For a task: "shipped in vX", or "merged, not
+ * released" (when `refs` is given). For a milestone: how many of its tasks with notes are released, and
+ * in which versions.
  */
 export function shipNote(snap: Snapshot, item: Item, refs?: Refs): string | undefined {
   if (item.kind === 'task') {
@@ -653,7 +652,7 @@ export function shipNote(snap: Snapshot, item: Item, refs?: Refs): string | unde
   return `${out.length}/${noted.length} shipped (${versions.map(one => `v${one}`).join(', ')})`
 }
 
-/** The version to suggest for the next release after `last`: a patch when it only fixes, else a minor. */
+/** The version to suggest for the next release after `last`: a patch release when every note is a fix, else a minor one. */
 export function nextVersion(last: string | undefined, notes: Item[]): string {
   const [major, minor, patch] = versionOf(last) ?? [0, 0, 0]
   return notes.length > 0 && notes.every(task => sectionFor(task) === 'Fixed') ? `${major}.${minor}.${patch + 1}` : `${major}.${minor + 1}.0`
@@ -669,7 +668,7 @@ export const openFirst = (items: Item[], list: Item[]): Item[] => [
   ...list.filter(one => statusOf(items, one) === 'done'),
 ]
 
-/** The tree's rows: open work first at every level, and none under an item `isFolded` says is folded. */
+/** The tree's rows: open work first at every level, and no rows under an item for which `isFolded` is true. */
 export function treeRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
   const out: { item: Item; depth: number }[] = []
   const walk = (parent: string | null, depth: number) => {
@@ -687,7 +686,7 @@ export function treeRows(items: Item[], isFolded: (item: Item) => boolean): { it
   return out
 }
 
-/** The timeline's rows: `timelineOf`'s, open work first, a milestone's epics left out while it is folded. */
+/** The timeline's rows: `timelineOf`'s items, open work first, leaving out a milestone's epics while it is folded. */
 export function timelineRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
   const all = timelineOf(items)
   const tops = openFirst(items, all.filter(one => !find(items, upOf(one) ?? undefined)))
@@ -697,6 +696,10 @@ export function timelineRows(items: Item[], isFolded: (item: Item) => boolean): 
   ])
 }
 
+/**
+ * The timeline: milestones (and epics with no milestone) by due date, soonest first and undated last,
+ * each milestone followed by its epics in the same order.
+ */
 export function timelineOf(items: Item[]): Item[] {
   const byDue = (list: Item[]) => [...list].sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999') || byId(a, b))
   const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, upOf(one) ?? undefined)))
@@ -718,15 +721,15 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   const stale = now === undefined ? [] : tasks.filter(task => task.assignee !== actor && isStale(task, now))
   const active = tasks.filter(task => task.status === 'in_progress' && task.assignee !== actor && !stale.includes(task))
   const parts = [
-    'Project roadmap (roadmap tool). Claim before you start; keep it current as you go.',
+    'Project roadmap (roadmap tool). Claim a task before you start it, and keep the roadmap up to date as you work.',
   ]
   if (milestones.length) parts.push('Open milestones:\n' + list(milestones, 4))
   if (mine.length) parts.push(`Assigned to you (${actor}):\n` + list(mine))
   if (active.length) parts.push('In progress by others:\n' + list(active))
   if (stale.length)
-    parts.push(`Stale claims (holder silent over ${LEASE_MS / 60_000} min; claiming takes one over):\n` + list(stale))
+    parts.push(`Inactive claims (not renewed in over ${LEASE_MS / 60_000} min; claim one to take it over):\n` + list(stale))
   if (blocked.length) parts.push('Blocked:\n' + list(blocked))
-  // Dated items past their date: a milestone, epic or task with a due date of its own.
+  // Items past their due date: a milestone, epic or task with a due date of its own.
   const late = now === undefined ? [] : items.filter(item => item.due && isLate(items, item, now)).sort((a, b) => a.due!.localeCompare(b.due!))
   if (late.length) parts.push(`Overdue (past their due date, not done; today is ${dateOf(now!)}):\n` + list(late))
   if (review.length) {
@@ -734,14 +737,14 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
     const pr = (item: Item) => {
       if (!refs) return ''
       const open = refs.prs.find(one => one.state === 'open' && one.ids.includes(item.id))
-      return open ? ` — PR #${open.number} ${open.url}` : ' — no PR yet'
+      return open ? `, PR #${open.number} ${open.url}` : ', no PR yet'
     }
     parts.push(
-      "Waiting on the user's review (they approve on the board, or tell you to):\n" +
+      "Needs the user's review (they approve it on the board, or tell you it's approved):\n" +
         review.slice(0, 8).map(item => `- ${line(items, item)}${pr(item)}`).join('\n'),
     )
   }
-  // What a release would ship now: said so a "release" from the user finds it in hand.
+  // What a release would include now, listed so Claude already has it when the user asks for a release.
   const waiting = refs ? unreleased(snap, refs) : []
   if (waiting.length) parts.push(`Merged, not released yet: ${waiting.slice(0, 8).map(one => one.id).join(', ')}${waiting.length > 8 ? ` and ${waiting.length - 8} more` : ''}.`)
   if (news.length)
@@ -753,8 +756,8 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
 }
 
 /**
- * The turn that tells the agent who did `item` how the person's Approve on the board went: merged (or
- * approved without a merge), so it brings the checkout up to date; or a merge that failed, so it finds out why.
+ * The message telling the agent that did `item` how the person's Approve on the board went: merged (or
+ * approved without a merge), so the agent updates the checkout; or the merge failed, so the agent finds out why.
  */
 export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): string {
   const what = `roadmap ${item.kind} ${item.id} (${item.title})`
@@ -767,8 +770,8 @@ export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): 
   if (pr && pr.base && !isMainLine(pr.base))
     return (
       `The user approved ${what} on the board and merged PR #${pr.number} (branch ${pr.branch}) into ${pr.base}, not into main. ` +
-      `Its work reaches main only when ${pr.base} does. Pull ${pr.base}, delete the local branch ${pr.branch}, keep the checkout on the ` +
-      'top of what is still open (the user runs the mod from it), and say what is left to merge, in order.'
+      `Its changes reach main only when ${pr.base} is merged into main. Pull ${pr.base}, delete the local branch ${pr.branch}, keep the checkout on the ` +
+      'top branch of what is still open (the user runs the plugin from it), and say what is left to merge, in order.'
     )
   if (pr)
     return (
@@ -779,17 +782,17 @@ export function approvalNote(item: Item, pr: Pr | undefined, failure?: string): 
   return `The user approved ${what} on the board; it is done. No pull request was merged with it. Say in a line or two what is next on the roadmap.`
 }
 
-/** The agent type a task run in parallel goes to, and the most such agents working at once. */
+/** The agent type that runs a parallel task, and the most of those agents that can work at once. */
 export const WORKER_TYPE = 'general-purpose'
 export const WORKERS_MAX = 4
 
-/** What a parallel task's agent is spawned as: its task, by id and title. */
+/** The description a parallel task's agent is started with: its task's id and title. */
 export const workerTask = (task: Item) => `${task.id} ${task.title}`
 
-/** The name a parallel task's agent goes by on the board, as its own calls will be named. */
+/** The name a parallel task's agent has on the board, which matches the name its own tool calls use. */
 export const workerName = (task: Item) => agentName(WORKER_TYPE, workerTask(task))
 
-/** The first turn of a parallel task's agent, which starts in the worktree made for it, on its branch. */
+/** The first message to a parallel task's agent, which starts in the worktree made for it, on its branch. */
 export function workerPrompt(task: Item, branch: string, dir: string): string {
   return [
     `You are working roadmap task ${task.id}: ${task.title}. The user handed out several tasks to run at once, each to its own agent in its own git worktree.`,
@@ -802,15 +805,15 @@ export function workerPrompt(task: Item, branch: string, dir: string): string {
   ].join('\n')
 }
 
-/** A parallel task's prompt, recognised as the main loop's Agent call passes it on: the task and its worktree. */
+/** Recognizes a parallel task's prompt when the main session's Agent call passes it on, and returns the task id and worktree. */
 export function workerOf(prompt: string): { id: string; dir: string } | undefined {
   const found = /^You are working roadmap task (\w+):[\s\S]*?\nYour worktree is (.+?), already on branch /.exec(prompt)
   return found ? { id: found[1]!, dir: found[2]! } : undefined
 }
 
 /**
- * The turn asking the main loop to start parallel tasks: agents a plugin spawns can't call the plugin's
- * own tool, so the main loop's Agent tool starts them, each prompt passed on as written.
+ * The message asking the main session to start parallel tasks. Agents a plugin starts can't call the
+ * plugin's own tool, so the main session starts them with its Agent tool, passing each prompt on as written.
  */
 export function workersNote(work: { task: Item; prompt: string }[]): string {
   return [
@@ -821,10 +824,10 @@ export function workersNote(work: { task: Item; prompt: string }[]): string {
   ].join('\n\n')
 }
 
-/** The prompt Ask Claude puts in the box for the person to finish: which item, by id and title. */
+/** The text Ask Claude puts in the prompt box for the person to finish: which item, by id and title. */
 export const askAbout = (item: Item) => `About roadmap ${item.kind} ${item.id} (${item.title}): `
 
-/** The turn a comment starts when the person sends it to the agent holding the item. */
+/** The message sent when the person sends a comment to the agent holding the item. */
 export function commentNote(item: Item, body: string): string {
   const what = `roadmap ${item.kind} ${item.id} (${item.title})`
   return item.assignee === CLAUDE
@@ -849,7 +852,7 @@ export const unitOf = (items: Item[], item: Item): Item => handedScope(items, it
 /** The branch a unit of work is built on: its id and title, as `e9-agent-coordination`. */
 export const branchFor = (item: Item) => `${item.id.toLowerCase()}-${slug(item.title, 40)}`.replace(/-$/, '')
 
-/** A unit's pull request: titled with its id, the body listing what was done and what done meant. */
+/** A unit's pull request: titled with its id, with a body listing what was done and its acceptance criteria. */
 export function pullRequest(items: Item[], item: Item): { branch: string; title: string; body: string } {
   const tasks = item.kind === 'task' ? [item] : tasksIn(items, item)
   const parts: string[] = []
@@ -909,7 +912,7 @@ export function parseGitLog(out: string): Commit[] {
 
 type CheckEntry = { status?: string; conclusion?: string; state?: string }
 
-/** A rollup of check runs and status contexts as one word: a failure wins, then anything unfinished. */
+/** A rollup of check runs and status contexts as one word: any failure gives `fail`, then anything unfinished gives `pending`. */
 export function checksOf(rollup: CheckEntry[] | null | undefined): Checks {
   const list = rollup ?? []
   if (list.length === 0) return 'none'
@@ -927,7 +930,7 @@ export function parsePrs(out: string): Pr[] {
       number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
       ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup), branch: pr.headRefName, base: pr.baseRefName ?? '',
     }))
-    // Those naming items, and release PRs, which the record of releases names.
+    // Keep PRs that name items, and release PRs (the record of releases refers to them).
     .filter(pr => pr.ids.length > 0 || pr.branch.startsWith('release-v'))
 }
 
@@ -937,15 +940,15 @@ export const openPrOf = (refs: Refs, item: Item): Pr | undefined =>
 
 /**
  * The open pull request `pr` is stacked on: the one whose branch it merges into. Merging `pr` first would
- * land it in that branch, not in main, so that one goes first.
+ * put its changes into that branch, not into main, so that one has to be merged first.
  */
 export const stackedOn = (refs: Refs, pr: Pr): Pr | undefined =>
   pr.base ? refs.prs.find(one => one.state === 'open' && one.number !== pr.number && one.branch === pr.base) : undefined
 
 /**
  * The stack `pr` is the bottom of: it, then each open PR based on the branch of the one before (the
- * lowest-numbered where two are), up to the top. Just `[pr]` when nothing is stacked on it, or when it
- * is itself stacked on another open PR (only a stack's bottom merges it).
+ * lowest-numbered when there are two), up to the top. Just `[pr]` when nothing is stacked on it, or when
+ * it is itself stacked on another open PR (only the bottom PR of a stack can merge the stack).
  */
 export function stackFrom(refs: Refs, pr: Pr): Pr[] {
   if (stackedOn(refs, pr)) return [pr]
@@ -974,8 +977,8 @@ export function stackBelow(refs: Refs, pr: Pr): Pr[] {
 export const stackText = (stack: Pr[]) => stack.map(pr => `#${pr.number}`).join(' ← ')
 
 /**
- * The turn telling Claude how merging a stack from the board went: all merged into `base`, so it brings
- * the checkout up to date; or stopped at a PR, with why, so it finds out and fixes what it can.
+ * The message telling Claude how merging a stack from the board went: all merged into `base`, so Claude
+ * updates the checkout; or it stopped at a PR, with the reason, so Claude finds out why and fixes what it can.
  */
 export function stackNote(stack: Pr[], merged: Pr[], base: string, failure?: { at: Pr; why: string }): string {
   const done = merged.length ? `merged ${merged.map(pr => `#${pr.number} (${pr.branch})`).join(', ')} into ${base}` : 'merged none of it'
@@ -1022,17 +1025,17 @@ export function refsText(found: Refs, limit = 8): string {
   return parts.join('\n')
 }
 
-/** What git says of the database's path: ignored, tracked-or-not-ignored, or no repository here. */
+/** What git reports about the database's path: ignored, not ignored (tracked or not), or no repository here. */
 export type IgnoreState = 'ignored' | 'not-ignored' | 'no-repo'
 
 /** `git check-ignore -q` exits 0 for an ignored path, 1 for one that is not, 128 outside a repository. */
 export const ignoreState = (exitCode: number): IgnoreState =>
   exitCode === 0 ? 'ignored' : exitCode === 1 ? 'not-ignored' : 'no-repo'
 
-/** Where the offer stands, per project: absent until first made, `told` until the person answers it. */
+/** The state of the offer to add the database to .gitignore, per project: absent until it is first made, `told` until the person answers it. */
 export type IgnoreAnswer = 'told' | 'added' | 'dismissed'
 
-/** The offer stands only in a repository that doesn't ignore the database, to someone who hasn't turned it down. */
+/** Make the offer only in a repository that doesn't ignore the database, to someone who hasn't turned it down. */
 export const shouldOfferIgnore = (state: IgnoreState, answer: IgnoreAnswer | undefined) =>
   state === 'not-ignored' && answer !== 'dismissed'
 
@@ -1048,7 +1051,7 @@ export function ancestors(dir: string): string[] {
 export function noRoadmapHere(dir: string, found: string[]): string {
   const why = `No roadmap here, and none was started: ${dir} is not the top of a git repository, so a new one would be in the wrong place.`
   if (found.length === 0)
-    return `${why} Start the session in the project's folder (its git top level; git init it first if it has none) and the first write starts its roadmap there.`
+    return `${why} Start the session in the project's folder (its git top level; run git init there first if it has none), and the roadmap will be created there on the first write.`
   return `${why} Roadmaps found below it: ${found.join(', ')}. Start the session in the project's folder (cd there and run claude) to use its roadmap.`
 }
 
@@ -1075,14 +1078,14 @@ export function mergedNotes(items: Item[], refs: Refs): Item[] {
       // not while a milestone or epic it ships in is still under way on its branch.
       return prs.some(pr => pr.state === 'merged') || (prs.length === 0 && statusOf(items, unit) === 'done')
     })
-    // Newest first, as a CHANGELOG reads.
+    // Newest first, the order a CHANGELOG uses.
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || Number(b.id.slice(1)) - Number(a.id.slice(1)))
 }
 
 /**
  * A CHANGELOG's text with `notes` added under `## [Unreleased]`, each in its section, newest first, as
  * Keep a Changelog lays it out; the heading and sections are made when missing. A note already in the
- * file is left out. Answers the text and the notes that went in.
+ * file is left out. Returns the text and the notes that were added.
  */
 export function withNotes(text: string | undefined, notes: { section: Section; note: string }[]): { text: string; added: string[] } {
   const before = text ?? ''
@@ -1148,8 +1151,8 @@ export const webOf = (remote: string) =>
 
 /**
  * A CHANGELOG with its [Unreleased] section cut as `version`, dated `date`, under a fresh empty
- * [Unreleased], and its links pointing [Unreleased] at what comes after the version's tag. Answers the
- * text and the version's notes (what [Unreleased] held), or throws when there is nothing to release.
+ * [Unreleased], and its links pointing [Unreleased] at what comes after the version's tag. Returns the
+ * text and the version's notes (what was under [Unreleased]), or throws when there is nothing to release.
  */
 export function cutRelease(text: string, version: string, date: string, web: string): { text: string; notes: string } {
   const lines = text.replace(/\r\n/g, '\n').split('\n')
@@ -1161,7 +1164,7 @@ export function cutRelease(text: string, version: string, date: string, web: str
   const notes = lines.slice(start + 1, end).join('\n').trim()
   if (!notes) throw new Error('nothing is under [Unreleased] in the CHANGELOG; there is nothing to release')
   lines.splice(start, 1, '## [Unreleased]', '', `## [${version}] - ${date}`)
-  // The links: [Unreleased] now compares against this version's tag, which gets one of its own.
+  // The links: [Unreleased] now compares against this version's tag, and the version gets a link of its own.
   const ours = [`[Unreleased]: ${web}/compare/v${version}...HEAD`, `[${version}]: ${web}/releases/tag/v${version}`]
   const old = lines.findIndex(line => /^\[unreleased\]: /i.test(line))
   if (old >= 0) lines.splice(old, 1, ...ours)

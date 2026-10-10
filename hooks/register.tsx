@@ -34,21 +34,21 @@ const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
 const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
 // Where each tab is scrolled to, in rows (a wide board's columns, in cards).
 const viewScrolled = atom({ plugin: 'roadmap', key: 'viewScrolled' } as const, {} as Record<string, number>)
-// With a card docked under the list, which one the wheel last moved: the card when it opens.
+// With a card docked under the list, which of the two the mouse wheel last scrolled (the card, when it opens).
 const region = atom({ plugin: 'roadmap', key: 'region' } as const, 'card' as 'list' | 'card')
 // The list's rows over a docked card, as set with the divider; null sizes them by the card.
 const split = atom({ plugin: 'roadmap', key: 'split' } as const, null as number | null)
-// Just opened, the docked list keeps the open item's row in sight, until the wheel moves the list.
+// Just after a card opens, the docked list keeps the open item's row in view until the wheel scrolls the list.
 const revealing = atom({ plugin: 'roadmap', key: 'revealing' } as const, false)
 // Where the docked list's frame ends, in body rows, as last drawn.
 let listEnd = 0
-// Where the tab showing is scrolled to, as last drawn (kept in sight of the open item, it may differ from the atom).
+// Where the current tab is scrolled to, as last drawn (kept on the open item's row, so it may differ from the atom).
 let viewScrollAt = 0
-// How far the tab showing can scroll, as last drawn.
+// How far the current tab can scroll, as last drawn.
 let viewScrollMax = 0
 // The inbox item whose row asks where it goes (Into…) or why it's dropped (Drop…).
 const triaging = atom({ plugin: 'roadmap', key: 'triaging' } as const, null as { id: string; mode: 'into' | 'drop' } | null)
-// The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
+// The milestones and epics folded differently from the default (by default a finished one is folded, an open one is not).
 const flipped = atom({ plugin: 'roadmap', key: 'flipped' } as const, [] as string[])
 // Whether the board's Done column shows all done work rather than the recent.
 const doneOpen = atom({ plugin: 'roadmap', key: 'doneOpen' } as const, false)
@@ -56,18 +56,18 @@ const doneOpen = atom({ plugin: 'roadmap', key: 'doneOpen' } as const, false)
 const draft = atom({ plugin: 'roadmap', key: 'draft' } as const, null as Draft | null)
 // Whether the open card shows its fields for editing.
 const editing = atom({ plugin: 'roadmap', key: 'editing' } as const, false)
-// The item waiting on a yes before it is handed to Claude.
+// The item the person is asked to confirm before it is handed to Claude.
 const handing = atom({ plugin: 'roadmap', key: 'handing' } as const, null as string | null)
-// The item waiting on a yes before it is approved and its pull request merged.
+// The item the person is asked to confirm before it is approved and its pull request merged.
 const merging = atom({ plugin: 'roadmap', key: 'merging' } as const, null as string | null)
 // The task just set done on the board, whose card asks for its release note.
 const noting = atom({ plugin: 'roadmap', key: 'noting' } as const, null as string | null)
 // The task whose card asks why it is dropped (won't do).
 const dropping = atom({ plugin: 'roadmap', key: 'dropping' } as const, null as string | null)
-// The item whose card waits on a yes before merging its stack of PRs, and the run's progress while one goes.
+// The item whose card asks the person to confirm merging its stack of PRs, and the progress of a merge while it runs.
 const stacking = atom({ plugin: 'roadmap', key: 'stacking' } as const, null as string | null)
 const stackRun = atom({ plugin: 'roadmap', key: 'stackRun' } as const, '')
-// Backlog rows picked to run in parallel, and the tasks waiting on a yes before they are handed out.
+// Backlog rows picked to run in parallel, and the tasks the person is asked to confirm before they are handed out.
 const picked = atom({ plugin: 'roadmap', key: 'picked' } as const, [] as string[])
 const parallelAsk = atom({ plugin: 'roadmap', key: 'parallelAsk' } as const, null as string[] | null)
 // Whether a comment on an agent's card starts a turn at once; the person's setting, kept across sessions.
@@ -103,8 +103,8 @@ async function root($: EngineInterface): Promise<string> {
 
 async function homeFor($: EngineInterface, session: string) {
   const isThere = (path: string) => $.fs.stat(path).then(() => true, () => false)
-  // The repository's top is the nearest folder up holding .git (a folder, or a worktree's file): asked
-  // of the file system, not git, so a project without a roadmap runs nothing.
+  // The repository's top is the nearest folder up that holds .git (a folder, or a worktree's file). This
+  // checks the file system instead of running git, so a project without a roadmap runs no commands.
   let top: string | undefined
   for (const dir of ancestors(session)) if (await isThere(`${dir}/.git`)) {
     top = dir
@@ -115,7 +115,7 @@ async function homeFor($: EngineInterface, session: string) {
   return { session, dir: top, isRepoTop: true }
 }
 
-/** Roadmaps in the folders one and two levels below `dir`, for a refusal to point at. */
+/** Roadmaps in the folders one and two levels below `dir`, to list in the error when none can be started here. */
 async function roadmapsBelow($: EngineInterface, dir: string, depth = 2): Promise<string[]> {
   const subs = (await $.fs.list(dir).catch(() => []))
     .map(one => one.name)
@@ -131,7 +131,7 @@ async function roadmapsBelow($: EngineInterface, dir: string, depth = 2): Promis
   return found
 }
 
-// Where this load started a new roadmap, said once in the reply to the write that started it.
+// Where this load started a new roadmap, reported once in the reply to the write that started it.
 let startedAt: string | undefined
 
 /** Runs a command in the project root. */
@@ -149,7 +149,7 @@ const GH_EVERY = 120_000
 
 /**
  * Re-reads the commits (and, where gh is installed and signed in, the pull requests) that name task ids.
- * Not a git repository, no gh, no network: each just comes back empty.
+ * If this isn't a git repository, or gh or the network is missing, that list is just empty.
  */
 async function refreshRefs($: EngineInterface, isForced = false) {
   const now = await $.clock.now()
@@ -174,7 +174,7 @@ async function refreshRefs($: EngineInterface, isForced = false) {
   }
   let stable = current.stable
   if (isRemoteTime) {
-    // The version installs get: the tag the stable branch's head carries.
+    // The version that installs get: the version tag on the stable branch's latest commit.
     const head = (await runAt($, ['git', 'ls-remote', '--heads', 'origin', 'stable'], { timeoutMs: 15_000 }).catch(() => undefined))?.stdout.split(/\s/)[0]
     const tags = head ? (await runAt($, ['git', 'tag', '--points-at', head]).catch(() => undefined))?.stdout ?? '' : ''
     stable = tags.split('\n').map(one => one.trim()).find(one => /^v\d+\.\d+\.\d+$/.test(one))?.slice(1)
@@ -202,17 +202,17 @@ async function actorFor($: EngineInterface, agentId: string | undefined, as: str
   const known = agentNames.get(agentId)
   if (known) return known
   const info = (await $.agent.list().catch(() => [])).find(one => one.id === agentId)
-  // Kept either way: an agent's name holds for its whole run, and the list isn't asked on every tool call.
+  // Cached either way: an agent's name doesn't change during its run, and the list shouldn't be fetched on every tool call.
   const name = info ? agentName(info.type, info.description, info.teammateId) : `agent-${agentId.slice(0, 8)}`
   agentNames.set(agentId, name)
   return name
 }
 
-// When each actor's leases were last renewed, so a busy agent renews at most every RENEW_EVERY.
+// When each actor's claims were last renewed, so a busy agent renews them at most every RENEW_EVERY.
 const renewedAt = new Map<string, number>()
 const RENEW_EVERY = 5 * 60_000
 
-/** Renews `actor`'s leases, unless done within RENEW_EVERY (or `isForced`), in a project with a roadmap. */
+/** Renews `actor`'s claims so they don't expire, unless done within RENEW_EVERY (or `isForced`), in a project with a roadmap. */
 async function heartbeat($: EngineInterface, actor: string, isForced = false) {
   const now = await $.clock.now()
   if (!isForced && now - (renewedAt.get(actor) ?? 0) < RENEW_EVERY) return
@@ -227,7 +227,7 @@ async function heartbeat($: EngineInterface, actor: string, isForced = false) {
 type Target = { path: string; writes?: string[] }
 const REAL: Target = { path: db.DB }
 
-/** Runs one script through sqlite3 and answers what its last statement printed. */
+/** Runs one script through sqlite3 and returns what its last statement printed. */
 async function run($: EngineInterface, script: string, t: Target = REAL): Promise<string> {
   const ran = await runAt($, db.argvFor(t.path), { stdin: script }).catch(async (err: unknown) => {
     // A command that cannot start rejects; tell a missing sqlite3 apart from, say, a timeout.
@@ -261,8 +261,8 @@ async function ensureSchema($: EngineInterface) {
 
 async function sql($: EngineInterface, script: string, t: Target = REAL): Promise<string> {
   if (!hasDir && !(await hasDb($))) {
-    // The first write makes the roadmap, and only where one plainly belongs: a repository's top level.
-    // Asked afresh: a `git init` since the session began makes the root a place for one.
+    // The first write creates the roadmap, but only at the top level of a git repository. Checked again
+    // here, since a `git init` after the session began can make the root a valid place for one.
     home = await homeFor($, await sessionRoot($))
     const dir = home.dir
     if (!home.isRepoTop) throw new Error(noRoadmapHere(dir, await roadmapsBelow($, dir)))
@@ -272,7 +272,7 @@ async function sql($: EngineInterface, script: string, t: Target = REAL): Promis
   }
   hasDir = true
   if (!isSchemaReady) await ensureSchema($)
-  // Every write is a transaction of its own, begun so; reads are not kept.
+  // Every write is its own transaction and starts with BEGIN; reads are not recorded.
   if (t.writes && script.startsWith('BEGIN')) t.writes.push(script)
   return run($, script, t)
 }
@@ -287,11 +287,11 @@ async function fileAt($: EngineInterface, path: string): Promise<string> {
 const hasDb = async ($: EngineInterface) => $.fs.stat(await inProject($, db.DB)).then(() => true, () => false)
 
 async function refresh($: EngineInterface, t: Target = REAL): Promise<Snapshot> {
-  // A batch's trial copy is read for its own sake: the board goes on showing the database.
+  // Reading a batch's trial copy doesn't update the board, which keeps showing the real database.
   if (t !== REAL) return db.parseLoad(await sql($, db.load(USER), t))
   try {
     if (!(await hasDb($))) {
-      // Dormant: a project that never used the roadmap gets no file, no folder and no sqlite3.
+      // A project that never used the roadmap gets no file, no folder and no sqlite3 process.
       const empty = emptySnapshot()
       await update($, snapshot, () => empty)
       await update($, problem, () => null)
@@ -318,8 +318,8 @@ async function answerIgnore($: EngineInterface, answer: IgnoreAnswer) {
 }
 
 /**
- * Once the database exists, asks git whether it is ignored. A binary database in a commit is a merge
- * conflict waiting to happen, so where it isn't, the board offers to add it; nothing is written unasked.
+ * Once the database exists, asks git whether it is ignored. A binary database in a commit easily causes
+ * merge conflicts, so when it isn't ignored, the board offers to add it. Nothing is written unless the person agrees.
  */
 async function checkIgnore($: EngineInterface) {
   isIgnoreChecked = true
@@ -328,7 +328,7 @@ async function checkIgnore($: EngineInterface) {
   const answer = (await ignoreAnswers($))[await root($)]
   const isOffered = shouldOfferIgnore(ignoreState(ran.exitCode), answer)
   await update($, ignoreOffer, () => isOffered)
-  // Said once per project: after that the offer waits on the board until answered.
+  // The toast shows once per project; after that the offer stays on the board until the person answers it.
   if (isOffered && answer === undefined) {
     $.ui.toast(`roadmap: ${db.DB} isn't in .gitignore. Open /roadmap to add it.`, { timeoutMs: 8000 })
     await answerIgnore($, 'told')
@@ -350,7 +350,7 @@ async function dismissIgnore($: EngineInterface) {
 }
 
 // Automatic backups: a JSON export outside the checkout, when the roadmap changed, at most every
-// BACKUP_EVERY; the newest BACKUPS_KEPT are kept. The newest timeline entry names what a backup holds.
+// BACKUP_EVERY; the newest BACKUPS_KEPT are kept. Each backup's file name ends with the id of the newest timeline entry it holds.
 const BACKUP_EVERY = 10 * 60_000
 const BACKUPS_KEPT = 20
 let backedAt = -Infinity
@@ -432,15 +432,15 @@ async function poll($: EngineInterface) {
     isSchemaReady = false
     await refresh($)
   }
-  // Without a roadmap there is nothing to link commits to, so git and gh aren't asked.
+  // Without a roadmap there is nothing to link commits to, so git and gh aren't run.
   if (stamps[0] === '-') return
   // Parallel tasks whose blockers are now done start.
   await startQueued($).catch(() => undefined)
-  // A backup that fails (no home, a full disk) never stops the board.
+  // A failed backup (no home folder, a full disk) never stops the board.
   await backup($).catch(() => undefined)
   if (!isIgnoreChecked) await checkIgnore($)
   const known = await refreshRefs($)
-  // Never stands in the way of the board: a history that can't be read is left for another load.
+  // A failure here never stops the board: a history that can't be read is tried again on the next load.
   if (!isHistoryChecked) await fillReleases($, known).catch(() => undefined)
 }
 
@@ -524,36 +524,36 @@ function said(notes: string[]): string[] {
 }
 
 /**
- * Claims task `it` for `actor`, answering with all it takes to start cold: the task as it stands, its
- * notes and the work already committed. Inside a unit taken whole, `unit` answers with that unit's
- * detail in place of the task's, since it holds every task.
+ * Claims task `it` for `actor` and returns everything needed to start on it with no other context: the
+ * task as it stands, its notes and the work already committed. Inside a unit taken whole, the reply shows
+ * `unit`'s details instead of the task's, since they include every task.
  */
 async function claimTask($: EngineInterface, actor: string, snap: Snapshot, it: Item, force: boolean, t: Target, unit?: Item): Promise<string> {
   const waiting = waitingOn(snap.items, it)
   if (waiting.length && !force)
-    fail(`${it.id} waits on ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
+    fail(`${it.id} is blocked by ${waiting.map(one => `${one.id} (${one.status})`).join(', ')}; finish those first, or pass force: true`)
   const holder = (await sql($, db.claim(actor, it.id, force, it.assignee, it.status), t)) || null
-  const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${force ? '' : ', whose claim had gone stale'}.` : ''
+  const tookOver = it.assignee && it.assignee !== actor ? ` Took it over from ${it.assignee}${force ? '' : ', whose claim was inactive'}.` : ''
   if (holder !== actor) fail(`${it.id} is held by ${holder}; leave it, or pass force: true if they handed it to you`)
   const after = await withHistory($, await refresh($, t), it.id, t)
-  // Commits are extra context: a repository that can't be asked leaves them out, not the claim.
+  // Commits are extra context: if git can't be read, the reply leaves them out and the claim still goes through.
   const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
   const now = find(after.items, it.id) ?? it
   const linked = refsText(refsFor(after.items, known, now))
   const home = unitOf(after.items, now)
   const where = `\nWork on branch ${branchFor(home)}${home.id === it.id ? '' : ` (${home.id}'s, which this task ships in)`}: switch to it, or create it from the branch you're building on. Commit as "${it.id}: …".`
-  // Of the history, only what people said matters to starting: who created it and when is the board's.
+  // To start work, only the comments in the history matter; who created the item and when is for the board.
   const spoken = { ...after, activity: after.activity.filter(isMessage) }
   if (!unit) return `${it.id} is yours (${actor}), in progress.${tookOver}${where}\n\n${detail(spoken, now, 10)}${linked ? `\n${linked}` : ''}`
-  // The unit's detail carries the task's description and checklist; only a handoff note is the task's own.
+  // The unit's details already include the task's description and checklist; only the task's handoff note is added.
   const handoff = timeline(after.activity, it.id).filter(one => one.type === 'handoff').at(-1)
   const note = handoff ? `\nHandoff on ${it.id} from ${handoff.author}: ${handoff.body}` : ''
   return `${it.id} is yours, in progress.${tookOver}${where}${note}${linked ? `\n${linked}` : ''}\n\n${detail(spoken, find(after.items, unit.id) ?? unit, 5)}`
 }
 
 /**
- * Takes a milestone or epic handed over whole: `actor` holds it, so its tasks close as they go and it
- * goes to review once, and the first task ready in it is claimed. One call starts the unit.
+ * Takes a milestone or epic handed over whole: `actor` holds it, so its tasks close as they are finished,
+ * it goes to review once, and the first ready task in it is claimed. One call starts the unit.
  */
 async function takeUnit($: EngineInterface, actor: string, snap: Snapshot, unit: Item, force: boolean, t: Target): Promise<string> {
   if (isAgent(unit.assignee) && unit.assignee !== actor && !force)
@@ -568,7 +568,7 @@ async function takeUnit($: EngineInterface, actor: string, snap: Snapshot, unit:
   const task = readyIn(held.items, now, actor)
   if (task) return `${head}\n${await claimTask($, actor, held, task, false, t, now)}`
   const left = progress(held.items, now)
-  const why = left.done === left.total ? 'all its tasks are done' : 'its open tasks are held by others or wait on unfinished work'
+  const why = left.done === left.total ? 'all its tasks are done' : 'its open tasks are held by others or blocked by unfinished work'
   return `${head} Nothing in it to start: ${why}.\n\n${detail({ ...held, activity: held.activity.filter(isMessage) }, now, 5)}`
 }
 
@@ -645,7 +645,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     case 'add': {
       if (!a.kind || !KINDS.includes(a.kind)) fail(`kind must be one of ${KINDS.join(', ')}`)
       if (!a.title?.trim()) fail('title is required')
-      if (a.blocked_by !== undefined && a.kind !== 'task') fail('Only tasks wait on other tasks')
+      if (a.blocked_by !== undefined && a.kind !== 'task') fail('Only tasks can be blocked by other tasks')
       // All checked before the insert (links against a placeholder id no existing item has), so a call
       // that fails leaves nothing behind for a retry to duplicate.
       const blockers = a.blocked_by === undefined ? [] : checkBlockers(snap.items, '\u0000new', idList(a.blocked_by))
@@ -724,7 +724,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
           `${it.id} has no release note. Send status done again with note: one line for the CHANGELOG, saying what changed for ` +
             `whoever uses the project (and section: ${SECTIONS.join(', ')}; ${sectionFor(it)} by default); or note: "-" when the work needs no line (tests, refactors).`,
         )
-      // An agent's done waits on the user's approval in review; the person's own is final. Inside a
+      // An agent's done goes to review for the user's approval; the person's own is final. Inside a
       // milestone or epic handed over whole, a task's done is final too: the review comes once, on that.
       const scope = it.kind === 'task' ? handedScope(snap.items, it) : undefined
       const isToReview = a.status === 'done' && actor !== USER && !a.approved && !scope
@@ -732,7 +732,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       if (isToReview && it.kind !== 'task' && left.done < left.total)
         fail(`${it.id} closes when its tasks are done; finish those (they close as you go when ${it.id} is assigned to you)`)
       // Every argument checked before the first write, so a call that fails changes nothing.
-      if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks wait on other tasks')
+      if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks can be blocked by other tasks')
       const place = a.parent === undefined ? undefined : placeOf(snap.items, it.kind, a.parent, it.id)
       const target = a.milestone === undefined ? undefined : checkTarget(snap.items, it.kind, a.milestone)
       const blockers = a.blocked_by === undefined ? undefined : checkBlockers(snap.items, it.id, idList(a.blocked_by))
@@ -756,7 +756,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         // Back to work (todo, in progress, blocked), a dropped task is no longer won't do.
         resolution: wontdo !== undefined ? 'wontdo' : it.resolution && a.status && !['done', 'review'].includes(a.status) ? null : undefined,
       })
-      // One script, one transaction: the update lands whole or not at all.
+      // One script in one transaction: the whole update is written, or none of it.
       const parts = [
         wontdo === undefined ? undefined : { script: db.comment(actor, it.id, `Won't do: ${wontdo}`), notes: [] as string[] },
         ticks.length ? db.check(actor, it, ticks, true) : undefined,
@@ -769,10 +769,10 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const all = db.atomic([script, ...parts.map(part => part.script)])
       if (all) await sql($, all, t)
       notes.push(...parts.flatMap(part => part.notes))
-      if (isToReview && isDropped) notes.push("waiting on the user's approval to drop it. They approve on the board; pass approved: true only when they tell you in chat")
+      if (isToReview && isDropped) notes.push("needs the user's approval to drop it. They approve on the board; pass approved: true only when they tell you in chat")
       else if (isToReview) {
-        notes.push("waiting on the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
-        // The review point is where its pull request opens: one per unit of work handed over.
+        notes.push("needs the user's approval. They approve on the board; pass approved: true only when they tell you in chat")
+        // Its pull request opens when it goes to review: one per unit of work handed over.
         const pr = pullRequest(snap.items, it)
         notes.push(
           `Now open its pull request, if it has none: push branch ${pr.branch}, then gh pr create --title "${pr.title}" ` +
@@ -786,11 +786,11 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         const task = readyIn(after.items, unit, actor, it.id)
         if (task) return `${it.id}: ${said(notes).join('; ')}\nNext in ${unit.id}: ${await claimTask($, actor, after, task, false, t)}`
         const left = progress(after.items, unit)
-        if (left.done < left.total) notes.push(`nothing else in ${unit.id} is ready: its open tasks are held by others or wait on unfinished work`)
+        if (left.done < left.total) notes.push(`nothing else in ${unit.id} is ready: its open tasks are held by others or blocked by unfinished work`)
         else {
           const pr = pullRequest(after.items, unit)
           notes.push(
-            `that was the last task in ${unit.id}, which now waits on the user's review. Open its pull request, if it has none: push branch ${pr.branch}, ` +
+            `that was the last task in ${unit.id}, which now goes to the user for review. Open its pull request, if it has none: push branch ${pr.branch}, ` +
               `then gh pr create --title "${pr.title}" with the body from the pr action (pr ${unit.id})`,
           )
         }
@@ -806,7 +806,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
     }
     case 'release': {
       const it = need()
-      // The note goes in first, so the timeline reads: what was left, then who let go.
+      // The note is written first, so the timeline shows the handoff note before the release.
       if (a.body?.trim()) await sql($, db.comment(actor, it.id, a.body.trim(), 'handoff'), t)
       const { script } = db.change(actor, it, letGo(it))
       if (script) await sql($, script, t)
@@ -897,7 +897,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       return `Imported ${rows.items?.length ?? 0} item(s) and ${rows.activity?.length ?? 0} timeline entries from ${a.path!.trim()}.`
     }
     case 'changelog': {
-      // Merged work: what a merged PR (or none, on the main line) shipped; never what is still open.
+      // Only merged work: tasks in a merged PR, or committed to the main line without one; never open work.
       const known = await refreshRefs($, true).catch(() => ({ commits: [], prs: [] }) as Refs)
       const notes = mergedNotes(snap.items, known).map(task => ({ section: sectionFor(task), note: task.note! }))
       const path = a.path?.trim() || 'CHANGELOG.md'
@@ -959,7 +959,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const ids = subtree(snap.items, it.id)
       if (ids.length > 1 && !a.cascade)
         fail(`${it.id} has ${ids.length - 1} item(s) under it; pass cascade: true to remove them too`)
-      // What it held, kept with the removal so an undo can put it all back; nobody may write in between.
+      // Everything removed is saved with the removal so an undo can restore it; the write fails if anyone wrote in between.
       const stamp = await sql($, db.STAMP, t)
       const rows = JSON.parse(await sql($, db.dump(ids), t)) as db.Rows
       const body = `removed ${it.kind} “${it.title}”${ids.length > 1 ? ` and the ${ids.length - 1} item(s) under it` : ''}`
@@ -1005,7 +1005,7 @@ async function undo($: EngineInterface, actor: string, ids: number[], t: Target 
 // The manifests whose version a release sets, those the project has.
 const MANIFESTS = ['.claude-plugin/plugin.json', 'package.json']
 
-/** Runs git in the project; one that cannot start answers as a failure. */
+/** Runs git in the project; if git cannot start, this returns a failure. */
 const git = async ($: EngineInterface, args: string[]): Promise<Ran> =>
   runAt($, ['git', ...args], { timeoutMs: 60_000 }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }))
 
@@ -1032,8 +1032,8 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
   const text = await read('CHANGELOG.md')
 
   if (current.join('.') === version) {
-    // The bump is in: its PR merged. Tagging and publishing are the user's to say.
-    if ((await git($, ['rev-parse', '-q', '--verify', `refs/tags/${tag}`])).exitCode === 0) fail(`${tag} is already tagged; ${version} is out`)
+    // The version bump's PR has merged. Tagging and publishing need the user's approval.
+    if ((await git($, ['rev-parse', '-q', '--verify', `refs/tags/${tag}`])).exitCode === 0) fail(`${tag} is already tagged; ${version} is already released`)
     const pr = await gh($, ['pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number,mergeCommit', '--limit', '1'], 30_000)
     const merged = pr.exitCode === 0 ? (JSON.parse(pr.stdout || '[]') as { number: number; mergeCommit?: { oid?: string } }[])[0] : undefined
     if (!merged?.mergeCommit?.oid) fail(`no merged PR from ${branch} yet: merge the release PR first`)
@@ -1050,16 +1050,16 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
     if (pushed.exitCode !== 0) fail(`pushing ${tag} failed: ${whyNot(pushed)}`)
     const out = await gh($, ['release', 'create', tag, '--title', tag, '--verify-tag', '--notes', body || `Release ${version}.`])
     if (out.exitCode !== 0) fail(`${tag} is tagged and pushed, but gh release create failed: ${whyNot(out)}`)
-    // What installs get: the stable branch, moved here and only here, to the release (a fast-forward; a
-    // stable that went elsewhere is left alone and said so).
+    // Installs come from the stable branch, which only this code moves, to the release (a fast-forward
+    // push; if stable has diverged, it is left alone and the reply says so).
     const stable = await git($, ['push', 'origin', `${merged!.mergeCommit!.oid!}:refs/heads/${STABLE}`]).catch(() => undefined)
-    const served = stable?.exitCode === 0 ? ` ${STABLE} now serves ${version}.` : ` ${STABLE} was not moved (${stable ? whyNot(stable) : 'git failed'}): installs still get the release before.`
+    const served = stable?.exitCode === 0 ? ` ${STABLE} now points at ${version}.` : ` ${STABLE} was not moved (${stable ? whyNot(stable) : 'git failed'}): installs still get the previous release.`
     // The record of what shipped: the tasks whose notes this version carries, none already in another.
     const now = await refresh($)
     const taken = new Set((now.releases ?? []).filter(one => one.version !== version).flatMap(one => one.tasks.map(task => task.id)))
     const tasks = shippedIn(now.items, body, taken)
     await sql($, db.recordRelease({ version, tag, at: new Date(await $.clock.now()).toISOString().slice(0, 10), pr: merged!.number, notes: body, tasks }))
-    // The release branch has done its work: gone here and on origin. A branch that won't go never fails the release.
+    // The release branch is no longer needed: delete it here and on origin. If that fails, the release still succeeds.
     const local = await git($, ['branch', '-D', branch]).catch(() => undefined)
     // GitHub may have deleted it on the merge already.
     const onOrigin = (await git($, ['ls-remote', '--heads', 'origin', branch]).catch(() => undefined))?.stdout.trim()
@@ -1075,10 +1075,10 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
   if (text === undefined) fail('no CHANGELOG.md to cut the release from')
   const remote = await git($, ['remote', 'get-url', 'origin'])
   if (remote.exitCode !== 0) fail('no git remote "origin" to open the release PR on')
-  // The release's own file may differ (notes written by changelog): it goes into the release commit.
+  // CHANGELOG.md may have uncommitted changes (notes written by the changelog action): they go into the release commit.
   const changed = (await git($, ['status', '--porcelain'])).stdout.split('\n').filter(line => line.trim() && line.slice(3).trim() !== 'CHANGELOG.md')
   if (changed.length) fail('the working tree has changes; commit or stash them first')
-  // A release is cut from the main line as it stands on origin: never from a feature branch, never stale.
+  // A release is cut from the main line as it is on origin: never from a feature branch, never from an out-of-date checkout.
   const mainLine = (await git($, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])).stdout.trim().replace(/^origin\//, '') || 'main'
   const on = (await git($, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()
   if (on !== mainLine) fail(`the checkout is on ${on || 'no branch'}; a release is cut from ${mainLine}: switch to it and pull first`)
@@ -1097,7 +1097,7 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
   if (committed.exitCode !== 0) fail(`git commit failed: ${whyNot(committed)}`)
   const pushed = await git($, ['push', '-u', 'origin', branch])
   if (pushed.exitCode !== 0) fail(`pushing ${branch} failed: ${whyNot(pushed)}`)
-  // The bump lives on its branch and PR; the checkout goes back to the main line it was cut from.
+  // The version bump stays on its branch and PR; the checkout switches back to the main line.
   await git($, ['switch', mainLine])
   const pr = await gh($, ['pr', 'create', '--head', branch, '--title', `Release ${version}`, '--body', cut.notes])
   if (pr.exitCode !== 0) fail(`${branch} is pushed, but gh pr create failed: ${whyNot(pr)}`)
@@ -1212,7 +1212,7 @@ async function userAct($: EngineInterface, a: Input) {
 
 /**
  * The person's Release from the Releases tab: ship's first step (the release PR), or, once that has merged
- * and they press Tag and publish, its second, which their press approves. Either way ship's answer is shown.
+ * and they press Tag and publish, its second, with that press as their approval. Either way ship's reply is shown.
  */
 async function releaseFromBoard($: EngineInterface, version: string, publish: boolean) {
   await update($, releasing, () => false)
@@ -1238,7 +1238,7 @@ async function userUndo($: EngineInterface, ids?: number[]) {
   await refresh($)
 }
 
-/** Posts the person's comment; with comments set to start turns, the agent holding the item hears at once. */
+/** Posts the person's comment; with comments set to start turns, the agent assigned to the item gets it right away. */
 async function postComment($: EngineInterface, item: Item, body: string) {
   const text = body.trim()
   if (!text) return
@@ -1252,23 +1252,23 @@ async function askClaude($: EngineInterface, item: Item) {
   const filled = await $.prompt.fill({ text: askAbout(item), mode: 'insert' }).catch(() => undefined)
   $.ui.toast(filled?.isFilled === false
     ? `roadmap: the prompt box is busy; ask about ${item.id} there`
-    : `roadmap: the prompt asks about ${item.id}; press Esc to finish it there`)
+    : `roadmap: a question about ${item.id} is in the prompt box; press Esc to finish it there`)
 }
 
-/** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
+/** Moves keyboard focus to an element of the pane; if the pane doesn't have keyboard focus, nothing changes. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
 // The inline height an open card asks for: more than most cards need; the layout caps it.
 const CARD_ROWS = 40
 
-/** Closes the detail panel and hands the ring back to the card or row it was opened from. */
+/** Closes the detail panel and moves focus back to the card or row it was opened from. */
 async function closeDetail($: EngineInterface, id: string) {
   await update($, selected, () => null)
   await update($, editing, () => false)
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   const mode = await read($, view)
-  // Open, the row was keyed apart (`…-open`): this key is waited for, so the ring is placed in the list drawn
-  // whole. Placed in the docked drawing, the terminal would keep it by its place there, on another row now.
+  // While the card was open, the row had a different key (`…-open`). Focusing this key waits until the full list
+  // is drawn; focusing it in the docked list would leave focus at that screen position, which is now another row.
   await focusOn($, mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`)
 }
 
@@ -1276,7 +1276,7 @@ async function closeDetail($: EngineInterface, id: string) {
 async function open($: EngineInterface, id: string | null) {
   await update($, selected, () => id)
   await update($, scrolled, () => 0)
-  // A card opens with the wheel on it.
+  // When a card opens, the mouse wheel scrolls the card.
   await update($, region, () => 'card')
   await update($, requesting, () => false)
   await update($, editing, () => false)
@@ -1287,19 +1287,19 @@ async function open($: EngineInterface, id: string | null) {
   await update($, parallelAsk, () => null)
   await update($, revealing, () => id !== null)
   if (id === null) return
-  // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
+  // Shown inline, a card asks for as much height as the layout allows; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
-  // The card that held the ring is gone once the panel stands in for the board: hand the ring to the
-  // panel, on the first unticked checklist entry when there is one.
+  // The card that had focus is gone once the panel replaces the board, so focus moves to the panel:
+  // to the first unticked checklist entry when there is one.
   const item = find((await read($, snapshot)).items, id)
   const firstOpen = item?.checklist?.find(c => !c.done)
-  // Never on Hand to Claude: an Enter too many must not hand the task over.
+  // Never on the Hand to Claude button: an extra Enter must not hand the task over.
   await focusOn($, firstOpen ? `check-${firstOpen.n}` : 'close')
   try {
     await sql($, db.markSeen(USER, id))
     await refresh($)
   } catch {
-    // Read marks are a nicety: the panel opens whatever becomes of them.
+    // Marking items read is optional: the panel opens even if it fails.
   }
 }
 
@@ -1316,7 +1316,7 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
   await update($, merging, () => null)
   const under = pr && stackedOn(await read($, refs), pr)
   if (pr && under) {
-    // Merged now, it would land in #under's branch, not main: that one goes first.
+    // Merged now, it would merge into #under's branch, not main: that one must merge first.
     $.ui.toast(`roadmap: PR #${pr.number} is stacked on #${under.number}; merge that first. ${item.id} stays in review.`)
     await focusOn($, 'close')
     return
@@ -1329,7 +1329,7 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
       const why = ran.stderr.trim() || `exit ${ran.exitCode}`
       $.ui.toast(`roadmap: PR #${pr.number} was not merged, so ${item.id} stays in review: ${why}. Claude is looking into it.`)
       await focusOn($, 'close')
-      // Whoever opened the pull request deals with what stopped it.
+      // Claude, who opened the pull request, is asked to fix what stopped the merge.
       await $.prompt.submit({ text: approvalNote(item, pr, why) }).catch(() => undefined)
       return
     }
@@ -1338,25 +1338,25 @@ async function approve($: EngineInterface, item: Item, pr?: Pr) {
   }
   await userAct($, { action: 'update', id: item.id, status: 'done' })
   await focusOn($, 'close')
-  // An agent's work: it hears at once, to bring the checkout up to date. Each approval is its own turn,
-  // taken in order once the session is idle. The person's own work needs no word.
+  // For an agent's work, Claude is told right away so it can update the checkout. Each approval is its own
+  // turn, run in order once the session is idle. The person's own work needs no message.
   if (isAgent(item.assignee)) await $.prompt.submit({ text: approvalNote(item, pr) }).catch(() => undefined)
 }
 
-// While a stack merges, how often a PR's checks are asked after, and how long they are waited for.
+// While a stack merges, how often a PR's checks are polled, and how long to wait for them.
 const CHECKS_EVERY = 10_000
 const CHECKS_WAIT = 30 * 60_000
 
 type Ran = { exitCode: number; stdout: string; stderr: string }
 
-/** Runs gh in the project; a gh that cannot start answers as a failure, with why. */
+/** Runs gh in the project; if gh cannot start, this returns a failure with the reason. */
 const gh = async ($: EngineInterface, args: string[], timeoutMs = 60_000): Promise<Ran> =>
   runAt($, ['gh', ...args], { timeoutMs }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }))
 const whyNot = (ran: Ran) => ran.stderr.trim() || ran.stdout.trim() || `exit ${ran.exitCode}`
 
 /**
  * Waits until `pr` can merge into `base`: its checks passed (or the repository reports none) and it has
- * no conflict. Answers why not, when it can't.
+ * no conflict. Returns the reason when it can't.
  */
 async function checksSettle($: EngineInterface, pr: Pr, base: string): Promise<string | undefined> {
   const started = await $.clock.now()
@@ -1435,7 +1435,7 @@ async function mergeStack($: EngineInterface, stack: Pr[]) {
 
 /**
  * Tasks handed out to run in parallel that have not started: each waits for what blocks it to be done,
- * and for a free place among WORKERS_MAX. Kept per project across sessions; read once per load.
+ * and for one of the WORKERS_MAX worker slots to free up. Kept per project across sessions; read once per load.
  */
 let queue: string[] | undefined
 
@@ -1466,7 +1466,7 @@ async function runParallel($: EngineInterface, ids: string[]) {
     await refresh($)
     const started = await startQueued($)
     const waiting = tasks.filter(task => !started.includes(task.id)).map(task => task.id)
-    $.ui.toast(`roadmap: started ${started.join(', ') || 'none yet'}${waiting.length ? `; ${waiting.join(', ')} ${waiting.length === 1 ? 'starts when what it waits' : 'start when what they wait'} on is done` : ''}`)
+    $.ui.toast(`roadmap: started ${started.join(', ') || 'none yet'}${waiting.length ? `; ${waiting.join(', ')} ${waiting.length === 1 ? 'starts when the tasks blocking it' : 'start when the tasks blocking them'} are done` : ''}`)
   } catch (err) {
     $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -1475,7 +1475,7 @@ async function runParallel($: EngineInterface, ids: string[]) {
 
 /**
  * Starts the queued tasks that can start now: nothing unfinished blocks them, and a worker is free.
- * Their worktrees are made here; the main loop is asked to start their agents. Answers their ids.
+ * Their worktrees are made here; the main loop is asked to start their agents. Returns their ids.
  */
 async function startQueued($: EngineInterface): Promise<string[]> {
   const list = await readQueue($)
@@ -1486,7 +1486,7 @@ async function startQueued($: EngineInterface): Promise<string[]> {
   const work: { task: Item; prompt: string }[] = []
   for (const id of list) {
     const task = find(snap.items, id)
-    // Taken, removed or started by someone else meanwhile: no longer the queue's.
+    // Taken, removed or started by someone else meanwhile: drop it from the queue.
     if (!task || task.status !== 'todo' || task.assignee !== workerName(task)) continue
     if (waitingOn(snap.items, task).length || busy >= WORKERS_MAX) {
       left.push(id)
@@ -1495,7 +1495,7 @@ async function startQueued($: EngineInterface): Promise<string[]> {
     const prompt = await worktreeFor($, task)
     if (prompt) (work.push({ task, prompt }), busy++)
   }
-  // Out of the queue once the main loop has been asked; asked from where it can't be, they stay for the next look.
+  // They leave the queue once the main loop has been asked to start them; if that request fails, they stay queued for the next check.
   const isAsked = work.length > 0 && (await $.prompt.submit({ text: workersNote(work) }).then(() => true, () => false))
   const next = isAsked || work.length === 0 ? left : [...left, ...work.map(one => one.task.id)]
   if (next.length !== list.length) await saveQueue($, next)
@@ -1503,8 +1503,8 @@ async function startQueued($: EngineInterface): Promise<string[]> {
 }
 
 /**
- * Makes a task's worktree, on its own branch from the main line, and answers its agent's prompt; or,
- * when the worktree can't be made, says so and gives the task back.
+ * Makes a task's worktree, on its own branch from the main line, and returns the prompt for its agent; or,
+ * when the worktree can't be made, shows a toast and unassigns the task.
  */
 async function worktreeFor($: EngineInterface, task: Item): Promise<string | undefined> {
   const branch = branchFor(task)
@@ -1548,7 +1548,7 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
 /** Adds what the new-item form describes, as the person, and opens it. */
 async function create($: EngineInterface, choice: Draft, title: string) {
   try {
-    // Made from an inbox item, it is that item triaged: its text comes along and the inbox marks it sorted.
+    // Made from an inbox item, this triages that item: its text is copied over and the item is marked sorted.
     const fields = { title, parent: choice.parent || undefined, ...(choice.kind === 'task' ? { priority: choice.priority, type: choice.type } : {}) }
     const reply = choice.from
       ? await act($, USER, { action: 'triage', id: choice.from, kind: choice.kind, ...fields })
@@ -1567,7 +1567,7 @@ async function handToClaude($: EngineInterface, item: Item) {
   await $.prompt.submit({
     text:
       item.kind === 'task'
-        ? `Work on roadmap task ${item.id}: ${item.title}. Read it with the roadmap tool (show ${item.id}), claim it (it names the branch to work on), and comment as you go.`
+        ? `Work on roadmap task ${item.id}: ${item.title}. Read it with the roadmap tool (show ${item.id}), claim it (the reply names the branch to work on), and comment as you go.`
         : `Work on roadmap ${item.kind} ${item.id}: ${item.title}. It's yours as a whole: read it with the roadmap tool (show ${item.id}), then claim its tasks one at a time, commenting as you go, on one branch, ${branchFor(item)}. They close as you finish them; set ${item.id} done when they all are and open its pull request, and I'll review it then.`,
   })
 }
@@ -1578,8 +1578,8 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'roadmap',
       isDeferred: false,
-      // Every session carries this on every turn, so it stays short: the paths an agent takes most, and
-      // each action's fields on `action` below. The model reads only the first 2048 characters of it.
+      // Every session sends this on every turn, so keep it short: the most common paths, with each
+      // action's fields listed on `action` below. The model reads only the first 2048 characters.
       description: [
         "The project's shared tracker (.claude/roadmap.db) for you, the user and other agents. Milestone > epic > task (M1, E1, T1); milestone and epic status roll up from their tasks.",
         'Handed an epic or milestone ("implement E27"): claim it. You hold it, its first ready task is yours, and the answer shows every task.',
@@ -1623,7 +1623,7 @@ export const register: Register = on => {
           checklist: { type: 'array', items: { type: 'string' }, description: "A task's acceptance criteria; replaces the list, keeping ticks on unchanged entries" },
           items: { type: 'array', items: { type: 'integer' }, description: 'check, or update with status done: 1-based checklist entries to tick' },
           done: { type: 'boolean', description: 'check: false unticks' },
-          blocked_by: { type: 'array', items: { type: 'string' }, description: 'Tasks this one waits on; replaces the list' },
+          blocked_by: { type: 'array', items: { type: 'string' }, description: 'Tasks blocking this one; replaces the list' },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}" or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'YYYY-MM-DD' },
           start: { type: 'string', description: 'YYYY-MM-DD: when a milestone or epic starts, for the roadmap' },
@@ -1643,7 +1643,7 @@ export const register: Register = on => {
           body: { type: 'string' },
           as: { type: 'string', description: 'Act as another name (a subagent)' },
           approved: { type: 'boolean', description: 'With status done: the user approved it in chat. Never on your own judgment' },
-          force: { type: 'boolean', description: 'claim: take over a held or waiting task; update: done with entries unticked' },
+          force: { type: 'boolean', description: 'claim: take over a held or blocked task; update: done with entries unticked' },
           cascade: { type: 'boolean' },
           path: { type: 'string' },
           note: { type: 'string', description: "A task's CHANGELOG line, saying what changed for its users; \"-\" for none" },
@@ -1669,9 +1669,9 @@ export const register: Register = on => {
     const a = input as unknown as Input
     const actor = await actorFor($, agentId === undefined ? undefined : String(agentId), a.as)
     try {
-      // The person's name is theirs: what they do happens on the board, not through an agent's call.
+      // Agents can't act as the user: the user's changes are made on the board, not through the tool.
       if (actor.toLowerCase() === USER) fail(`"${USER}" is the person at the board; act as yourself`)
-      // Any call to the tracker is a sign of life for the caller's claims.
+      // Any call to the tracker renews the caller's claims.
       await heartbeat($, actor, true).catch(() => undefined)
       startedAt = undefined
       const reply = await act($, actor, a, agentId !== undefined)
@@ -1684,8 +1684,8 @@ export const register: Register = on => {
       return { deny: err instanceof Error ? err.message : String(err) }
     }
   }).catch(($, e, next) =>
-    // The tool is answered here or nowhere: a hook that failed outright (its budget ran out, or it was
-    // asked again beneath its own call) says so rather than leaving the engine's "no hook answered".
+    // Only this hook answers the tool. If it failed outright (it ran out of time, or it was called again
+    // inside its own call), reply with an error instead of leaving the engine's "no hook answered".
     next.called ? next(e) : { deny: `roadmap: the tracker did not answer (${next.error.kind}); try again` },
   )
 
@@ -1697,9 +1697,9 @@ export const register: Register = on => {
     if (started.agentId)
       agentNames.set(started.agentId, task ? workerName(task) : agentName(e.subagentType, e.description, started.teammateId))
     return started
-  }).catch(($, e, next) => next(e)) // Naming only: never stands in the way of a spawn.
+  }).catch(($, e, next) => next(e)) // This only records names, so a failure never blocks a spawn.
 
-  // Note work done in the main loop, for the nudge below.
+  // Note work done in the main loop, for the reminder below.
   on('tool.call', async ($, e, next) => {
     if (!e.agentId && WORK.has(String(e.tool))) hasWorkedSinceUpdate = true
     // An agent busy with other tools is alive too; renewed now and then rather than on every call.
@@ -1708,17 +1708,17 @@ export const register: Register = on => {
       await heartbeat($, actor).catch(() => undefined)
     }
     return next(e)
-  }).catch(($, e, next) => next(e)) // Bookkeeping only: never stands in the way of a tool.
+  }).catch(($, e, next) => next(e)) // Bookkeeping only, so a failure never blocks a tool call.
 
-  // A turn's end (a worker's included) is when a task waiting on another may be free to start.
+  // When a turn ends (a worker's included), a task blocked by another may be able to start.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     void refresh($).then(() => startQueued($)).catch(() => undefined)
     return done
-  }).catch(($, e, next) => next(e)) // Bookkeeping only: never stands in the way of a turn.
+  }).catch(($, e, next) => next(e)) // Bookkeeping only, so a failure never blocks a turn.
 
   // The session brief: on the first prompt, and again whenever the person changed the roadmap;
-  // a nudge when work happened while a task of Claude's sat untouched.
+  // a reminder when Claude did work but didn't update its in-progress tasks.
   on('prompt.submit', async ($, e, next) => {
     const context: string[] = []
     try {
@@ -1735,14 +1735,14 @@ export const register: Register = on => {
             `<roadmap-reminder>In progress: ${open.map(t => t.id).join(', ')}. If your work moved them, update the roadmap.</roadmap-reminder>`,
           )
       }
-      // Never backwards: a read that found no database (or an older copy of it) must not replay old news.
+      // Never move backwards: a read that found no database (or an older copy of it) must not show old changes again.
       seenActivity = Math.max(seenActivity, newest)
       hasWorkedSinceUpdate = false
     } catch {
-      // The brief is a courtesy: a roadmap that cannot be read never holds up a prompt.
+      // The brief is optional: if the roadmap can't be read, the prompt goes through anyway.
     }
     return next(context.length ? { ...e, context: [...(e.context ?? []), ...context] } : e)
-  }).catch(($, e, next) => next(e)) // A brief that fails never holds up a prompt: it goes in as typed.
+  }).catch(($, e, next) => next(e)) // If the brief fails, the prompt is sent as typed.
 
   on('command.run', { command: 'roadmap' }, async ($, e) => {
     // `/roadmap inbox <text>` files it without opening anything.
@@ -1756,7 +1756,7 @@ export const register: Register = on => {
     await refresh($).catch(() => undefined)
     const turns = await $.store.get('commentTurns').catch(() => undefined)
     await update($, commentTurns, () => turns === true)
-    // Asks for the keys, so the board is driven from the keyboard at once (granted from an empty prompt).
+    // Takes keyboard focus, so the board can be used from the keyboard right away (granted when the prompt is empty).
     await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
     return { text: 'Roadmap opened.' }
   })
@@ -1827,7 +1827,7 @@ export const register: Register = on => {
       region: await read($, region),
       split: await read($, split),
       isRevealing: await read($, revealing),
-      // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
+      // Without a clock no claim is marked inactive: the mark is only a hint, so a missing clock never stops drawing.
       now: await $.clock.now().catch(() => 0),
     }
     const pick = state.pick
@@ -1835,7 +1835,7 @@ export const register: Register = on => {
       open: id => void open($, id),
       closeDetail: id => void closeDetail($, id),
       userAct: a => void userAct($, a as Input),
-      // The question opens on Cancel: only a deliberate move to Yes hands the item over.
+      // The question opens with focus on Cancel: the person must move to Yes to hand the item over.
       askHand: id => void update($, handing, () => id).then(() => focusOn($, id ? 'hand-cancel' : pick ? 'close' : 'tab-board')),
       askMerge: id => void update($, merging, () => id).then(() => focusOn($, id ? 'merge-cancel' : 'close')),
       approve: (item, pr) => void approve($, item, pr),
@@ -1847,7 +1847,7 @@ export const register: Register = on => {
       setFilter: text => void update($, filter, () => text).then(() => update($, filtering, () => false)),
       setDraft: next => void update($, draft, () => next).then(() => (next ? focusOn($, 'new-title') : undefined)),
       create: (choice, title) => void create($, choice, title),
-      // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
+      // Focus stays on the Edit button, so pressing e again leaves edit mode; Tab moves into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
       setTriaging: one => void update($, triaging, () => one).then(() => focusOn($, one ? 'triage-input' : 'tab-inbox')),

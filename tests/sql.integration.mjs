@@ -3,7 +3,7 @@
 //
 //   node --test tests/sql.integration.mjs
 //
-// Node strips the TypeScript itself; the resolver below adds the `.ts` the mod's imports leave out.
+// Node strips the TypeScript itself; the resolver below adds the `.ts` that the plugin's imports leave out.
 import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { registerHooks } from 'node:module'
@@ -34,14 +34,14 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-/** What the mod's `run()` does, minus `$`: one script through sqlite3, answering its last output. */
+/** What the plugin's `run()` does, minus `$`: one script through sqlite3, answering its last output. */
 const raw = script => db.answer(execFileSync(db.ARGV[0], db.ARGV.slice(1), { cwd: dir, input: script, encoding: 'utf8' }))
 const rawAsync = async script => {
   const child = promisify(execFile)(db.ARGV[0], db.ARGV.slice(1), { cwd: dir, encoding: 'utf8' })
   child.child.stdin.end(script)
   return db.answer((await child).stdout)
 }
-/** What the mod's `sql()` does: the database brought to this build's version first, as on first use. */
+/** What the plugin's `sql()` does: the database brought to this build's version first, as on first use. */
 let isMigrated = false
 const ready = () => {
   if (!isMigrated) raw(db.migrate(Number(raw(db.READ_VERSION))))
@@ -125,14 +125,14 @@ test('a released task goes back to todo, where next offers it to the next agent'
   assert.deepEqual([item('T1').status, item('T1').assignee], ['todo', null])
   assert.deepEqual(log('T1').slice(2), ['explorer: unassigned explorer', 'explorer: status in_progress → todo'])
   assert.deepEqual(nextUp(load().items, 'claude').map(one => one.id), ['T1'])
-  // Blocked work keeps its status: it still waits on something.
+  // A blocked task keeps its status, since it is still blocked.
   sql(db.claim('claude', 'T1', false))
   sql(db.change('claude', item('T1'), { status: 'blocked' }).script)
   sql(db.change('claude', item('T1'), letGo(item('T1'))).script)
   assert.deepEqual([item('T1').status, item('T1').assignee], ['blocked', null])
 })
 
-test('atomic runs several scripts as one transaction: all of them land, or none', () => {
+test('atomic runs several scripts as one transaction: either all of them are written, or none', () => {
   sql(db.insert('claude', { kind: 'task', title: 't', parent: null }))
   sql(db.insert('claude', { kind: 'task', title: 'u', parent: null }))
   const t1 = item('T1')
@@ -179,7 +179,7 @@ test('a batch replays its writes in one transaction, only on the database it was
   sql(script)
   assert.deepEqual([item('T1').assignee, item('T1').status, item('T2').title], ['claude', 'in_progress', 'u'])
   assert.deepEqual(log('T1').slice(1), ['claude: claimed', 'claude: on it'])
-  // Someone wrote since: the replay rolls back whole.
+  // Someone wrote since: the whole replay is rolled back.
   const old = sql(db.STAMP)
   sql(db.comment('user', 'T1', 'meanwhile'))
   assert.throws(() => sql(db.atomic([db.expectStamp(old), db.comment('claude', 'T1', 'late'), db.insert('claude', { kind: 'task', title: 'v', parent: null })])))
@@ -282,7 +282,7 @@ test('a fresh database starts at version 0 and migrates to this build\'s version
 })
 
 test('a database from before versioning adopts the schema with its data kept', () => {
-  // As the mod left databases until now: the tables, data in them, no version recorded.
+  // As the plugin left databases until now: the tables, data in them, no version recorded.
   raw(db.MIGRATIONS[0])
   raw("INSERT INTO items(id, kind, title) VALUES ('T1', 'task', 'kept');")
   assert.equal(raw(db.READ_VERSION), '0')
@@ -309,9 +309,9 @@ test('v7: what sat under a milestone targets it instead; a task in an epic keeps
 test('a database from a newer build is refused, and an unusable version is named', () => {
   raw(db.migrate(0))
   raw(`PRAGMA user_version=${db.VERSION + 1};`)
-  assert.match(db.versionProblem(Number(raw(db.READ_VERSION))), /newer roadmap mod .*Update the mod; nothing was changed/)
+  assert.match(db.versionProblem(Number(raw(db.READ_VERSION))), /newer roadmap plugin .*Update the plugin; nothing was changed/)
   assert.equal(db.versionProblem(db.VERSION), undefined)
-  assert.match(db.versionProblem(NaN), /not a version/)
+  assert.match(db.versionProblem(NaN), /not a valid version/)
 })
 
 test('two sessions migrating at once both come out at the current version', async () => {
@@ -380,26 +380,26 @@ test('labels are normalized, replaced as a set and logged; relations link, unlin
   assert.deepEqual(log('T2').slice(1), ['user: duplicate of T3', 'user: status todo → done (closed as a duplicate)'])
 })
 
-test('a claim starts a lease; a live one holds, a stale one is taken over and logged, and renew keeps it alive', () => {
+test('a claim records when it was renewed; an active claim refuses others, an inactive one can be taken over and the takeover is logged, and renew keeps it active', () => {
   sql(db.insert('claude', { kind: 'task', title: 'a', parent: null }))
   assert.equal(sql(db.claim('explore:a', 'T1', false)), 'explore:a')
   assert.ok(item('T1').lease_at)
-  // Live: someone else is refused.
+  // Active: someone else is refused.
   assert.equal(sql(db.claim('claude', 'T1', false, 'explore:a')), 'explore:a')
-  // Gone quiet for 31 minutes: renew only touches the holder's own claims, and the claim goes through.
+  // Not renewed for 31 minutes: renew only updates the holder's own claims, and the new claim succeeds.
   sql("UPDATE items SET lease_at=strftime('%Y-%m-%dT%H:%M:%SZ','now','-31 minutes');")
   sql(db.renew('someone-else'))
   assert.equal(sql(db.claim('claude', 'T1', false, 'explore:a')), 'claude')
   assert.equal(item('T1').status, 'in_progress')
-  assert.deepEqual(log('T1').slice(1), ['explore:a: claimed', 'claude: took over stale claim from explore:a'])
-  // The new holder's heartbeat moves the lease on.
+  assert.deepEqual(log('T1').slice(1), ['explore:a: claimed', 'claude: took over inactive claim from explore:a'])
+  // The new holder's heartbeat renews the claim.
   sql("UPDATE items SET lease_at='2000-01-01T00:00:00Z';")
   sql(db.renew('claude'))
   assert.notEqual(item('T1').lease_at, '2000-01-01T00:00:00Z')
   assert.equal(sql(db.claim('explore:a', 'T1', false, 'claude')), 'claude')
 })
 
-test('a claim from before leases counts its last change as the heartbeat', () => {
+test('a claim made before renewal times were recorded uses its last change as its last renewal', () => {
   sql(db.insert('claude', { kind: 'task', title: 'a', parent: null, assignee: 'old', status: 'in_progress' }))
   assert.equal(item('T1').lease_at, null)
   assert.equal(sql(db.claim('claude', 'T1', false, 'old')), 'old')
@@ -407,7 +407,7 @@ test('a claim from before leases counts its last change as the heartbeat', () =>
   assert.equal(sql(db.claim('claude', 'T1', false, 'old')), 'claude')
 })
 
-test('v3: milestones and epics already finished keep reading done; open ones are left as they were', () => {
+test('v3: milestones and epics already finished stay done; open ones are left as they were', () => {
   raw(`BEGIN IMMEDIATE;\n${db.MIGRATIONS.slice(0, 2).join('\n')}\nPRAGMA user_version=2;\nCOMMIT;`)
   raw(`INSERT INTO items(id, kind, title, parent, assignee) VALUES ('M1','milestone','m',NULL,'claude'), ('E1','epic','e','M1',NULL),
     ('T1','task','a','E1',NULL), ('M2','milestone','open',NULL,'claude'), ('T2','task','b','M2',NULL);
@@ -447,7 +447,7 @@ test('undo: a change of several fields is one op, reverted exactly; the undo is 
   assert.equal(op.length, 8)
   revert(op)
   assert.deepEqual(fields(item('T1')), before)
-  // Each undo is logged, naming what it took back; the entries it reverted read as undone.
+  // Each undo is logged, naming what it took back; the entries it reverted are marked undone.
   const undos = entries().filter(one => one.type === 'undo')
   assert.equal(undos.length, 8)
   assert.ok(undos.some(one => one.body === 'undid “title → new”'))
@@ -589,7 +589,7 @@ test('an export from an older schema imports, its missing columns taking their d
   sql(db.importRows(db.importOf(old)))
   assert.equal(item('T1').priority, 'p2')
   assert.equal(item('T1').type, 'feature')
-  assert.throws(() => db.importOf(JSON.stringify({ roadmap: 'export', schema: db.VERSION + 1, tables: {} })), /newer roadmap mod/)
+  assert.throws(() => db.importOf(JSON.stringify({ roadmap: 'export', schema: db.VERSION + 1, tables: {} })), /newer roadmap plugin/)
   assert.throws(() => db.importOf('{"roadmap":"export","schema":1,"tables":{"secrets":[]}}'), /unknown table secrets/)
 })
 
@@ -610,7 +610,7 @@ test('v7: a target is written, logged and undone like any field; a move out of a
   sql(db.insert('claude', { kind: 'task', title: 't', parent: 'E1' }))
   sql(db.change('claude', item('T1'), { parent: null, milestone: 'M1' }).script)
   assert.deepEqual([item('T1').parent, item('T1').milestone], [null, 'M1'])
-  assert.deepEqual(log('T1').slice(1), ['claude: out of its epic', 'claude: targets M1'])
+  assert.deepEqual(log('T1').slice(1), ['claude: moved out of its epic', 'claude: targets M1'])
   revert(lastOp())
   assert.deepEqual([item('T1').parent, item('T1').milestone], ['E1', null])
 })

@@ -1,7 +1,7 @@
 {
   "name": "roadmap",
   "version": "0.7.1",
-  "description": "A lightweight Jira for Claude Code: milestones, epics and tasks that you and your agents plan and work from together",
+  "description": "A task tracker inside Claude Code: milestones, epics and tasks that you, Claude and its agents plan and work from together",
   "author": {
     "name": "astrosteveo"
   },

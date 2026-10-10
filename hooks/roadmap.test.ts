@@ -73,12 +73,12 @@ const items = [
   item('T5'),
 ]
 
-test('status rolls up from tasks, blocked first', async () => {
+test('status is worked out from the tasks, with blocked first', async () => {
   expect(statusOf(items, items[0]!)).toBe('blocked')
   expect(outline(items).split('\n')[0]).toBe('M1 ✗ blocked M1 title  (1/4 tasks, due 2026-11-15)')
 })
 
-test('rollups scale: a two-thousand-item roadmap draws its outline and brief quickly, and a new list rolls up afresh', async () => {
+test('statuses from tasks are fast: the outline and brief of a two-thousand-item roadmap are drawn quickly, and a new list is worked out afresh', async () => {
   const big: Item[] = []
   for (let m = 1; m <= 20; m++) {
     big.push(item(`M${m}`, { assignee: 'claude' }))
@@ -92,10 +92,10 @@ test('rollups scale: a two-thousand-item roadmap draws its outline and brief qui
   big.forEach(one => statusOf(big, one))
   outline(big)
   brief({ items: big, activity: [], seen: {} }, 'claude', [])
-  // About 10ms with the index; about 250ms when each roll-up walked the whole list again.
+  // About 10ms with the index; about 250ms when each status was worked out by walking the whole list again.
   expect(performance.now() - started).toBeLessThan(100)
   expect(statusOf(big, find(big, 'E1')!)).toBe('in_progress')
-  // The next snapshot is a new list: its roll-ups are its own. (E1 sits in M1, handed over whole, so it closes.)
+  // The next snapshot is a new list, so its statuses are worked out again. (E1 sits in M1, handed over whole, so it closes.)
   const next = big.map(one => (one.parent === 'E1' ? { ...one, status: 'done' as const } : one))
   expect(statusOf(next, find(next, 'E1')!)).toBe('done')
   expect(statusOf(big, find(big, 'E1')!)).toBe('in_progress')
@@ -192,7 +192,7 @@ test('the tool description fits the 2048 characters the model reads; each action
     expect(actions).toContain(`${action}:`)
 })
 
-test('batch: ops run in order on a trial copy, then land on the database in one transaction, or not at all', async ($, on) => {
+test('batch: ops run in order on a trial copy, then are written to the database in one transaction, or not at all', async ($, on) => {
   const some: Item[] = [item('T1'), item('T2')]
   const real: string[] = []
   const tried: string[] = []
@@ -233,7 +233,7 @@ test('batch: ops run in order on a trial copy, then land on the database in one 
   expect(real[0]!.match(/BEGIN/g)?.length).toBe(1)
   expect(ran.some(argv => argv[0] === 'rm' && String(argv[2]).includes('-batch-'))).toBe(true)
 
-  // An op that fails writes nothing, and says which op it was.
+  // If an op fails, nothing is written, and the reply names the op.
   real.length = 0
   const failed = await call({ action: 'batch', ops: [{ action: 'update', id: 'T1', status: 'todo' }, { action: 'comment', id: 'T99', body: 'x' }] })
   expect(failed).toBe('op 2 (comment T99): No item T99. Nothing in the batch was written.')
@@ -247,7 +247,7 @@ test('batch: ops run in order on a trial copy, then land on the database in one 
   expect(real[0]).toContain("WHERE id='T1'")
   expect(real[0]).toContain("WHERE id='T2'")
 
-  // The rules hold op by op: a subagent can't approve inside a batch either.
+  // The rules apply to each op: a subagent can't approve inside a batch either.
   real.length = 0
   const sub = await call({ action: 'batch', agentId: 'a1', ops: [{ action: 'comment', id: 'T1', body: 'x' }, { action: 'update', id: 'T2', status: 'done', approved: true }] })
   expect(sub).toContain('op 2 (update T2): Only the user approves')
@@ -291,7 +291,7 @@ test('the board draws on terminal and desktop, and a card opens and closes from 
       expect((await ui.find({ text: /t p b r d jump to a column/ }))).toBeDefined()
       await ui.press({ key: 'card-T2' })
       expect(await ui.find({ key: 'hand' })).toBeDefined()
-      // The detail view stands in for the board, so it is never pushed off screen by a long column.
+      // The detail view replaces the board, so it is never pushed off screen by a long column.
       expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
       expect((await ui.find({ text: /1–5 status/ }))).toBeDefined()
       await ui.press({ key: 'close' })
@@ -320,8 +320,8 @@ test('dependencies: blockers must be other tasks, with no cycles; done blockers 
   expect(() => checkBlockers(deps, 'T2', ['E1'])).toThrow('Only tasks block tasks')
   expect(waitingOn(deps, deps[1]!)).toEqual([])
   expect(waitingOn(deps, deps[2]!).map(one => one.id)).toEqual(['T2'])
-  expect(outline(deps)).toContain('T3 ○ todo T3 title  (waiting on T2)')
-  // T2's blocker is done, so it is free; T3 waits; your own waiting T4 comes after your T5.
+  expect(outline(deps)).toContain('T3 ○ todo T3 title  (blocked by T2)')
+  // T2's blocker is done, so it is free; T3 is blocked; your own blocked T4 comes after your T5.
   expect(nextUp(deps, 'claude').map(one => one.id)).toEqual(['T5', 'T4', 'T2'])
 })
 
@@ -331,7 +331,7 @@ test('a checklist shows in the outline and the detail', async () => {
   expect(detail({ items: list, activity: [], seen: {} }, list[0]!)).toContain('Checklist:\n  [x] 1. tests pass\n  [ ] 2. docs')
 })
 
-test('show on an epic carries each open task whole, and a done one as a line', async () => {
+test('show on an epic includes each open task in full, and each done one as a single line', async () => {
   const unit = [
     item('E1'),
     item('T1', { parent: 'E1', status: 'done', description: 'gone', checklist: [{ n: 1, text: 'old', done: true }] }),
@@ -341,7 +341,7 @@ test('show on an epic carries each open task whole, and a done one as a line', a
   const text = detail({ items: unit, activity: [], seen: {} }, unit[0]!)
   expect(text).toContain(
     'T1 ● done T1 title  (1/1 checked)\nT2 ○ todo T2 title  (0/1 checked)\n    Add slugify.\n    [ ] 1. lowercases\n' +
-      'T3 ○ todo T3 title  (0/1 checked, waiting on T2)\n    [ ] 1. cli',
+      'T3 ○ todo T3 title  (0/1 checked, blocked by T2)\n    [ ] 1. cli',
   )
   expect(text).not.toContain('gone')
 })
@@ -424,13 +424,13 @@ test('the detail bar sits right under the title on every card, short or long, ta
   await ui.press({ key: 'row-E1' })
   at.push(await barIndex())
   expect(await ui.find({ key: 'set-todo' })).toBeUndefined()
-  expect((await ui.find({ key: 'status-row' }))?.text).toContain('rolled up')
+  expect((await ui.find({ key: 'status-row' }))?.text).toContain('based on its tasks')
   expect(await ui.find({ key: 'hand' })).toBeDefined()
   expect(at).toEqual([1, 1, 1])
   await ui.unmount()
 })
 
-test('a card reads as labelled sections, and a tall one scrolls under its fixed title and bar', async ($, on) => {
+test('a card shows labelled sections, and a tall one scrolls under its fixed title and bar', async ($, on) => {
   const long = item('T6', {
     description: 'A long description that wraps. '.repeat(12),
     checklist: [1, 2, 3, 4, 5, 6].map(n => ({ n, text: `criterion ${n}`, done: n < 3 })),
@@ -463,7 +463,7 @@ test('a card reads as labelled sections, and a tall one scrolls under its fixed 
   expect((await ui.find({ key: 'act-2' }))?.type).toBe('Box')
   expect((await ui.find({ type: 'Text', text: /claude created task/ }))?.props.dimColor).toBe(true)
 
-  // A short pane: the title and bar stay, the sections window and scroll.
+  // A short pane: the title and bar stay, and the sections scroll.
   await ui.redraw(props(20))
   expect(await ui.find({ type: 'Text', text: /more lines? below/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /more lines? above/ })).toBeUndefined()
@@ -481,7 +481,7 @@ test('a card reads as labelled sections, and a tall one scrolls under its fixed 
   await ui.unmount()
 })
 
-test('the .gitignore offer stands only in a repo that does not ignore the database, until turned down', async () => {
+test('the plugin offers to gitignore the database only in a repo that does not ignore it, until the user turns it down', async () => {
   expect(ignoreState(0)).toBe('ignored')
   expect(ignoreState(1)).toBe('not-ignored')
   expect(ignoreState(128)).toBe('no-repo')
@@ -540,7 +540,7 @@ test('targets: a task takes its own milestone, else its epic\'s; the tree puts i
   expect(['E1', 'T1', 'T2', 'T3', 'T4'].map(id => upOf(find(some, id)!))).toEqual(['M1', 'E1', 'E1', 'M2', null])
 })
 
-test('roll-ups follow targets: a milestone is the tasks that target it; hand-offs, due dates and next follow suit', () => {
+test('progress follows targets: a milestone counts the tasks that target it, and so do hand-offs, due dates and next', () => {
   const some = [
     item('M1', { due: '2026-11-01' }), item('M2', { due: '2026-12-01' }),
     item('E1', { milestone: 'M1', due: '2026-10-20' }),
@@ -557,14 +557,14 @@ test('roll-ups follow targets: a milestone is the tasks that target it; hand-off
   expect(progress(some, find(some, 'E1')!)).toEqual({ done: 1, total: 2 })
   // Due: its own, else its epic's, else its milestone's.
   expect(['T1', 'T2', 'T3'].map(id => dueOf(some, find(some, id)!))).toEqual(['2026-10-20', '2026-10-20', '2026-11-01'])
-  // Handing M2 over takes T2 too, though it sits in E1; next in M2 offers it.
+  // Handing M2 over includes T2 too, though it sits in E1; next in M2 offers it.
   const handed = some.map(one => (one.id === 'M2' ? { ...one, assignee: 'claude' } : one))
   expect(handedScope(handed, find(handed, 'T2')!)?.id).toBe('M2')
   expect(handedScope(handed, find(handed, 'T1')!)).toBeUndefined()
   expect(readyIn(handed, find(handed, 'M2')!, 'claude')?.id).toBe('T2')
 })
 
-test('shipped in vX: a task says which release carried it, or that it is merged and waiting; a milestone how many are out', () => {
+test('shipped in vX: a task shows which release included it, or that it is merged but not released; a milestone shows how many are released', () => {
   const items = [
     item('M1'), item('E1', { milestone: 'M1' }),
     item('T1', { parent: 'E1', status: 'done', note: 'One.' }),
@@ -587,7 +587,7 @@ test('shipped in vX: a task says which release carried it, or that it is merged 
   expect(brief(snap, 'claude', [], undefined, refs)).toContain('Merged, not released yet: T3.')
 })
 
-test('the next version: a patch when the waiting notes only fix, else a minor; notes of a unit still under way do not wait', () => {
+test('the next version: a patch when the unreleased notes are all fixes, else a minor; notes of a unit still in progress are not counted', () => {
   expect(nextVersion('0.6.3', [item('T1', { type: 'bug', note: 'x' })])).toBe('0.6.4')
   expect(nextVersion('0.6.3', [item('T1', { type: 'bug', note: 'x' }), item('T2', { note: 'y' })])).toBe('0.7.0')
   expect(nextVersion(undefined, [])).toBe('0.1.0')
@@ -622,7 +622,7 @@ test('the filter takes m:M2: what targets M2, and M2 itself', () => {
   expect(some.filter(one => matches(snap, one, query)).map(one => one.id)).toEqual(['M2', 'T2'])
 })
 
-test('releases: a CHANGELOG reads as versions with their dates and notes; a version carries the tasks whose notes it holds', () => {
+test('releases: a CHANGELOG is read as versions with their dates and notes; a version includes the tasks whose notes it lists', () => {
   const text = '# Changelog\n\n## [Unreleased]\n\n- Soon.\n\n## [0.6.1] - 2026-10-09\n\n### Fixed\n\n- ship writes the notes.\n\n## 0.4.0 - 2026-10-01\n\n- Old style.\n\n[Unreleased]: https://x/compare\n'
   expect(changelogVersions(text)).toEqual([
     { version: '0.6.1', date: '2026-10-09', body: '### Fixed\n\n- ship writes the notes.' },
@@ -636,11 +636,11 @@ test('releases: a CHANGELOG reads as versions with their dates and notes; a vers
   expect(shippedIn(some, '- ship writes the notes.', new Set(['T1']))).toEqual([])
 })
 
-test('a roadmap is started only at a repository top; a refusal points at the roadmaps below', () => {
+test('a roadmap is started only at the top of a repository; the refusal lists the roadmaps in folders below', () => {
   expect(ancestors('/home/me/Projects/')).toEqual(['/home/me/Projects', '/home/me', '/home', '/'])
   expect(ancestors('/')).toEqual(['/'])
   expect(noRoadmapHere('/p', ['/p/a', '/p/b/c'])).toContain('Roadmaps found below it: /p/a, /p/b/c. Start the session in the project')
-  expect(noRoadmapHere('/p', [])).toContain('git init it first')
+  expect(noRoadmapHere('/p', [])).toContain('run git init there first')
 })
 
 test('a project without a roadmap gets no database, no sqlite3 and no git until the first write', async ($, on) => {
@@ -674,7 +674,7 @@ test('a project without a roadmap gets no database, no sqlite3 and no git until 
   expect(ran.some(argv => argv[0] === 'sqlite3')).toBe(true)
 })
 
-test('inline, an open card folds the info line into its title and borrows the tabs\' row', async ($, on) => {
+test('inline, an open card puts the info line on its title row and uses the tabs\' row', async ($, on) => {
   const snap = { items, activity: [], seen: {} }
   on('process.run', ($, e) => ({ value: fakeSqlite(e.init?.stdin, snap) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -778,7 +778,7 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   const wrote = (needle: string) => scripts.some(one => one.includes(needle))
 
   const toReview = await call({ action: 'update', id: 'T1', status: 'done', note: '-' })
-  expect(String(toReview.result)).toContain("waiting on the user's approval")
+  expect(String(toReview.result)).toContain("needs the user's approval")
   expect(wrote("status='review'")).toBe(true)
   expect(wrote("status='done'")).toBe(false)
   expect((await call({ action: 'update', id: 'T1', status: 'done', approved: true, agentId: 'a1' })).deny).toContain('Only the user approves')
@@ -812,7 +812,7 @@ test('review: an agent\'s done goes to review; only the person, or their approva
   await ui.unmount()
 })
 
-test('review waits on the user: last in next, and listed apart in the brief', async () => {
+test('work in review needs the user: it comes last in next and is listed separately in the brief', async () => {
   const some = [
     item('T1', { status: 'review', assignee: 'claude' }),
     item('T2', { status: 'in_progress', assignee: 'claude' }),
@@ -825,10 +825,10 @@ test('review waits on the user: last in next, and listed apart in the brief', as
   const text = brief({ items: some, activity: [], seen: {} }, 'claude', [])!
   expect(text).toContain("Assigned to you (claude):\n- T2")
   expect(text).not.toContain('Assigned to you (claude):\n- T1')
-  expect(text).toContain("Waiting on the user's review")
+  expect(text).toContain("Needs the user's review (they approve it on the board, or tell you it's approved):")
 })
 
-test('leases: a quiet claim reads as stale, is offered by next, named in the brief and marked on the card', async ($, on) => {
+test('inactive claims: a claim not renewed in 30 minutes is inactive, offered by next, named in the brief and marked on the card', async ($, on) => {
   const now = Date.parse('2026-10-09T12:00:00Z')
   const some = [
     item('T1', { status: 'in_progress', assignee: 'explore:a', lease_at: '2026-10-09T11:00:00Z' }),
@@ -841,7 +841,7 @@ test('leases: a quiet claim reads as stale, is offered by next, named in the bri
   expect(nextUp(some, 'claude', now).map(one => one.id)).toEqual(['T4', 'T1', 'T3'])
   expect(nextUp(some, 'claude').map(one => one.id)).toEqual(['T4'])
   const text = brief({ items: some, activity: [], seen: {} }, 'claude', [], now)!
-  expect(text).toContain('Stale claims (holder silent over 30 min; claiming takes one over):\n- T1')
+  expect(text).toContain('Inactive claims (not renewed in over 30 min; claim one to take it over):\n- T1')
   expect(text).toContain('In progress by others:\n- T2')
 
   on('clock.now', () => ({ value: now }) as never)
@@ -853,12 +853,12 @@ test('leases: a quiet claim reads as stale, is offered by next, named in the bri
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
   })
-  expect((await ui.find({ key: 'card-T1' }))?.text).toContain('⌛stale')
-  expect((await ui.find({ key: 'card-T2' }))?.text).not.toContain('stale')
+  expect((await ui.find({ key: 'card-T1' }))?.text).toContain('⌛inactive')
+  expect((await ui.find({ key: 'card-T2' }))?.text).not.toContain('inactive')
   await ui.unmount()
 })
 
-test('heartbeat: every tracker call renews the caller\'s leases; other tools at most every five minutes', async ($, on) => {
+test('heartbeat: every tracker call renews the caller\'s claims; other tools renew them at most every five minutes', async ($, on) => {
   let now = Date.parse('2026-10-09T12:00:00Z')
   const scripts: string[] = []
   on('clock.now', () => ({ value: now }) as never)
@@ -923,7 +923,7 @@ test('a failing add or update writes nothing, so a retry has nothing to duplicat
   await denied({ action: 'update', id: 'T1', title: 'renamed', blocked_by: ['T99'] }, /No item T99/)
   await denied({ action: 'update', id: 'T1', title: 'renamed', relates_to: ['T1'] }, /cannot link to itself/)
   await denied({ action: 'update', id: 'T1', title: 'renamed', duplicates: 'T99' }, /No item T99/)
-  await denied({ action: 'update', id: 'E1', title: 'renamed', blocked_by: ['T1'] }, /Only tasks wait/)
+  await denied({ action: 'update', id: 'E1', title: 'renamed', blocked_by: ['T1'] }, /Only tasks can be blocked by other tasks/)
   await denied({ action: 'update', id: 'T1', title: 'renamed', parent: 'T1' }, /own parent|cannot sit under/)
 })
 
@@ -944,7 +944,7 @@ test('an update of several fields is one sqlite3 run, in one transaction', async
   expect(writes[0]!.match(/BEGIN/g)?.length).toBe(1)
 })
 
-test('show and find read the whole timeline, not only what the snapshot carries', async ($, on) => {
+test('show and find read the whole timeline, not only what the snapshot includes', async ($, on) => {
   const some = [item('T1'), item('T2')]
   const old: Activity[] = [
     { id: 1, item_id: 'T1', author: 'explore:a', type: 'handoff', body: 'stopped at the zebra parser', at: '2026-10-01T10:00:00Z' },
@@ -953,7 +953,7 @@ test('show and find read the whole timeline, not only what the snapshot carries'
   const recent: Activity[] = [{ id: 3, item_id: 'T1', author: 'claude', type: 'comment', body: 'latest', at: '2026-10-09T10:00:00Z' }]
   on('process.run', ($, e) => {
     const stdin = e.init?.stdin ?? ''
-    // The snapshot holds only the recent part; history and said answer from the whole of it.
+    // The snapshot holds only the recent part; history and said read all of it.
     const isWhole = stdin.includes("FROM (SELECT * FROM activity WHERE item_id=") || stdin.includes("type IN ('comment', 'handoff')")
     return { value: fakeSqlite(stdin, { items: some, activity: isWhole ? [...old, ...recent] : recent, seen: {} }) }
   })
@@ -982,7 +982,7 @@ test('a subagent the agent list does not know is named once, and the list is ask
   expect(scripts.filter(one => one.includes("'agent-f00dfeed'") && one.includes("'comment'")).length).toBe(3)
 })
 
-test('handoff: release leaves a note that leads the detail, counts as unread, and a claim answers with the task', async ($, on) => {
+test('handoff: release leaves a note that is shown first in the detail and counts as unread, and a claim replies with the task', async ($, on) => {
   const activity: Activity[] = [
     { id: 1, item_id: 'T1', author: 'claude', type: 'comment', body: 'started on the parser', at: '2026-10-09T10:00:00Z' },
     { id: 2, item_id: 'T1', author: 'explore:a', type: 'handoff', body: 'parser done; tests for edge cases left', at: '2026-10-09T11:00:00Z' },
@@ -996,7 +996,7 @@ test('handoff: release leaves a note that leads the detail, counts as unread, an
   const scripts: string[] = []
   on('process.run', ($, e) => {
     scripts.push(e.init?.stdin ?? '')
-    // The claim answers its new holder; everything else, the snapshot.
+    // The claim replies to its new holder with the task; everything else replies with the snapshot.
     const isClaim = e.init?.stdin?.includes("'assign'") && e.init?.stdin?.includes('lease_at=')
     return { value: isClaim ? { ...fakeSqlite('', snap), stdout: 'claude' } : fakeSqlite(e.init?.stdin, snap) }
   })
@@ -1044,11 +1044,11 @@ test('plan: the whole tree is checked before anything is written', async () => {
   expect(bad([{ ref: 'a', kind: 'task', title: 'x' }, { ref: 'a', kind: 'task', title: 'y' }])).toThrow('ref a is used twice')
   expect(bad([{ ref: 'a', kind: 'task', title: 'x', blocked_by: ['b'] }, { ref: 'b', kind: 'task', title: 'y', blocked_by: ['a'] }])).toThrow('cycle')
   expect(bad([{ kind: 'task', title: 'x', blocked_by: ['nope'] }])).toThrow('No item nope')
-  expect(bad([{ kind: 'epic', title: 'x', checklist: ['a'] }])).toThrow('only tasks carry a checklist')
+  expect(bad([{ kind: 'epic', title: 'x', checklist: ['a'] }])).toThrow('only tasks can have a checklist')
   expect(bad([{ kind: 'task', title: 'x', priority: 'urgent' }])).toThrow('priority must be one of')
 })
 
-test('plan: creates parents first, wires refs to new ids, and answers the map', async ($, on) => {
+test('plan: creates parents first, connects refs to the new ids, and replies with the map of refs to ids', async ($, on) => {
   // A small stand-in for sqlite3 that keeps the items it is asked to insert.
   const made: Item[] = [item('M1')]
   const scripts: string[] = []
@@ -1153,7 +1153,7 @@ test('board filter: a typed query narrows the board and the tree, shows in the h
   await ui.unmount()
 })
 
-test('plan: milestones first, then Unplanned; there an unheld todo task keeps the backlog\'s picker, priority and hand-off', async ($, on) => {
+test('plan: milestones first, then Unplanned, where a todo task nobody holds keeps the backlog\'s picker, priority and hand-off', async ($, on) => {
   const some = [
     item('M1'), item('E2', { milestone: 'M1' }), item('T6', { parent: 'E2' }),
     item('E1'),
@@ -1181,7 +1181,7 @@ test('plan: milestones first, then Unplanned; there an unheld todo task keeps th
   expect(order).toEqual(['M1', 'E2', 'T6', 'E1', 'T1', 'T2', 'T3', 'T4'])
   expect((await ui.find({ key: 'fold-loose' }))?.text).toBe('▸ 1 finished task in no epic')
   expect((await ui.find({ key: 'unplanned-head' }))?.text).toContain('Unplanned  3 for anyone to take')
-  // Controls on unplanned, unheld todo tasks only: not on T6 (M1 holds it), T4 (held) or T5 (done).
+  // Controls on unplanned, unheld todo tasks only: not on T6 (it targets M1), T4 (held) or T5 (done).
   for (const id of ['T1', 'T2', 'T3']) expect(await ui.find({ key: `hand-${id}` })).toBeDefined()
   for (const id of ['T6', 'T4', 'T5']) expect(await ui.find({ key: `hand-${id}` })).toBeUndefined()
   await ui.select({ key: 'prio-T1', value: 'p1' } as never)
@@ -1197,7 +1197,7 @@ test('plan: milestones first, then Unplanned; there an unheld todo task keeps th
   await ui.unmount()
 })
 
-test('review at the level handed over: tasks in a handed epic close as they go; the epic is reviewed once', async ($, on) => {
+test('review at the level handed over: tasks in a handed epic are closed as each is done; the epic is reviewed once', async ($, on) => {
   const some = [
     item('M1'),
     item('E1', { parent: 'M1', assignee: 'claude' }),
@@ -1210,12 +1210,12 @@ test('review at the level handed over: tasks in a handed epic close as they go; 
   expect(handedScope([...some.slice(1), item('M1', { assignee: 'claude' })], some[3]!)?.id).toBe('M1')
   const allDone = some.map(one => (one.id === 'T2' ? { ...one, status: 'done' as const } : one))
   expect(statusOf(allDone, allDone[1]!)).toBe('review')
-  // M1 wasn't handed over, but isn't done while E1 waits on review.
+  // M1 wasn't handed over, but isn't done while E1 is in review.
   expect(statusOf(allDone, allDone[0]!)).toBe('review')
   expect(statusOf(allDone.map(one => (one.id === 'E1' ? { ...one, status: 'done' as const } : one)), allDone[0]!)).toBe('done')
   expect(statusOf(allDone, { ...allDone[1]!, status: 'done' })).toBe('done')
   expect(statusOf(allDone, { ...allDone[1]!, status: 'in_progress' })).toBe('in_progress')
-  // The outermost handed scope holds the only review.
+  // Only the outermost handed scope goes to review.
   const both = allDone.map(one => (one.id === 'M1' ? { ...one, assignee: 'claude' } : one))
   expect(statusOf(both, both[1]!)).toBe('done')
   expect(statusOf(both, both[0]!)).toBe('review')
@@ -1227,10 +1227,10 @@ test('review at the level handed over: tasks in a handed epic close as they go; 
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
   const call = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
   const inScope = String((await call({ action: 'update', id: 'T2', status: 'done', note: '-' })).result)
-  // Nothing else in E1 to start, so the answer stops at the close.
+  // Nothing else in E1 to start, so the reply ends after closing it.
   expect(inScope).toContain('T2: status in_progress → done; no release note needed; nothing else in E1 is ready')
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='T2'"))).toBe(true)
-  expect(String((await call({ action: 'update', id: 'T3', status: 'done', note: '-' })).result)).toContain("waiting on the user's approval")
+  expect(String((await call({ action: 'update', id: 'T3', status: 'done', note: '-' })).result)).toContain("needs the user's approval")
   expect((await call({ action: 'update', id: 'E1', status: 'done' })).deny).toContain('closes when its tasks are done')
 })
 
@@ -1244,7 +1244,7 @@ test('a handed epic in review is approved, or sent back, from its card', async (
   on('ui.focus', () => ({}))
   on('prompt.submit', ($, e) => ((submitted = e.text), { text: e.text, origin: e.origin }))
   const agentDone = String((await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'update', id: 'E1', status: 'done' } as never)).result)
-  expect(agentDone).toContain("waiting on the user's approval")
+  expect(agentDone).toContain("needs the user's approval")
   expect(scripts.some(one => one.includes("status='review'") && one.includes("WHERE id='E1'"))).toBe(true)
   await $.command.run({ command: 'roadmap', args: '' } as never)
   const ui = await $.ui.mount({
@@ -1261,7 +1261,7 @@ test('a handed epic in review is approved, or sent back, from its card', async (
   await ui.unmount()
 })
 
-test("an epic up for review waits in the board's Review column, whose card approves and merges it", async ($, on) => {
+test("an epic up for review is in the board's Review column, and its card can approve and merge it", async ($, on) => {
   const some = [
     item('E1', { assignee: 'claude', title: 'Things' }), item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'done' }),
     // Not up for review: nobody was handed E2, and E3's tasks aren't all done.
@@ -1387,7 +1387,7 @@ test('edit a card: e shows its fields; each saves on its own through update', as
   await ui.unmount()
 })
 
-test('edit a card\'s checklist and blockers: reword, drop, add, and set what it waits on', async ($, on) => {
+test('edit a card\'s checklist and blockers: reword, drop, add, and set what blocks it', async ($, on) => {
   const some = [
     item('T1', { checklist: [{ n: 1, text: 'parses', done: true }, { n: 2, text: 'errs', done: false }, { n: 3, text: 'docs', done: true }] }),
     item('T2'), item('T3', { blocked_by: ['T1'] }),
@@ -1415,7 +1415,7 @@ test('edit a card\'s checklist and blockers: reword, drop, add, and set what it 
   expect(wrote("VALUES ('T1', 4, 'tested', 0)")).toBe(true)
   await ui.input({ key: 'edit-blockers', text: 'T2' } as never)
   expect(wrote("INSERT OR IGNORE INTO links(blocker, blocked) VALUES ('T2', 'T1')")).toBe(true)
-  // T3 already waits on T1: T1 waiting on T3 would be a cycle, and says so.
+  // T3 is already blocked by T1: T1 blocked by T3 would be a cycle, and the reply says so.
   await ui.input({ key: 'edit-blockers', text: 'T3' } as never)
   expect(toast).toContain('cycle')
   await ui.unmount()
@@ -1443,7 +1443,7 @@ test("approving the person's own work starts no turn; an agent's approvals each 
   await ui.unmount()
 })
 
-test('pull requests on the board: a tag on the row, a line under the bar, and a stacked one waits for the one below', async ($, on) => {
+test('pull requests on the board: a tag on the row, a line under the bar, and a stacked one merges only after the one below it', async ($, on) => {
   const some = [
     item('T1', { status: 'review', assignee: 'claude', title: 'Top' }),
     item('T2', { status: 'review', assignee: 'claude', title: 'Bottom' }),
@@ -1472,10 +1472,10 @@ test('pull requests on the board: a tag on the row, a line under the bar, and a 
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
-  // The rows say which PR each Approve would merge.
+  // The rows show which PR each Approve would merge.
   expect(await ui.find({ type: 'Text', text: /PR #12 ✓/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /PR #11 ✓/ })).toBeDefined()
-  // The top of the stack: its line says where it merges and what goes first; Approve won't merge it.
+  // The top of the stack: its line shows where it merges and what must merge first; Approve won't merge it.
   await ui.press({ key: 'card-T1' })
   expect(await ui.find({ key: 'pr-line' })).toBeDefined()
   expect((await ui.find({ type: 'Link' }))?.props.href).toBe('https://x/12')
@@ -1486,7 +1486,7 @@ test('pull requests on the board: a tag on the row, a line under the bar, and a 
   expect(await ui.find({ key: 'merge-no' })).toBeDefined()
   await ui.press({ key: 'merge-cancel' })
   await ui.press({ key: 'close' })
-  // The bottom one merges into main, and says so.
+  // The bottom one merges into main, and its line shows that.
   await ui.press({ key: 'card-T2' })
   await ui.press({ key: 'approve' })
   expect(await ui.find({ type: 'Text', text: /Merge PR #11 into main\?/ })).toBeDefined()
@@ -1495,13 +1495,13 @@ test('pull requests on the board: a tag on the row, a line under the bar, and a 
   expect(ran.some(argv => argv.join(' ') === 'gh pr merge 12 --merge')).toBe(false)
   expect(submitted.at(-1)).toContain('merged PR #11 (branch t2-bottom) into main')
   await ui.unmount()
-  // A PR merged into a branch other than main is said to be so, with no "switch to main".
+  // A PR merged into a branch other than main is shown as merged there, with no "switch to main".
   const note = approvalNote(some[0]!, { number: 12, title: '', state: 'open', url: '', ids: ['T1'], checks: 'pass', branch: 't1-top', base: 't2-bottom' })
   expect(note).toContain('into t2-bottom, not into main')
   expect(note).not.toContain('switch to main')
 })
 
-test('a card docks under the board: the board stays, another card swaps it, the open one or its ✕ closes it; a short pane shows the card alone', async ($, on) => {
+test('a card docks under the board: the board stays, another card replaces it, the open one or its ✕ closes it; a short pane shows the card alone', async ($, on) => {
   const ones = (n: number) => Array<number>(n).fill(1)
   expect(columnCaps({ todo: ones(10), in_progress: ones(2), blocked: [], review: ones(1), done: ones(40) }, 14, false)).toEqual({ todo: 2, in_progress: 2, blocked: 0, review: 1, done: 0 })
   expect(columnCaps({ todo: ones(10), in_progress: ones(2), blocked: [], review: ones(1), done: ones(40) }, 8, true)).toEqual({ todo: 6, in_progress: 2, blocked: 0, review: 1, done: 6 })
@@ -1525,13 +1525,13 @@ test('a card docks under the board: the board stays, another card swaps it, the 
   expect(await ui.find({ key: 'detail' })).toBeDefined()
   expect(await ui.find({ key: 'card-T2' })).toBeDefined()
   expect((await ui.find({ key: 'detail' }))?.text).toContain('First')
-  // Another card swaps what is docked.
+  // Another card replaces the docked one.
   await ui.press({ key: 'card-T2' })
   expect((await ui.find({ key: 'detail' }))?.text).toContain('Second')
   expect((await ui.find({ key: 'detail' }))?.text).not.toContain('First')
-  // The open card, pressed again, closes it. Open, its row is keyed apart, so the ring sent back to card-T2
-  // waits for the list drawn whole: the terminal keeps a ring by its place, which the docked list shifts.
-  // (The kit's pane holds no keys, so the ring itself is seen live only.)
+  // Pressing the open card again closes it. While it is open its row has its own key, so the focus ring returns
+  // to card-T2 only once the whole list is drawn: the terminal tracks the ring by position, which the docked
+  // list shifts. (The test kit's pane has no keys, so the ring itself can only be checked in a live session.)
   expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
   await ui.press({ key: 'card-T2-open' })
   expect(await ui.find({ key: 'detail' })).toBeUndefined()
@@ -1541,7 +1541,7 @@ test('a card docks under the board: the board stays, another card swaps it, the 
   await ui.press({ key: 'close-x' })
   expect(await ui.find({ key: 'detail' })).toBeUndefined()
   await ui.unmount()
-  // Too short for both: the card stands in for the board.
+  // Too short for both: only the card is shown.
   const short = await mount(20)
   await short.press({ key: 'card-T1' })
   expect(await short.find({ key: 'detail' })).toBeDefined()
@@ -1580,7 +1580,7 @@ test('no stray hand-offs: no h/m/u keys, a yes before handing over, none on done
   await ui.press({ key: 'close' })
   await ui.press({ key: 'card-T2' })
   expect(await ui.find({ key: 'hand' })).toBeUndefined()
-  // In review the card approves or asks for changes; handing it over again would only repeat the first ask.
+  // In review the card offers Approve or Request changes; handing it over again would only repeat the first ask.
   for (const id of ['T3', 'E1']) {
     await ui.press({ key: 'close' })
     await ui.press({ key: `card-${id}` })
@@ -1628,8 +1628,8 @@ test('branch and pull request per unit of work: named from the unit, body from i
   const reviewing = [{ ...some[0]!, status: 'review' as const }, { ...some[1]!, status: 'done' as const }, item('T3', { status: 'review', assignee: 'claude' })]
   const refs = { commits: [], prs: parsePrs(JSON.stringify([{ number: 4, title: 'E1: Agent coordination', headRefName: 'e1-agent-coordination', state: 'OPEN', url: 'https://x/4' }])) }
   const text = brief({ items: reviewing, activity: [], seen: {} }, 'claude', [], undefined, refs)!
-  expect(text).toMatch(/E1 .* — PR #4 https:\/\/x\/4/)
-  expect(text).toMatch(/T3 .* — no PR yet/)
+  expect(text).toMatch(/E1 .*, PR #4 https:\/\/x\/4/)
+  expect(text).toMatch(/T3 .*, no PR yet/)
 
   on('process.run', ($, e) => {
     const stdin = e.init?.stdin ?? ''
@@ -1694,16 +1694,16 @@ test('review with a pull request: checks on the card; Approve offers to merge an
   await ui.press({ key: 'merge-yes' })
   expect(ran.some(argv => argv.join(' ') === 'gh pr merge 8 --merge')).toBe(true)
   expect(wrote("status='done'")).toBe(false)
-  // Claude hears of the failure, with gh's reason, so it can deal with it.
+  // Claude is told about the failure, with gh's reason, so it can deal with it.
   expect(submitted.at(-1)).toContain('merging PR #8 (branch e1-things) failed: not mergeable')
   expect(submitted.at(-1)).toContain('E1 stays in review')
-  // Merged: approved, with a note saying so.
+  // Merged: approved, with a note that records the merge.
   mergeExit = 0
   await ui.press({ key: 'approve' })
   await ui.press({ key: 'merge-yes' })
   expect(wrote('Approved; merged PR #8.')).toBe(true)
   expect(wrote("status='done'")).toBe(true)
-  // And of the merge, to bring the checkout up to date.
+  // Claude is told about the merge too, so it can bring the checkout up to date.
   expect(submitted.at(-1)).toContain('approved roadmap epic E1 (E1 title) on the board and merged PR #8 (branch e1-things)')
   expect(submitted.at(-1)).toContain('switch to main and pull, delete the local branch e1-things')
   // Approve only never merges.
@@ -1720,7 +1720,7 @@ test('review with a pull request: checks on the card; Approve offers to merge an
   await ui.unmount()
 })
 
-test('undo on the board: Undo (z) takes back the last change; a line on a card reverts that change; a refusal says why', async ($, on) => {
+test('undo on the board: Undo (z) takes back the last change; a line on a card reverts that change; a refused undo shows why', async ($, on) => {
   const some = [item('T1', { status: 'done' })]
   const activity: Activity[] = [
     { id: 6, item_id: 'T1', author: 'user', type: 'edit', body: 'priority → p1', at: '2026-10-09T10:00:00Z', op: 6, undone: null, undoable: true },
@@ -1762,7 +1762,7 @@ test('undo on the board: Undo (z) takes back the last change; a line on a card r
   for (const id of [6, 7, 8]) expect(await ui.find({ key: `revert-${id}` })).toBeDefined()
   await ui.press({ key: 'revert-6' })
   expect(writes.at(-1)).toContain("SELECT 'UNDO-6';")
-  // A change something later overwrote is refused, in the guard's words.
+  // Undoing a change that a later change overwrote is refused, with the guard's message.
   isStale = true
   await ui.press({ key: 'revert-7' })
   expect(toasts.at(-1)).toBe("roadmap: T1's status has changed since; change it directly")
@@ -1800,7 +1800,7 @@ test('export and import: the whole roadmap to a JSON file, and back only into an
   expect(file).toEqual({ roadmap: 'export', schema: VERSION, exported_at: '2026-10-09T12:00:00.000Z', tables: { items: [{ id: 'T1', kind: 'task', title: 'kept' }], activity: [], counters: [{ prefix: 'T', n: 1 }] } })
   await call({ action: 'export', path: '~/saved.json' })
   expect(written['/home/me/saved.json']).toBeDefined()
-  // Into a roadmap that holds anything, it is refused; into an empty one, it lands in one transaction.
+  // Into a roadmap that holds anything, it is refused; into an empty one, it is written in one transaction.
   count = '3 9'
   expect(await call({ action: 'import', path: '~/saved.json' })).toContain('already holds 3 item(s) and 9 timeline entries')
   count = '0 0'
@@ -1808,11 +1808,11 @@ test('export and import: the whole roadmap to a JSON file, and back only into an
   const landed = scripts.find(one => one.includes('INSERT OR IGNORE INTO items(id, kind, title)'))!
   expect(landed.startsWith('BEGIN IMMEDIATE;')).toBe(true)
   expect(landed).toContain("INSERT INTO counters(prefix, n) VALUES ('T', 1)")
-  // Not an export, or one from a newer build: refused, naming why.
+  // Not an export, or one from a newer build: refused, with the reason.
   written['/work/project/x.json'] = '{"hello": 1}'
   expect(await call({ action: 'import', path: 'x.json' })).toBe('not a roadmap export')
   written['/work/project/y.json'] = JSON.stringify({ roadmap: 'export', schema: VERSION + 1, exported_at: '', tables: {} })
-  expect(await call({ action: 'import', path: 'y.json' })).toContain('from a newer roadmap mod')
+  expect(await call({ action: 'import', path: 'y.json' })).toContain('from a newer roadmap plugin')
   expect(await call({ action: 'import', path: 'nope.json' })).toBe('cannot read nope.json')
 })
 
@@ -1863,7 +1863,7 @@ test('release notes: an agent sets a task done with its note; the PR body lists 
     const reply = await $.tool.call({ tool: 'mcp__roadmap__roadmap', ...input } as never)
     return String(reply.result ?? reply.deny)
   }
-  // Done without a note is asked for one, naming the section its type suggests, and writes nothing.
+  // Done without a note is refused and nothing is written; the reply asks for a note and names the section its type suggests.
   scripts.length = 0
   const asked = await call({ action: 'update', id: 'T1', status: 'done' })
   expect(asked).toContain('T1 has no release note')
@@ -1900,7 +1900,7 @@ test('changelog: merged notes go under [Unreleased], each in its section, newest
   expect(withNotes('# Changelog\n\n## 0.4.0\n\n- x\n', [{ section: 'Fixed', note: 'y' }]).text).toBe('# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- y\n\n## 0.4.0\n\n- x\n')
   expect(withNotes(undefined, [{ section: 'Added', note: 'First.' }]).text.replace(/\n*$/, '\n')).toBe('# Changelog\n\n## [Unreleased]\n\n### Added\n\n- First.\n')
 
-  // Merged work only: an open PR holds its notes back; a merged one, or none at all, lets them through.
+  // Merged work only: notes of a task with an open PR are left out; with a merged PR, or no PR at all, they are written.
   const some = [
     item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done', note: 'In an open PR' }),
     item('E2', { assignee: 'claude' }), item('T2', { parent: 'E2', status: 'done', note: 'Merged' }),
@@ -1958,7 +1958,7 @@ test('release notes on the board: setting a task done asks for its note; the car
   await ui.unmount()
 })
 
-test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s card reaches it at once when set to, else with the next prompt', async ($, on) => {
+test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s card is sent to it right away when that is turned on, else with the next prompt', async ($, on) => {
   const some = [item('T1', { assignee: 'claude', status: 'in_progress', title: 'Parser' }), item('T2', { title: 'Free' })]
   const activity: Activity[] = []
   const filled: string[] = []
@@ -1967,7 +1967,7 @@ test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s car
   const stored: Record<string, unknown> = {}
   on('process.run', ($, e) => {
     const stdin = e.init?.stdin ?? ''
-    // A comment written lands in the timeline the next read sees.
+    // A written comment is added to the timeline, so the next read sees it.
     const said = /'user', 'comment', '([^']*)'/.exec(stdin)?.[1]
     if (stdin.startsWith('BEGIN') && said) activity.push({ id: 100 + activity.length, item_id: 'T1', author: 'user', type: 'comment', body: said, at: '2026-10-09T10:00:00Z' })
     return { value: fakeSqlite(stdin, { items: some, activity, seen: {} }) }
@@ -1990,8 +1990,8 @@ test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s car
   await ui.press({ key: 'card-T1' })
   await ui.press({ key: 'ask' })
   expect(filled).toEqual(['About roadmap task T1 (Parser): '])
-  // Off by default: the comment waits, and Claude reads it in the brief of the person's next prompt.
-  expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('Waits for your prompt')
+  // Off by default: the comment is held, and Claude reads it in the brief of the person's next prompt.
+  expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('With your next prompt')
   await ui.input({ key: 'comment', text: 'use the new lexer' } as never)
   expect(submitted.length).toBe(1)
   await $.prompt.submit({ text: 'next thing', wait: false, origin: { kind: 'composer' } })
@@ -2002,7 +2002,7 @@ test('board to Claude: Ask Claude fills the prompt; a comment on an agent\'s car
   expect((await ui.find({ key: 'comment-turns' }))?.props.label).toBe('Tells it now')
   await ui.input({ key: 'comment', text: 'and skip comments' } as never)
   expect(submitted.at(-1)).toBe('The user commented on roadmap task T1 (Parser), which you hold: "and skip comments". Read it with the roadmap tool (show T1) and act on it, commenting back there.')
-  // A card nobody holds has no one to tell: no toggle, and no turn.
+  // On a card nobody holds there is no one to tell: no toggle, and no turn.
   await ui.press({ key: 'close' })
   await ui.press({ key: 'card-T2' })
   expect(await ui.find({ key: 'comment-turns' })).toBeUndefined()
@@ -2074,7 +2074,7 @@ test('merge a stack from its bottom card: in order, each after its checks pass o
   await ui.press({ key: 'close' })
   await ui.unmount()
 
-  // The top's checks fail once it is on main: the run stops there, its item stays in review, and Claude hears where.
+  // The top's checks fail once it is on main: the run stops there, its item stays in review, and Claude is told where.
   ran.length = 0
   scripts.length = 0
   failing = 15
@@ -2114,7 +2114,7 @@ test('merge a stack from its bottom card: in order, each after its checks pass o
   await middle.press({ key: 'close' })
   await middle.unmount()
 
-  // gh answers something that isn't JSON: the run stops there and says so, and a later run isn't refused as already merging.
+  // gh answers something that isn't JSON: the run stops there and reports it, and a later run isn't refused as already merging.
   failing = 0
   isGarbled = true
   ran.length = 0
@@ -2152,7 +2152,7 @@ test('run tasks at once: picked backlog rows each get an agent, a worktree and a
       return { value: { ...fakeSqlite('', null), stdout: e.argv[1] === 'rev-parse' ? 'origin/main\n' : '' } }
     }
     if (e.argv[0] === 'gh') return { value: { ...fakeSqlite('', null), stdout: '[]' } }
-    // Assignments land, so the next read sees whose each task is.
+    // Assignments are written, so the next read sees whose each task is.
     for (const [, who, id] of [...stdin.matchAll(/UPDATE items SET assignee='([^']*)'.*? WHERE id='(T\d)'/g)])
       some.splice(some.findIndex(one => one.id === id), 1, { ...find(some, id!)!, assignee: who! })
     return { value: fakeSqlite(stdin, { items: some, activity: [], seen: {} }) }
@@ -2176,9 +2176,9 @@ test('run tasks at once: picked backlog rows each get an agent, a worktree and a
   await ui.press({ key: 'tab-plan' })
   for (const id of ['T1', 'T2', 'T3']) await ui.press({ key: `pick-${id}` })
   await ui.press({ key: 'run-picked' })
-  expect(await ui.find({ type: 'Text', text: /Run T1, T2, T3 at once, each by its own agent in its own worktree\? T3 starts when what it waits on is done\./ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Run T1, T2, T3 at once, each by its own agent in its own worktree\? T3 starts once its blockers are done\./ })).toBeDefined()
   await ui.press({ key: 'parallel-yes' })
-  // T1 and T2 start now, each in a worktree on its own branch from the main line; T3 waits on T1.
+  // T1 and T2 start now, each in a worktree on its own branch from the main line; T3 is blocked by T1.
   expect(ran.filter(one => one.startsWith('git worktree'))).toEqual([
     'git worktree add -b t1-alpha /work/project/.claude/worktrees/t1-alpha origin/main',
     'git worktree add -b t2-beta /work/project/.claude/worktrees/t2-beta origin/main',
@@ -2211,7 +2211,7 @@ test('run tasks at once: picked backlog rows each get an agent, a worktree and a
   await ui.unmount()
 })
 
-test('mark all read: the button by the unread count reads everything; a comment after counts again', async ($, on) => {
+test('mark all read: the button by the unread count marks everything read; a comment after counts again', async ($, on) => {
   const snap: Snapshot = {
     items: [item('T1'), item('T2')],
     activity: [
@@ -2268,7 +2268,7 @@ test('ship: versions compare, manifests bump in place, and [Unreleased] is cut w
   expect(cutRelease('# C\n\n## [Unreleased]\n\n- x\n', '0.1.0', 'd', 'https://w').text).toBe('# C\n\n## [Unreleased]\n\n## [0.1.0] - d\n\n- x\n\n[Unreleased]: https://w/compare/v0.1.0...HEAD\n[0.1.0]: https://w/releases/tag/v0.1.0\n')
 })
 
-test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or a dirty tree; tagging waits on the user', async ($, on) => {
+test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or a dirty tree; tagging needs the user\'s approval', async ($, on) => {
   const files: Record<string, string> = {
     '/p/.claude-plugin/plugin.json': '{\n  "name": "roadmap",\n  "version": "0.4.0"\n}\n',
     '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n',
@@ -2330,14 +2330,14 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   ])
   expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.5.0"')
   expect(files['/p/CHANGELOG.md']).toContain('## [Unreleased]\n\n## [0.5.0] - 2026-10-10\n\n### Added')
-  // After the merge (the manifest reads 0.5.0): no merged PR yet is said; then tagging waits on the user's say.
+  // After the merge (the manifest shows 0.5.0): first the reply says no PR is merged yet; then tagging needs the user's approval.
   expect(await ship({ version: '0.5.0' })).toBe('no merged PR from release-v0.5.0 yet: merge the release PR first')
   mergedPr = JSON.stringify([{ number: 30, mergeCommit: { oid: 'abc123' } }])
   expect(await ship({ version: '0.5.0' })).toContain("Tagging v0.5.0 and publishing the release is the user's call")
   expect(ran.some(one => one.startsWith('git tag -a'))).toBe(false)
   ran.length = 0
   expect(await ship({ version: '0.5.0', approved: true })).toBe(
-    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now serves 0.5.0. Deleted release-v0.5.0.")
+    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now points at 0.5.0. Deleted release-v0.5.0.")
   // stable, what installs get, moves to the release, and only here; then the release branch goes, here and on origin.
   expect(ran.slice(-4)).toEqual([
     'git push origin abc123:refs/heads/stable',
@@ -2353,9 +2353,9 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   // A branch that won't go never fails the release.
   deleteFails = true
   expect(await ship({ version: '0.5.0', approved: true })).toBe(
-    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now serves 0.5.0.")
+    "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now points at 0.5.0.")
   deleteFails = false
-  // A stable that can't fast-forward is left where it is, and said so; the release itself stands.
+  // A stable that can't fast-forward is left where it is, and the reply says so; the release still succeeds.
   stableFails = true
   expect(await ship({ version: '0.5.0', approved: true })).toContain('stable was not moved')
   stableFails = false
@@ -2368,7 +2368,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(await $.tool.call({ tool: 'mcp__roadmap__roadmap', action: 'ship', version: '0.5.0', approved: true, agentId: 'a1' } as never).then(r => String(r.result ?? r.deny))).toContain("the user's call")
 })
 
-test('ship with nothing under [Unreleased] writes the notes of merged work itself, and takes a CHANGELOG changelog left uncommitted', async ($, on) => {
+test('ship with nothing under [Unreleased] writes the notes of merged work itself, and accepts a CHANGELOG that the changelog action left uncommitted', async ($, on) => {
   const files: Record<string, string> = {
     '/p/.claude-plugin/plugin.json': '{\n  "name": "roadmap",\n  "version": "0.6.0"\n}\n',
     '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n## [0.6.0] - 2026-10-09\n\n### Fixed\n\n- Old fix.\n\n[Unreleased]: https://github.com/o/r/compare/v0.6.0...HEAD\n',
@@ -2416,7 +2416,7 @@ test('ship with nothing under [Unreleased] writes the notes of merged work itsel
   expect(log).toContain('## [Unreleased]\n\n## [0.7.0] - 2026-10-10\n\n### Fixed\n\n- ship writes the notes itself.')
   expect(log.match(/Old fix\./g)).toHaveLength(1)
   expect(log).not.toContain('Not merged yet.')
-  // One commit on the release branch carries the bump and the notes; main is left as it was.
+  // One commit on the release branch contains the bump and the notes; main is left as it was.
   expect(ran.filter(one => one.startsWith('git commit') || one.startsWith('git switch'))).toEqual(['git switch -c release-v0.7.0', 'git commit -am Release 0.7.0', 'git switch main'])
   expect(ran.find(one => one.startsWith('gh pr create'))).toContain('### Fixed\n\n- ship writes the notes itself.')
 })
@@ -2455,7 +2455,7 @@ test('timeline: milestones and epics by due date with their progress; late work 
   await ui.press({ key: 'tab-roadmap' })
   expect((await ui.find({ key: 'time-E1' }))?.text).toContain('2026-10-05  ▓▓▓▓▓░░░░░ 1/2  4 days late, 1 open')
   expect((await ui.find({ key: 'time-M1' }))?.text).toContain('2026-10-20  ▓▓▓░░░░░░░ 1/3  in 11 days')
-  expect((await ui.find({ key: 'time-M2' }))?.text).toMatch(/M2 Later +— /)
+  expect((await ui.find({ key: 'time-M2' }))?.text).toMatch(/M2 Later +- /)
   // A row opens its card.
   await ui.press({ key: 'time-M1' })
   expect(await ui.find({ key: 'detail' })).toBeDefined()
