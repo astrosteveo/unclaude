@@ -1,5 +1,5 @@
-# Laid by Claude Code on every load: this build's API types for the editor and tsc.
+# Claude Code writes these on every load: its API types, for the editor and tsc.
 .claude-plugin/types/
-# The project's own roadmap database (binary, per checkout).
+# This project's own roadmap database (a binary file, one per checkout).
 .claude/roadmap.db
 .claude/roadmap.db-*
