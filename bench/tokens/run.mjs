@@ -8,7 +8,7 @@
 // Each run copies template/ into its own git repository. The "with" arm loads this checkout with
 // --plugin-dir and gets the epic from seed.sql, which is written straight into the roadmap database
 // (no model call). The "without" arm gets epic.md in the prompt. Both arms turn off an installed
-// roadmap@unclaude, so the only difference between them is this checkout.
+// roadmap@roadmap, so the only difference between them is this checkout.
 // Each arm first runs a one-word warm-up (see WARM), and the warm-up's cost is left out of the table.
 // Runs go in parallel and spend real tokens on your own account.
 
@@ -26,7 +26,7 @@ const PROMPTS = {
   with: () => `Implement E1 from the roadmap. ${NO_REMOTE}`,
   without: () => `Implement this epic. Commit each task separately with its id in the message. ${NO_REMOTE}\n\n${readFileSync(join(SCENARIO, 'epic.md'), 'utf8')}`,
 }
-const SETTINGS = JSON.stringify({ enabledPlugins: { 'roadmap@unclaude': false } })
+const SETTINGS = JSON.stringify({ enabledPlugins: { 'roadmap@roadmap': false } })
 
 const { values: opt } = parseArgs({
   options: {

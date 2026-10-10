@@ -2257,8 +2257,8 @@ test('ship: versions compare, manifests bump in place, and [Unreleased] is cut w
   expect(isAfter([0, 3, 9], [0, 4, 0])).toBe(false)
   expect(withVersion('{\n  "name": "x",\n  "version": "0.4.0",\n  "deps": { "version": "9" }\n}\n', '0.5.0')).toBe('{\n  "name": "x",\n  "version": "0.5.0",\n  "deps": { "version": "9" }\n}\n')
   expect(withVersion('{}', '1.0.0')).toBeUndefined()
-  expect(webOf('git@github.com:astrosteveo/unclaude.git\n')).toBe('https://github.com/astrosteveo/unclaude')
-  expect(webOf('https://github.com/astrosteveo/unclaude.git')).toBe('https://github.com/astrosteveo/unclaude')
+  expect(webOf('git@github.com:astrosteveo/roadmap.git\n')).toBe('https://github.com/astrosteveo/roadmap')
+  expect(webOf('https://github.com/astrosteveo/roadmap.git')).toBe('https://github.com/astrosteveo/roadmap')
   const log = '# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n'
   const cut = cutRelease(log, '0.5.0', '2026-10-10', 'https://github.com/o/r')
   expect(cut.notes).toBe('### Added\n\n- Undo.')

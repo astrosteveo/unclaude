@@ -13,15 +13,17 @@ That line appears above the prompt while Claude works. It shows the task, who ho
 Run these two commands in a Claude Code session in your terminal:
 
 ```
-/plugin marketplace add astrosteveo/unclaude#stable
-/plugin install roadmap@unclaude
+/plugin marketplace add astrosteveo/roadmap#stable
+/plugin install roadmap@roadmap
 ```
 
 Pick a scope when asked. User scope makes the plugin available in every project.
 
 `#stable` installs the latest release. The `stable` branch only moves when a version is released. Work lands on `main` between releases.
 
-To update later, refresh the marketplace with `/plugin marketplace update unclaude`, then update the plugin with `claude plugin update roadmap@unclaude`. You can also turn on auto-update for the marketplace under `/plugin`.
+To update later, refresh the marketplace with `/plugin marketplace update roadmap`, then update the plugin with `claude plugin update roadmap@roadmap`. You can also turn on auto-update for the marketplace under `/plugin`.
+
+If you installed the plugin from the old `unclaude` marketplace, remove that marketplace with `/plugin marketplace remove unclaude`, then run the two install commands above. Your roadmaps are stored in each repository's `.claude/roadmap.db`, so reinstalling doesn't affect them.
 
 **Requirements:** the `sqlite3` command line tool (`pacman -S sqlite`, `apt install sqlite3`, `dnf install sqlite`, `brew install sqlite`). If `git` and `gh` are installed, the plugin uses them to link commits and pull requests to tasks.
 
