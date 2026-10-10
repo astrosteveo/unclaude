@@ -711,3 +711,39 @@ test('the key hints sit on a docked pane\'s last row, on every tab, with a card 
   expect(paintPane(await inline.drawn(), 84).lines.length).toBeLessThan(40)
   await inline.unmount()
 })
+
+test('scrolling moves a line at a time, through wrapped blocks too: a block cut by an edge shows its lines in the window', async ($, on) => {
+  const long = 'A description that runs over several lines when the pane is narrow, so that it wraps. '.repeat(5)
+  const items = [item('T1', {
+    title: 'Wrapped', description: long,
+    checklist: [1, 2, 3, 4].map(n => ({ n, text: `criterion ${n} that is long enough to wrap onto a second line in a narrow card`, done: false })),
+  })]
+  const activity = [1, 2, 3, 4, 5].map(id => ({ id, item_id: 'T1', author: 'claude', type: 'comment', body: `comment ${id}: ${'words that wrap '.repeat(6)}`, at: '2026-10-09T10:00:00Z' }))
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity, seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const rows = 24
+  const props = { title: 'Roadmap', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: rows } } as never
+  const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props })
+  await ui.press({ key: 'card-T1' })
+  // The window between the marks, as drawn.
+  const window = async () => {
+    const lines = paintPane(await ui.drawn(), 60).lines
+    const top = lines.findIndex(line => /more lines? above|^ *Description/.test(line))
+    const bottom = lines.findIndex(line => /more lines? below/.test(line))
+    return { lines: lines.slice(top + 1, bottom), above: Number(/↑ (\d+) more/.exec(lines.join('\n'))?.[1] ?? 0) }
+  }
+  let before = await window()
+  for (let step = 1; step <= 12; step++) {
+    await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by: 1, bodyRows: rows, contentRows: rows, origin: { kind: 'person' } } as never)
+    await ui.redraw(props)
+    const after = await window()
+    // One line further down every time: the count above goes up by one and the lines slide up by one.
+    expect(after.above).toBe(step)
+    if (step > 1) expect(after.lines.slice(0, -1).map(one => one.trim())).toEqual(before.lines.slice(1).map(one => one.trim()))
+    before = after
+  }
+  await ui.unmount()
+})
