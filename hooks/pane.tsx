@@ -4,7 +4,7 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import { kids, paint } from './paint'
 import {
-  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
+  backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackBelow, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn, upOf, tasksIn, spanOf, targetOf, releaseOf, unreleased, shipNote, releasesOf, nextVersion, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
@@ -1400,14 +1400,17 @@ export function drawPane(
   // The bottom of a stack merges the whole of it.
   const stack = cardPr ? stackFrom(known, cardPr) : []
   const isStack = stack.length > 1
+  // Stacked itself, it can merge what is beneath it and then itself, in order.
+  const down = cardPr && under ? stackBelow(known, cardPr) : []
+  const DOWN = `down:${item?.id ?? ''}`
   const prText = cardPr
-    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  stacked on #${under.number}: merge that first` : ''}${isStack ? `  stack ${stackText(stack)} [ Merge the stack ]` : ''}${stackRun ? `  ${stackRun}` : ''}`
+    ? `PR #${cardPr.number} [open] ${CHECKS[cardPr.checks]} ${cardPr.branch} → ${cardPr.base || '?'}${under ? `  [ stacked on #${under.number}: merge ${down.slice(0, -1).map(pr => `#${pr.number}`).join(', ')}, then this ]` : ''}${isStack ? `  stack ${stackText(stack)} [ Merge the stack ]` : ''}${stackRun ? `  ${stackRun}` : ''}`
     : ''
   const prRows = cardPr ? tall(prText) : 0
   const barRows = !item
     ? 0
     : (item.kind === 'task' ? buttonRows([...STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one])), `${WONTDO_GLYPH} Won't do`]) : 1) +
-      (isRequesting || handing === item.id || merging === item.id || noting === item.id || dropping === item.id || stacking === item.id ? 1 :
+      (isRequesting || handing === item.id || merging === item.id || noting === item.id || dropping === item.id || stacking === item.id || stacking === DOWN ? 1 :
         parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
   const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}${shipped ? `  ${shipped}` : ''}` : ''
   // Key hints, most useful first: as many as fit in the rows the pane gives them (one wide, two narrow),
@@ -1501,6 +1504,14 @@ export function drawPane(
         )}
         {parallelAsk && item.kind !== 'task' ? (
           confirmParallel(parallelAsk, 'parallel-confirm')
+        ) : stacking === DOWN && down.length > 1 ? (
+          <Box key="stack-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
+            <Text color="yellow">
+              Merge {down.map(pr => `#${pr.number}`).join(', then ')} into {down[0]!.base || 'main'}, each once its checks pass there?
+            </Text>
+            <Button key="stack-yes" label={`Merge ${down.length}`} onPress={() => act.mergeStack(down)} />
+            <Button key="stack-cancel" label="Cancel" onPress={() => act.askStack(null)} />
+          </Box>
         ) : stacking === item.id && isStack ? (
           <Box key="stack-confirm" flexDirection="row" columnGap={1} flexWrap="wrap">
             <Text color="yellow">
@@ -1582,10 +1593,15 @@ export function drawPane(
           <Text color={CHECKS_COLOR[cardPr.checks]}> {CHECKS[cardPr.checks]}</Text>
           <Text dimColor> {cardPr.branch} → </Text>
           <Text>{cardPr.base || '?'}</Text>
-          {under && <Text color="yellow">  stacked on #{under.number}: merge that first</Text>}
+          {under && stackRun && <Text color="yellow">  stacked on #{under.number}</Text>}
           {isStack && <Text dimColor>  stack {stackText(stack)}</Text>}
           {stackRun && <Text color="yellow">  {stackRun}</Text>}
         </Text>
+        {/* Stacked: one press merges the PRs beneath it, then this one (after a yes). */}
+        {under && !stackRun && (
+          <Button key="merge-down" label={`stacked on #${under.number}: merge ${down.slice(0, -1).map(pr => `#${pr.number}`).join(', ')}, then this`}
+            onPress={() => act.askStack(DOWN)} />
+        )}
         {isStack && !stackRun && <Button key="merge-stack" label="Merge the stack" onPress={() => act.askStack(item.id)} />}
         </Box>
       )}

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { spanOf, nextVersion, shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { stackBelow, spanOf, nextVersion, shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -1479,7 +1479,7 @@ test('pull requests on the board: a tag on the row, a line under the bar, and a 
   await ui.press({ key: 'card-T1' })
   expect(await ui.find({ key: 'pr-line' })).toBeDefined()
   expect((await ui.find({ type: 'Link' }))?.props.href).toBe('https://x/12')
-  expect(await ui.find({ type: 'Text', text: /stacked on #11: merge that first/ })).toBeDefined()
+  expect((await ui.find({ key: 'merge-down' }))?.props.label).toBe('stacked on #11: merge #11, then this')
   await ui.press({ key: 'approve' })
   expect(await ui.find({ type: 'Text', text: /PR #12 is stacked on #11; merge #11 first/ })).toBeDefined()
   expect(await ui.find({ key: 'merge-yes' })).toBeUndefined()
@@ -2087,6 +2087,28 @@ test('merge a stack from its bottom card: in order, each after its checks pass o
   expect(submitted.at(-1)).toContain('then stopped at PR #15 (branch t3-top): its checks failed on main')
   await again.press({ key: 'close' })
   await again.unmount()
+
+  // From a card higher in the stack: merge what is beneath it, then it; what sits above it is left alone.
+  ran.length = 0
+  scripts.length = 0
+  failing = 0
+  const middle = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
+  })
+  await middle.press({ key: 'card-T2' })
+  expect((await middle.find({ key: 'merge-down' }))?.props.label).toBe('stacked on #11: merge #11, then this')
+  await middle.press({ key: 'merge-down' })
+  expect(await middle.find({ type: 'Text', text: /Merge #11, then #12 into main, each once its checks pass there\?/ })).toBeDefined()
+  await middle.press({ key: 'stack-yes' })
+  expect(ran).toEqual([
+    'gh pr view 11 --json statusCheckRollup,mergeable', 'gh pr merge 11 --merge',
+    'gh pr edit 12 --base main', 'gh pr update-branch 12', 'gh pr view 12 --json statusCheckRollup,mergeable', 'gh pr merge 12 --merge',
+  ])
+  for (const id of ['T1', 'T2']) expect(scripts.some(one => one.includes(`status='done'`) && one.includes(`WHERE id='${id}'`))).toBe(true)
+  expect(scripts.some(one => one.includes(`status='done'`) && one.includes("WHERE id='T3'"))).toBe(false)
+  await middle.press({ key: 'close' })
+  await middle.unmount()
 
   // gh answers something that isn't JSON: the run stops there and says so, and a later run isn't refused as already merging.
   failing = 0
