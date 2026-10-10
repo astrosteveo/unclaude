@@ -7,7 +7,7 @@ import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
   agentName, approvalNote, askAbout, readyIn, timeline, isMessage, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
-  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere,
+  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere, placeOf, upOf, targetOf, checkTarget, changelogVersions, shippedIn, releasesOf,
 } from './model'
 
 const PANE = 'roadmap'
@@ -26,6 +26,14 @@ const requesting = atom({ plugin: 'roadmap', key: 'requesting' } as const, false
 // The board's filter as typed, and whether its field is open.
 const filter = atom({ plugin: 'roadmap', key: 'filter' } as const, '')
 const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
+// Whether the field filing to the inbox is open.
+const filing = atom({ plugin: 'roadmap', key: 'filing' } as const, false)
+// Whether the Releases tab asks for the version to release.
+const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
+// The roadmap's zoom: 0 shows all the dated work; each step closer around today.
+const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
+// The inbox item whose row asks where it goes (Into…) or why it's dropped (Drop…).
+const triaging = atom({ plugin: 'roadmap', key: 'triaging' } as const, null as { id: string; mode: 'into' | 'drop' } | null)
 // The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
 const flipped = atom({ plugin: 'roadmap', key: 'flipped' } as const, [] as string[])
 // Whether the board's Done column shows all done work rather than the recent.
@@ -138,7 +146,9 @@ async function refreshRefs($: EngineInterface, isForced = false) {
     const ran = await runAt($, ['git', 'log', '-n', '1000', '--format=%h%x1f%an%x1f%as%x1f%B%x1e']).catch(() => undefined)
     commits = ran && ran.exitCode === 0 ? parseGitLog(ran.stdout) : []
   }
-  if (isForced || now - ghAskedAt > GH_EVERY) {
+  // gh and the remote go over the network: asked far less often than git.
+  const isRemoteTime = isForced || now - ghAskedAt > GH_EVERY
+  if (isRemoteTime) {
     ghAskedAt = now
     const ran = await runAt($, ['gh', 'pr', 'list', '--state', 'all', '--limit', '200', '--json', 'number,title,headRefName,baseRefName,state,url,statusCheckRollup'], { timeoutMs: 15_000 })
       .catch(() => undefined)
@@ -148,8 +158,15 @@ async function refreshRefs($: EngineInterface, isForced = false) {
       prs = []
     }
   }
-  if (JSON.stringify({ commits, prs }) !== JSON.stringify(current)) await update($, refs, () => ({ commits, prs }))
-  return { commits, prs }
+  let stable = current.stable
+  if (isRemoteTime) {
+    // The version installs get: the tag the stable branch's head carries.
+    const head = (await runAt($, ['git', 'ls-remote', '--heads', 'origin', 'stable'], { timeoutMs: 15_000 }).catch(() => undefined))?.stdout.split(/\s/)[0]
+    const tags = head ? (await runAt($, ['git', 'tag', '--points-at', head]).catch(() => undefined))?.stdout ?? '' : ''
+    stable = tags.split('\n').map(one => one.trim()).find(one => /^v\d+\.\d+\.\d+$/.test(one))?.slice(1)
+  }
+  if (JSON.stringify({ commits, prs, stable }) !== JSON.stringify(current)) await update($, refs, () => ({ commits, prs, ...(stable ? { stable } : {}) }))
+  return { commits, prs, ...(stable ? { stable } : {}) }
 }
 
 export const MISSING_SQLITE =
@@ -362,6 +379,34 @@ async function backup($: EngineInterface) {
   if (old.length) await $.process.run(['rm', '-f', ...old.map(name => `${dir}/${name}`)]).catch(() => undefined)
 }
 
+// Whether this load has looked for releases to fill in from the CHANGELOG.
+let isHistoryChecked = false
+
+/**
+ * Fills in the record of past releases, once, when the roadmap has none: each version in CHANGELOG.md, its
+ * tag and release PR where they exist, and the tasks whose notes it carried.
+ */
+async function fillReleases($: EngineInterface, known: Refs) {
+  isHistoryChecked = true
+  const snap = await read($, snapshot)
+  if ((snap.releases ?? []).length > 0) return
+  const text = await $.fs.read(await inProject($, 'CHANGELOG.md')).then(String, () => '')
+  const versions = changelogVersions(text)
+  if (versions.length === 0) return
+  const taken = new Set<string>()
+  const scripts: string[] = []
+  for (const one of versions) {
+    const tag = `v${one.version}`
+    const isTagged = (await runAt($, ['git', 'rev-parse', '-q', '--verify', `refs/tags/${tag}`]).catch(() => undefined))?.exitCode === 0
+    const pr = known.prs.find(p => p.branch === `release-${tag}` && p.state === 'merged')?.number ?? null
+    const tasks = shippedIn(snap.items, one.body, taken)
+    for (const task of tasks) taken.add(task.id)
+    scripts.push(db.recordRelease({ version: one.version, tag: isTagged ? tag : null, at: one.date, pr, notes: one.body, tasks }))
+  }
+  await sql($, db.atomic(scripts))
+  await refresh($)
+}
+
 /** Reloads when another process (an agent in another session, a git checkout) changed the database. */
 async function poll($: EngineInterface) {
   const stamps = await Promise.all(
@@ -380,11 +425,13 @@ async function poll($: EngineInterface) {
   // A backup that fails (no home, a full disk) never stops the board.
   await backup($).catch(() => undefined)
   if (!isIgnoreChecked) await checkIgnore($)
-  await refreshRefs($)
+  const known = await refreshRefs($)
+  // Never stands in the way of the board: a history that can't be read is left for another load.
+  if (!isHistoryChecked) await fillReleases($, known).catch(() => undefined)
 }
 
 type Input = {
-  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship'
+  action: 'show' | 'next' | 'find' | 'pr' | 'add' | 'plan' | 'update' | 'claim' | 'release' | 'comment' | 'check' | 'remove' | 'batch' | 'export' | 'import' | 'changelog' | 'ship' | 'file' | 'triage'
   id?: string
   ids?: string[] | string
   ref?: string
@@ -416,6 +463,10 @@ type Input = {
   path?: string
   note?: string
   wontdo?: string
+  milestone?: string
+  start?: string
+  into?: string
+  fold?: 'comment' | 'checklist'
   section?: string
   version?: string
 }
@@ -522,13 +573,16 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
   if (a.priority && !PRIORITIES.includes(a.priority)) fail(`priority must be one of ${PRIORITIES.join(', ')}`)
   if (a.type && !TYPES.includes(a.type)) fail(`type must be one of ${TYPES.join(', ')}`)
   if (a.due && !/^\d{4}-\d{2}-\d{2}$/.test(a.due)) fail('due must be a date, YYYY-MM-DD')
+  if (a.start && !/^\d{4}-\d{2}-\d{2}$/.test(a.start)) fail('start must be a date, YYYY-MM-DD')
+  const startsKind = a.action === 'add' ? a.kind : a.id ? find(snap.items, a.id)?.kind : undefined
+  if (a.start && startsKind === 'task') fail('Only milestones and epics take a start date; a task starts when it is claimed')
 
   switch (a.action) {
     case 'show':
       if (a.id) {
         const it = need()
         const linked = refsText(refsFor(snap.items, await refreshRefs($, true), it))
-        return detail(await withHistory($, snap, it.id, t), it) + (linked ? `\n${linked}` : '')
+        return detail(await withHistory($, snap, it.id, t), it, 15, await read($, refs)) + (linked ? `\n${linked}` : '')
       }
       return outline(snap.items) || 'The roadmap is empty.'
     case 'next': {
@@ -545,6 +599,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         type: a.type ? [a.type] : undefined,
         labels: a.labels === undefined ? undefined : idList(a.labels).map(db.label),
         under: a.under || undefined,
+        milestone: a.milestone || undefined,
         text: a.text || undefined,
       }
       if (query.under && !find(snap.items, query.under)) fail(`No item ${query.under}`)
@@ -555,7 +610,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const cap = 40
       return [
         `${found.length} match${found.length === 1 ? '' : 'es'}:`,
-        ...found.slice(0, cap).map(one => `${line(snap.items, one)}${one.parent ? ` [${one.parent}]` : ''}`),
+        ...found.slice(0, cap).map(one => `${line(snap.items, one)}${upOf(one) ? ` [${upOf(one)}]` : ''}`),
         ...(found.length > cap ? [`…${found.length - cap} more; narrow the search`] : []),
       ].join('\n')
     }
@@ -585,14 +640,21 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       const related = a.relates_to === undefined ? [] : checkLinks(snap.items, '\u0000new', idList(a.relates_to))
       const original = a.duplicates ? checkLinks(snap.items, '\u0000new', [a.duplicates]) : []
       const tags = a.labels === undefined ? [] : idList(a.labels)
-      const parent = checkParent(snap.items, a.kind!, a.parent)
+      const place = placeOf(snap.items, a.kind!, a.parent)
+      // A target of its own: on an epic, or on a task in an epic (where it overrides the epic's).
+      if (a.milestone) {
+        const target = checkTarget(snap.items, a.kind!, a.milestone)
+        if (place.milestone && target !== place.milestone) fail(`under ${place.milestone}, ${a.kind} already targets it; leave milestone out or put it under ${target}`)
+        place.milestone = target
+      }
       const { note, section } = noteOf(a)
       if ((note || section) && a.kind !== 'task') fail('Only tasks carry a release note')
       const id = await sql($, db.insert(actor, {
         kind: a.kind!,
         title: a.title!.trim(),
-        parent,
+        ...place,
         description: a.description,
+        start: a.start,
         due: a.due,
         status: a.status,
         assignee: a.assignee,
@@ -657,7 +719,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         fail(`${it.id} closes when its tasks are done; finish those (they close as you go when ${it.id} is assigned to you)`)
       // Every argument checked before the first write, so a call that fails changes nothing.
       if (a.blocked_by !== undefined && it.kind !== 'task') fail('Only tasks wait on other tasks')
-      const parent = a.parent === undefined ? undefined : checkParent(snap.items, it.kind, a.parent, it.id)
+      const place = a.parent === undefined ? undefined : placeOf(snap.items, it.kind, a.parent, it.id)
+      const target = a.milestone === undefined ? undefined : checkTarget(snap.items, it.kind, a.milestone)
       const blockers = a.blocked_by === undefined ? undefined : checkBlockers(snap.items, it.id, idList(a.blocked_by))
       const related = a.relates_to === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.relates_to))
       const original = a.duplicates === undefined ? undefined : checkLinks(snap.items, it.id, idList(a.duplicates))
@@ -666,6 +729,7 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         status: isToReview ? 'review' : a.status,
         description: a.description === undefined ? undefined : a.description || null,
         due: a.due === undefined ? undefined : a.due || null,
+        start: a.start === undefined ? undefined : a.start || null,
         assignee: a.assignee === undefined ? undefined : a.assignee || null,
         // Unassigned without a status of its own (the board's Unassign), a task under way goes back to todo.
         ...(a.assignee === '' && a.status === undefined && it.assignee ? { status: letGo(it).status } : {}),
@@ -673,7 +737,8 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         type: a.type || undefined,
         note,
         section,
-        parent,
+        ...(place ?? {}),
+        ...(target === undefined ? {} : { milestone: target }),
         // Back to work (todo, in progress, blocked), a dropped task is no longer won't do.
         resolution: wontdo !== undefined ? 'wontdo' : it.resolution && a.status && !['done', 'review'].includes(a.status) ? null : undefined,
       })
@@ -765,14 +830,20 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
       // All or nothing up front: nothing is written until the whole tree has passed.
       const planned = checkPlan(snap.items, nodes, a.parent || undefined)
       const ids = new Map<string, string>()
-      for (const one of planned) {
+      // Milestones first (they sit under nothing), so anything in the plan can target one by its ref.
+      for (const one of [...planned.filter(one => one.node.kind === 'milestone'), ...planned.filter(one => one.node.kind !== 'milestone')]) {
         const n = one.node
+        // Under a milestone (new or not), an item targets it rather than sitting in it.
+        const under = one.parentRef ? ids.get(one.parentRef)! : one.parentId
+        const isTarget = one.parentRef ? planned.find(other => other.ref === one.parentRef)!.node.kind === 'milestone' : find(snap.items, one.parentId ?? undefined)?.kind === 'milestone'
         const id = await sql($, db.insert(actor, {
           kind: n.kind,
           title: n.title.trim(),
-          parent: one.parentRef ? ids.get(one.parentRef)! : one.parentId,
+          parent: isTarget ? null : under,
+          milestone: n.milestone ? ids.get(String(n.milestone).trim()) ?? find(snap.items, String(n.milestone).trim())!.id : isTarget ? under : null,
           description: n.description,
           due: n.due,
+          start: n.start,
           assignee: n.assignee,
           priority: n.priority,
           type: n.type,
@@ -823,6 +894,49 @@ async function act($: EngineInterface, actor: string, a: Input, isSubagent = fal
         return notes.length ? `${path} already has the notes of all merged work.` : 'No merged work has a release note yet.'
       await $.fs.write(file, out.text.replace(/\n*$/, '\n'))
       return `Wrote ${out.added.length} note(s) into ${path} under [Unreleased]:\n${out.added.map(one => `- ${one}`).join('\n')}`
+    }
+    case 'file': {
+      const title = a.title?.trim() || fail('file takes a title: what to sort later')
+      const id = await sql($, db.fileInbox(actor, title, a.description?.trim() || null), t)
+      return `Filed ${id} to the inbox: ${title}`
+    }
+    case 'triage': {
+      const waiting = (snap.inbox ?? []).filter(one => one.state === 'open')
+      if (!a.id) {
+        if (waiting.length === 0) return 'The inbox is empty.'
+        return [
+          `The inbox (${waiting.length}): propose to the user what each becomes (a task or epic, and where; part of existing work; or dropped), and triage each once they agree.`,
+          ...waiting.map(one => `- ${one.id} ${one.title}${one.body ? `: ${one.body.replace(/\s+/g, ' ')}` : ''} (${one.author}, ${one.at.slice(0, 10)})`),
+        ].join('\n')
+      }
+      const one = (snap.inbox ?? []).find(item => item.id.toUpperCase() === a.id!.trim().toUpperCase()) ?? fail(`No inbox item ${a.id}`)
+      if (one.state !== 'open') fail(`${one.id} was already ${one.state === 'dropped' ? 'dropped' : `sorted into ${one.became}`}`)
+      const filed = `Filed to the inbox as ${one.id} by ${one.author} on ${one.at.slice(0, 10)}.`
+      const ways = [a.kind !== undefined, a.into !== undefined, a.wontdo !== undefined].filter(Boolean).length
+      if (ways !== 1) fail('triage takes one of: kind (it becomes a task or epic), into (it joins existing work), wontdo (it is dropped, with the reason)')
+      if (a.wontdo !== undefined) {
+        const reason = a.wontdo.trim() || fail('wontdo takes the reason it is dropped')
+        await sql($, db.resolveInbox(one.id, 'dropped', null, reason), t)
+        return `${one.id} dropped: ${reason}`
+      }
+      if (a.into !== undefined) {
+        const target = find(snap.items, a.into.trim()) ?? fail(`No item ${a.into}`)
+        const isEntry = a.fold === 'checklist'
+        if (isEntry && target.kind !== 'task') fail('Only tasks carry a checklist; fold it in as a comment instead')
+        const script = isEntry
+          ? db.setChecklist(actor, target, [...target.checklist.map(c => c.text), one.title]).script
+          : db.comment(actor, target.id, `${one.title}${one.body ? `\n\n${one.body}` : ''}\n\n(${filed})`)
+        await sql($, db.atomic([script, db.resolveInbox(one.id, 'triaged', target.id, null)]), t)
+        return `${one.id} joined ${target.id} as ${isEntry ? 'a checklist entry' : 'a comment'}.`
+      }
+      if (a.kind !== 'task' && a.kind !== 'epic') fail('An inbox item becomes a task or an epic')
+      const reply = await act($, actor, {
+        action: 'add', kind: a.kind, title: a.title?.trim() || one.title, description: [one.body, filed].filter(Boolean).join('\n\n'),
+        parent: a.parent, milestone: a.milestone, priority: a.priority, type: a.type,
+      }, isSubagent, t)
+      const made = /Added (\w+)/.exec(reply)?.[1] ?? fail(`could not make ${one.id} into a ${a.kind}: ${reply}`)
+      await sql($, db.resolveInbox(one.id, 'triaged', made, null), t)
+      return `${one.id} became ${made}: ${a.title?.trim() || one.title}`
     }
     case 'ship':
       return ship($, snap.items, a.version, a.approved === true && !isSubagent)
@@ -926,6 +1040,11 @@ async function ship($: EngineInterface, items: Item[], raw: string | undefined, 
     // stable that went elsewhere is left alone and said so).
     const stable = await git($, ['push', 'origin', `${merged!.mergeCommit!.oid!}:refs/heads/${STABLE}`]).catch(() => undefined)
     const served = stable?.exitCode === 0 ? ` ${STABLE} now serves ${version}.` : ` ${STABLE} was not moved (${stable ? whyNot(stable) : 'git failed'}): installs still get the release before.`
+    // The record of what shipped: the tasks whose notes this version carries, none already in another.
+    const now = await refresh($)
+    const taken = new Set((now.releases ?? []).filter(one => one.version !== version).flatMap(one => one.tasks.map(task => task.id)))
+    const tasks = shippedIn(now.items, body, taken)
+    await sql($, db.recordRelease({ version, tag, at: new Date(await $.clock.now()).toISOString().slice(0, 10), pr: merged!.number, notes: body, tasks }))
     // The release branch has done its work: gone here and on origin. A branch that won't go never fails the release.
     const local = await git($, ['branch', '-D', branch]).catch(() => undefined)
     // GitHub may have deleted it on the merge already.
@@ -1077,6 +1196,22 @@ async function userAct($: EngineInterface, a: Input) {
   await refresh($)
 }
 
+/**
+ * The person's Release from the Releases tab: ship's first step (the release PR), or, once that has merged
+ * and they press Tag and publish, its second, which their press approves. Either way ship's answer is shown.
+ */
+async function releaseFromBoard($: EngineInterface, version: string, publish: boolean) {
+  await update($, releasing, () => false)
+  try {
+    const snap = await refresh($)
+    $.ui.toast(`roadmap: ${await ship($, snap.items, version, publish)}`, { timeoutMs: 12_000 })
+  } catch (err) {
+    $.ui.toast(`roadmap: ${err instanceof Error ? err.message : String(err)}`, { timeoutMs: 12_000 })
+  }
+  await refresh($)
+  await refreshRefs($, true).catch(() => undefined)
+}
+
 /** The person's Undo: their last change, or the entries `ids` (a line on a card), taken back. */
 async function userUndo($: EngineInterface, ids?: number[]) {
   try {
@@ -1118,7 +1253,7 @@ async function closeDetail($: EngineInterface, id: string) {
   await update($, editing, () => false)
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   const mode = await read($, view)
-  await focusOn($, mode === 'board' ? `card-${id}` : mode === 'timeline' ? `time-${id}` : `row-${id}`)
+  await focusOn($, mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`)
 }
 
 /** Opens an item in the detail panel, marking what is on it as read. */
@@ -1394,12 +1529,13 @@ async function requestChanges($: EngineInterface, item: Item, what: string) {
 /** Adds what the new-item form describes, as the person, and opens it. */
 async function create($: EngineInterface, choice: Draft, title: string) {
   try {
-    const reply = await act($, USER, {
-      action: 'add', kind: choice.kind, title, parent: choice.parent || undefined,
-      ...(choice.kind === 'task' ? { priority: choice.priority, type: choice.type } : {}),
-    })
+    // Made from an inbox item, it is that item triaged: its text comes along and the inbox marks it sorted.
+    const fields = { title, parent: choice.parent || undefined, ...(choice.kind === 'task' ? { priority: choice.priority, type: choice.type } : {}) }
+    const reply = choice.from
+      ? await act($, USER, { action: 'triage', id: choice.from, kind: choice.kind, ...fields })
+      : await act($, USER, { action: 'add', kind: choice.kind, ...fields })
     await update($, draft, () => null)
-    const id = /^Added (\w+)/.exec(reply)?.[1]
+    const id = /^Added (\w+)/.exec(reply)?.[1] ?? / became (\w+)/.exec(reply)?.[1]
     await refresh($)
     if (id) await open($, id)
   } catch (err) {
@@ -1419,7 +1555,7 @@ async function handToClaude($: EngineInterface, item: Item) {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'roadmap', description: 'Open the project roadmap board' })
+    await $.command.register({ name: 'roadmap', description: 'Open the project roadmap board; /roadmap inbox <text> files something to sort later' })
     await $.tool.register({
       name: 'roadmap',
       isDeferred: false,
@@ -1440,16 +1576,18 @@ export const register: Register = on => {
         properties: {
           action: {
             type: 'string',
-            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship'],
+            enum: ['show', 'next', 'find', 'pr', 'add', 'plan', 'update', 'claim', 'release', 'comment', 'check', 'remove', 'batch', 'export', 'import', 'changelog', 'ship', 'file', 'triage'],
             description: [
               'show: the tree, or id: one item with its tasks, activity, commits and PRs. next: what to pick up.',
-              'find: kind, status, assignee ("none"), priority, type, labels, under (an id), text.',
+              'find: kind, status, assignee ("none"), priority, type, labels, under (an id), milestone, text.',
               'pr: branch, title and body for the PR of the unit an item ships in. add: kind, title, any field below.',
               "plan: tree, a whole breakdown in one call (nodes take add's fields, ref and children; blocked_by may name refs).",
               'update: id and fields; empty string clears. claim: id, a task or a handed epic/milestone. release: id, body.',
               'comment: id, body. check: id, items. remove: id (cascade for what is under it).',
               'batch: ops, each { action, ...fields }; an add may carry a ref for later ops. export, import (into an empty roadmap): path.',
               'changelog: merged notes into CHANGELOG.md. ship: version, only when the user asks for a release; again with approved once merged, to tag.',
+              "file: title (and description): to the inbox, for the user to sort; for what you notice but weren't asked to do.",
+              'triage: no id lists the inbox, to propose a sort to the user; with id (I3) once they agree: kind (and parent, milestone, priority, type, title) makes it a task or epic, into (an id; fold: checklist for a task entry) joins it to that, wontdo drops it.',
             ].join(' '),
           },
           id: { type: 'string' },
@@ -1469,6 +1607,9 @@ export const register: Register = on => {
           blocked_by: { type: 'array', items: { type: 'string' }, description: 'Tasks this one waits on; replaces the list' },
           assignee: { type: 'string', description: `"${USER}", "${CLAUDE}" or an agent's name; empty string unassigns` },
           due: { type: 'string', description: 'YYYY-MM-DD' },
+          start: { type: 'string', description: 'YYYY-MM-DD: when a milestone or epic starts, for the roadmap' },
+          into: { type: 'string', description: 'triage: the item an inbox item joins' },
+          fold: { type: 'string', enum: ['comment', 'checklist'], description: 'triage with into: as a comment (default) or a checklist entry' },
           under: { type: 'string' },
           text: { type: 'string' },
           tree: {
@@ -1488,6 +1629,7 @@ export const register: Register = on => {
           path: { type: 'string' },
           note: { type: 'string', description: "A task's CHANGELOG line, saying what changed for its users; \"-\" for none" },
           wontdo: { type: 'string', description: "update: close a task as won't do (dropped, not finished), with the reason" },
+          milestone: { type: 'string', description: "The milestone an epic or task targets (a task takes its epic's unless given); find: what targets it" },
           version: { type: 'string', description: '1.2.3' },
           section: { type: 'string', enum: SECTIONS, description: 'Of the note; by default Fixed for a bug, Changed for a chore, else Added' },
         },
@@ -1583,7 +1725,14 @@ export const register: Register = on => {
     return next(context.length ? { ...e, context: [...(e.context ?? []), ...context] } : e)
   }).catch(($, e, next) => next(e)) // A brief that fails never holds up a prompt: it goes in as typed.
 
-  on('command.run', { command: 'roadmap' }, async $ => {
+  on('command.run', { command: 'roadmap' }, async ($, e) => {
+    // `/roadmap inbox <text>` files it without opening anything.
+    const filed = /^inbox\s+([\s\S]+)/i.exec(String((e as { args?: string }).args ?? '').trim())?.[1]?.trim()
+    if (filed) {
+      const id = await sql($, db.fileInbox(USER, filed))
+      await refresh($).catch(() => undefined)
+      return { text: `Filed ${id} to the inbox.` }
+    }
     // The pane shows what went wrong, so a failed read still opens it.
     await refresh($).catch(() => undefined)
     const turns = await $.store.get('commentTurns').catch(() => undefined)
@@ -1623,6 +1772,10 @@ export const register: Register = on => {
       isRequesting: await read($, requesting),
       filter: await read($, filter),
       isFiltering: await read($, filtering),
+      isFiling: await read($, filing),
+      isReleasing: await read($, releasing),
+      zoom: await read($, zoom),
+      triaging: await read($, triaging),
       isDoneOpen: await read($, doneOpen),
       flipped: await read($, flipped),
       draft: await read($, draft),
@@ -1660,12 +1813,26 @@ export const register: Register = on => {
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
+      setTriaging: one => void update($, triaging, () => one).then(() => focusOn($, one ? 'triage-input' : 'tab-inbox')),
+      setZoom: level => void update($, zoom, () => level % 3),
+      showRelease: version => void (async () => {
+        // The newest version shows open by itself; any other opens by being flipped.
+        const newest = releasesOf(await read($, snapshot))[0]?.version
+        const key = `v${version}`
+        await update($, flipped, ids => (version === newest ? ids.filter(one => one !== key) : ids.includes(key) ? ids : [...ids, key]))
+        await update($, view, () => 'releases')
+        await focusOn($, `fold-${key}`)
+      })(),
+      setReleasing: isOn => void update($, releasing, () => isOn).then(() => focusOn($, isOn ? 'release-version' : 'release')),
+      release: (version, publish) => void releaseFromBoard($, version, publish),
+      setFiling: isOn => void update($, filing, () => isOn).then(() => focusOn($, isOn ? 'inbox-input' : 'file')),
+      file: title => void sql($, db.fileInbox(USER, title)).then(() => refresh($)).then(() => $.ui.toast('roadmap: filed to the inbox'), () => undefined),
       toggleFold: id => void update($, flipped, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id])),
       setFiltering: isOn => void update($, filtering, () => isOn).then(() => (isOn ? focusOn($, 'filter-input') : undefined)),
       undo: ids => void userUndo($, ids),
       markAllRead: () => void sql($, db.markAllSeen(USER)).then(() => refresh($)).catch(() => undefined),
       setPicked: ids => void update($, picked, () => ids),
-      askParallel: ids => void update($, parallelAsk, () => ids).then(() => focusOn($, ids ? 'parallel-cancel' : pick ? 'close' : 'tab-backlog')),
+      askParallel: ids => void update($, parallelAsk, () => ids).then(() => focusOn($, ids ? 'parallel-cancel' : pick ? 'close' : 'tab-plan')),
       runParallel: ids => void runParallel($, ids),
       askStack: id => void update($, stacking, () => id).then(() => focusOn($, id ? 'stack-cancel' : 'close')),
       mergeStack: stack => void mergeStack($, stack),

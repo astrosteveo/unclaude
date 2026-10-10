@@ -4,14 +4,15 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, tasksIn, spanOf, targetOf, releaseOf, unreleased, shipNote, releasesOf, nextVersion, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['tree', 'Tree'], ['backlog', 'Backlog'], ['timeline', 'Timeline']]
+// The tabs in the order a piece of work lives through them: filed, planned, scheduled, done, shipped.
+const VIEWS: [View, string][] = [['inbox', 'Inbox'], ['plan', 'Plan'], ['roadmap', 'Roadmap'], ['board', 'Board'], ['releases', 'Releases']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -84,6 +85,9 @@ export function fitHints(hints: string[], width: number, rows: number): string[]
   return hints.slice(0, 1)
 }
 
+// An item with nothing above it, for walks that start from one that may be missing.
+const EMPTY = { parent: null, milestone: null } as Item
+
 // The space between board columns side by side.
 const COLUMN_GAP = 2
 
@@ -146,6 +150,14 @@ export type PaneState = {
   filter: string
   /** Whether the filter's field is open. */
   isFiltering: boolean
+  /** Whether the field filing to the inbox is open. */
+  isFiling: boolean
+  /** Whether the Releases tab asks for the version to release. */
+  isReleasing: boolean
+  /** The roadmap's zoom: 0 shows all the dated work; each step closer around today. */
+  zoom: number
+  /** The inbox item whose row asks where it goes or why it's dropped. */
+  triaging: { id: string; mode: 'into' | 'drop' } | null
   /** Whether the board's Done column shows all done work, not just the recent. */
   isDoneOpen: boolean
   /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
@@ -198,6 +210,16 @@ export type PaneActions = {
   setRequesting: (isOn: boolean) => void
   setFilter: (text: string) => void
   setFiltering: (isOn: boolean) => void
+  setFiling: (isOn: boolean) => void
+  setReleasing: (isOn: boolean) => void
+  setZoom: (zoom: number) => void
+  setTriaging: (one: { id: string; mode: 'into' | 'drop' } | null) => void
+  /** Opens the Releases tab on `version`, unfolded. */
+  showRelease: (version: string) => void
+  /** Runs ship from the board: the release PR for `version`, or (`publish`, once it has merged) its tag and release. */
+  release: (version: string, publish: boolean) => void
+  /** Files `title` to the inbox. */
+  file: (title: string) => void
   setDoneOpen: (isOn: boolean) => void
   /** Folds or unfolds a milestone or epic in the tree and the timeline. */
   toggleFold: (id: string) => void
@@ -265,7 +287,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -302,6 +324,8 @@ export function drawPane(
    * with the title cut. Only the title and a long name are ever cut.
    */
   // What a card says beside its title, each piece led by a space.
+  // Merged work the next release would ship, for the cards that say so.
+  const unreleasedIds = new Set(unreleased(snap, known).map(one => one.id))
   const piecesOf = (item: Item) => {
     const list = item.checklist ?? []
     const part = item.kind === 'task' ? undefined : progress(items, item)
@@ -312,7 +336,8 @@ export function drawPane(
     return {
       pr,
       tag: tags.length || isDropped(item) ? ` ${[...(isDropped(item) ? [`${WONTDO_GLYPH} won't do`] : []), ...tags].join(' ')}` : '',
-      ticks: part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
+      // A milestone's or epic's tasks done (a bare count), a task's checklist ticked (☑).
+      ticks: part ? ` ${part.done}/${part.total}` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
       prTag: pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : '',
       wait: waits.length ? ` ⧗${waits.join(',')}` : '',
       who: item.assignee ? ` @${item.assignee}` : '',
@@ -320,10 +345,12 @@ export function drawPane(
       // Past when it was due, its own date or one above it.
       late: isLate(items, item, now) ? ' ⚠late' : '',
       news: badge(item),
+      // Done work says where it went: the version it shipped in, or that the next release will carry it.
+      ship: item.kind === 'task' && item.status === 'done' ? (releaseOf(snap, item.id) ? ` v${releaseOf(snap, item.id)!.version}` : unreleasedIds.has(item.id) ? ' unreleased' : '') : '',
     }
   }
   type Slots = Record<Exclude<keyof ReturnType<typeof piecesOf>, 'pr'> | 'id', number>
-  const SLOT_KEYS = ['tag', 'ticks', 'prTag', 'wait', 'who', 'stale', 'late', 'news'] as const
+  const SLOT_KEYS = ['tag', 'ticks', 'prTag', 'wait', 'who', 'stale', 'late', 'ship', 'news'] as const
   // A name is given at most this much of a stacked row's slots; a longer one is cut.
   const WHO_SLOT = 19
   /** The width of each piece's slot over `list`: the widest of each, so stacked rows line them up. */
@@ -344,12 +371,12 @@ export function drawPane(
    * they line up); else one line with the title cut. Only the title and a long name are ever cut.
    */
   const cardLayout = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
-    const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, news } = piecesOf(item)
-    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + news.length
+    const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, ship, news } = piecesOf(item)
+    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + ship.length + news.length
     const head = item.id.length + 1
     const cutWho = (whoRoom: number) => (fullWho.length <= whoRoom ? fullWho : whoRoom >= 5 ? `${fullWho.slice(0, whoRoom - 1)}…` : '')
     const cutTitle = (titleRoom: number) => (item.title.length <= titleRoom ? item.title : `${item.title.slice(0, Math.max(1, titleRoom - 1))}…`)
-    const bits = { tag, ticks, pr, prTag, wait, stale, late, news }
+    const bits = { tag, ticks, pr, prTag, wait, stale, late, ship, news }
     const slotted = slots ? SLOT_KEYS.reduce((sum, key) => sum + slots[key], 0) : 0
     if (isStacked && slots && room - slots.id - 1 - slotted >= 16) {
       const fit = (text: string, key: keyof Slots) => (text.length > slots[key] ? `${text.slice(0, slots[key] - 1)}…` : text).padEnd(slots[key])
@@ -357,7 +384,7 @@ export function drawPane(
       const title = cutTitle(room - lead - slotted)
       return {
         id: item.id.padEnd(slots.id), tag: fit(tag, 'tag'), ticks: fit(ticks, 'ticks'), pr, prTag: fit(prTag, 'prTag'), wait: fit(wait, 'wait'), who: fit(fullWho, 'who'),
-        stale: fit(stale, 'stale'), late: fit(late, 'late'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
+        stale: fit(stale, 'stale'), late: fit(late, 'late'), ship: fit(ship, 'ship'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
       }
     }
     if (!isSplit && head + item.title.length + others + fullWho.length <= room) {
@@ -375,7 +402,7 @@ export function drawPane(
   }
   const card = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
     const laid = cardLayout(item, room, isStacked, isSplit, slots)
-    const { title, tag, ticks, pr, prTag, wait, who, stale, late, news, pad, rows } = laid
+    const { title, tag, ticks, pr, prTag, wait, who, stale, late, ship, news, pad, rows } = laid
     const id = 'id' in laid && laid.id ? laid.id : item.id
     const isOpen = pick === item.id
     // A detail line leads with its first detail, its space dropped, under the title.
@@ -407,6 +434,9 @@ export function drawPane(
           {detail(stale)}
         </Text>
         <Text color="red">{detail(late)}</Text>
+        <Text color={ship.trim() === 'unreleased' ? 'yellow' : 'green'} dimColor>
+          {detail(ship)}
+        </Text>
         <Text color="magenta" bold>
           {detail(news)}
         </Text>
@@ -425,6 +455,23 @@ export function drawPane(
   // The header: the views as tabs with the progress and unread count beside them, then the actions. They
   // share a row where the pane is wide enough; else the actions take a second row of their own.
   const bar = progressBar(doneCount, taskCount, PROGRESS_BAR)
+  // What waits in the inbox to be sorted.
+  const waiting = (snap.inbox ?? []).filter(one => one.state === 'open')
+  // What waits on the person's decision, each item once with every reason: work in review (as the Board's
+  // Review column has it), comments they haven't read, claims gone quiet, and work past its date.
+  const needs = items
+    .map(item => {
+      const why: string[] = []
+      if ((item.kind === 'task' && item.status === 'review') || (item.kind !== 'task' && isAgent(item.assignee) && statusOf(items, item) === 'review')) why.push('review')
+      const notRead = unread(snap, item.id, USER).length
+      if (notRead) why.push(`${notRead} unread`)
+      if (isStale(item, now)) why.push('stale claim')
+      if (isLate(items, item, now)) why.push('late')
+      return { item, why }
+    })
+    .filter(one => one.why.length > 0)
+  // A tab names what waits in it: the inbox its open items.
+  const tabLabel = (view: View, label: string) => (view === 'inbox' && waiting.length + needs.length ? `${label} ${waiting.length + needs.length}` : label)
   const header = (
     <Box flexDirection="row" columnGap={3} flexWrap="wrap">
       <Box key="views" flexDirection="row" columnGap={2}>
@@ -435,10 +482,10 @@ export function drawPane(
               hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)}>
               {mode === one ? (
                 <Text inverse bold>
-                  {` ${label} `}
+                  {` ${tabLabel(one, label)} `}
                 </Text>
               ) : (
-                <Text dimColor>{` ${label} `}</Text>
+                <Text dimColor>{` ${tabLabel(one, label)} `}</Text>
               )}
             </Button>
           ))}
@@ -462,6 +509,7 @@ export function drawPane(
         {canUndo && <Button key="undo" label="Undo" hotkey="z" onPress={() => act.undo()} />}
         {/* With a card open, n adds under it (on the card's bar) instead. */}
         {!draft && !pick && <Button key="new" label="New" hotkey="n" onPress={() => act.setDraft(newDraft(null))} />}
+        {!isFiling && <Button key="file" label="File…" hotkey="i" onPress={() => act.setFiling(true)} />}
       </Box>
     </Box>
   )
@@ -471,6 +519,150 @@ export function drawPane(
       <Input key="filter-input" label="Filter" value={filter} autoFocus submitLabel="apply"
         placeholder="@claude #ui p0 bug review under:E3 words…" onSubmit={(value: string) => act.setFilter(value.trim())} />
       <Button key="filter-cancel" label="Cancel" onPress={() => act.setFiltering(false)} />
+    </Box>
+  )
+
+  // Filing to the inbox: a line typed now, sorted later.
+  const fileRow = isFiling && Input && (
+    <Box key="file-row" flexDirection="row" columnGap={1}>
+      <Input key="inbox-input" label="File to the inbox" autoFocus submitLabel="file" placeholder="An idea, a bug, a 'we should…'; Enter files it"
+        onSubmit={(value: string) => {
+          if (value.trim()) act.file(value.trim())
+          act.setFiling(false)
+        }} />
+      <Button key="file-cancel" label="Cancel" onPress={() => act.setFiling(false)} />
+    </Box>
+  )
+  const inboxView = (
+    <Box flexDirection="column">
+      {needs.length > 0 && (
+        <Box key="needs" flexDirection="column" marginBottom={1}>
+          <Text bold>Needs you  <Text dimColor>{needs.length}</Text></Text>
+          {needs.map(({ item, why }) => {
+            // The reasons in a column of their own, so the titles line up.
+            const reasons = why.join(' · ').padEnd(Math.min(24, Math.max(...needs.map(one => one.why.join(' · ').length))))
+            const room = Math.max(8, width - item.id.length - 1 - reasons.length - 2)
+            return (
+              <Button key={`need-${item.id}`} plain onPress={choose(item.id)}>
+                <Text color={why.includes('late') ? 'red' : why.includes('review') ? 'blue' : 'magenta'}>{reasons}</Text>{'  '}
+                <Text dimColor>{item.id}</Text> {item.title.length > room ? `${item.title.slice(0, room - 1)}…` : item.title}
+              </Button>
+            )
+          })}
+        </Box>
+      )}
+      {needs.length > 0 && waiting.length > 0 && <Text bold>To sort  <Text dimColor>{waiting.length}</Text></Text>}
+      {waiting.length === 0 && <Text dimColor>Nothing filed to sort. Press i to file something for later.</Text>}
+      {waiting.map(one => {
+        const by = ` — ${one.author}, ${one.at.slice(5, 10)}`
+        const room = Math.max(8, width - one.id.length - 1 - by.length)
+        const asking = triaging?.id === one.id ? triaging.mode : null
+        return (
+          <Box key={`inbox-${one.id}`} flexDirection="column">
+            <Text>
+              <Text dimColor>{one.id}</Text> {one.title.length > room ? `${one.title.slice(0, room - 1)}…` : one.title}
+              <Text dimColor>{by}</Text>
+            </Text>
+            {/* Sorting it: into a new task or epic (the form, its title filled in), into existing work, or dropped. */}
+            {asking && Input ? (
+              <Box key={`triage-row-${one.id}`} flexDirection="row" columnGap={1}>
+                <Input key="triage-input" label={asking === 'into' ? 'Into' : "Drop, because"} autoFocus
+                  placeholder={asking === 'into' ? "an id, as a comment; or 'T12 checklist' for an entry" : 'why it won’t be done'}
+                  submitLabel={asking === 'into' ? 'join' : 'drop'}
+                  onSubmit={(value: string) => {
+                    const text = value.trim()
+                    const into = /^(\S+)(\s+checklist)?$/i.exec(text)
+                    if (asking === 'into' && into)
+                      act.userAct({ action: 'triage', id: one.id, into: into[1], ...(into[2] ? { fold: 'checklist' } : {}) })
+                    else if (asking === 'drop' && text) act.userAct({ action: 'triage', id: one.id, wontdo: text })
+                    act.setTriaging(null)
+                  }} />
+                <Button key="triage-cancel" label="Cancel" onPress={() => act.setTriaging(null)} />
+              </Box>
+            ) : (
+              <Box key={`triage-${one.id}`} flexDirection="row" columnGap={1} flexWrap="wrap">
+                <Button key={`to-task-${one.id}`} label="→ Task"
+                  onPress={() => act.setDraft({ kind: 'task', priority: 'p2', type: 'feature', parent: '', from: one.id, title: one.title })} />
+                <Button key={`to-epic-${one.id}`} label="→ Epic"
+                  onPress={() => act.setDraft({ kind: 'epic', priority: 'p2', type: 'feature', parent: '', from: one.id, title: one.title })} />
+                <Button key={`into-${one.id}`} label="Into…" onPress={() => act.setTriaging({ id: one.id, mode: 'into' })} />
+                <Button key={`drop-${one.id}`} label="Drop…" onPress={() => act.setTriaging({ id: one.id, mode: 'drop' })} />
+              </Box>
+            )}
+            {one.body ? (
+              <Text dimColor>
+                {'  '}
+                {one.body.length > width - 3 ? `${one.body.replace(/\s+/g, ' ').slice(0, width - 4)}…` : one.body.replace(/\s+/g, ' ')}
+              </Text>
+            ) : null}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+
+  // Releases: what the next one would carry, then each version shipped, newest first and open, older folded.
+  const shippedVersions = releasesOf(snap)
+  const pendingNotes = unreleased(snap, known)
+  const suggested = nextVersion(shippedVersions[0]?.version, pendingNotes)
+  // A release under way: its PR open, or merged and waiting to be tagged and published.
+  const releasePrs = known.prs.filter(pr => pr.branch.startsWith('release-v'))
+  const openRelease = releasePrs.find(pr => pr.state === 'open')
+  const toPublish = releasePrs.find(pr => pr.state === 'merged' && !shippedVersions.some(one => `release-v${one.version}` === pr.branch))
+  const releaseLine = (text: string, key: string) => (
+    <Text key={key} dimColor={!/^- /.test(text)}>
+      {text.length > width - 2 ? `${text.slice(0, width - 3)}…` : text || ' '}
+    </Text>
+  )
+  const releasesView = (
+    <Box flexDirection="column">
+      <Box key="unreleased-head" flexDirection="row" columnGap={1} flexWrap="wrap">
+        <Text bold>Unreleased</Text>
+        <Text dimColor>{pendingNotes.length ? `${pendingNotes.length} note${pendingNotes.length === 1 ? '' : 's'} merged since the last release` : 'nothing merged since the last release'}</Text>
+        {openRelease ? (
+          <Text color="yellow">Release PR #{openRelease.number} is open; merge it, then Tag and publish</Text>
+        ) : toPublish ? (
+          <Button key="publish" label={`Tag and publish ${toPublish.branch.slice('release-'.length)}`} variant="primary"
+            onPress={() => act.release(toPublish.branch.slice('release-v'.length), true)} />
+        ) : (
+          pendingNotes.length > 0 && !isReleasing && <Button key="release" label="Release…" onPress={() => act.setReleasing(true)} />
+        )}
+      </Box>
+      {isReleasing && Input && (
+        <Box key="release-row" flexDirection="row" columnGap={1}>
+          <Input key="release-version" label="Version" value={suggested} autoFocus submitLabel="open its PR"
+            onSubmit={(value: string) => (value.trim() ? act.release(value.trim(), false) : act.setReleasing(false))} />
+          <Button key="release-cancel" label="Cancel" onPress={() => act.setReleasing(false)} />
+        </Box>
+      )}
+      {SECTIONS.map(section => {
+        const some = pendingNotes.filter(task => sectionFor(task) === section)
+        return some.length ? (
+          <Box key={`pending-${section}`} flexDirection="column">
+            <Text dimColor>{section}</Text>
+            {some.map(task => releaseLine(`- ${task.note} (${task.id})`, `pending-${task.id}`))}
+          </Box>
+        ) : null
+      })}
+      {shippedVersions.length === 0 && <Text dimColor>No releases yet. ship records each one; past versions are read from CHANGELOG.md.</Text>}
+      {shippedVersions.map((one, i) => {
+        const key = `v${one.version}`
+        const isOpen = (i === 0) !== flipped.includes(key)
+        return (
+          <Box key={`release-${one.version}`} flexDirection="column">
+            <Button key={`fold-${key}`} plain onPress={() => act.toggleFold(key)}>
+              <Text dimColor>{isOpen ? '▾' : '▸'}</Text> <Text bold>v{one.version}</Text>
+              <Text dimColor>
+                {one.at ? `  ${one.at}` : ''}
+                {one.tasks.length ? `  ${one.tasks.length} task${one.tasks.length === 1 ? '' : 's'}` : ''}
+                {one.pr ? `  PR #${one.pr}` : ''}
+              </Text>
+              <Text color="green">{known.stable === one.version ? '  stable ●' : ''}</Text>
+            </Button>
+            {isOpen && one.notes.split('\n').filter(text => text.trim()).map((text, n) => releaseLine(`  ${text.replace(/^### /, '')}`, `${key}-${n}`))}
+          </Box>
+        )
+      })}
     </Box>
   )
 
@@ -486,17 +678,22 @@ export function drawPane(
     Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length])) as Record<Status, number>,
     width, COLUMN_GAP)
   const roomOf = (status: Status) => (isWide ? widths[status] : width - 2)
-  // Side by side, a column whose cards don't all fit on one line gives every card two, so they line up.
+  // Side by side, a narrow column whose cards don't all fit on one line gives every card two, so they line
+  // up; a column wide enough to read a title in keeps cards to one line, the title cut.
+  const SPLIT_BELOW = 44
   const isSplit = Object.fromEntries(STATUSES.map(status =>
-    [status, isWide && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
+    [status, isWide && roomOf(status) < SPLIT_BELOW && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
   // Docked, the board fits the rows above the card; side by side, each heading has its rule under it.
   // Done shows the recent (the last week's, at least a few) unless opened; the rest are a press away.
   const recentDone = columns.done.filter(task => now - Date.parse(task.updated_at) < RECENT_DAYS * 86_400_000).length
   const doneClosed = Math.min(columns.done.length, Math.max(DONE_MIN, Math.min(recentDone, DONE_MAX)))
   const doneShown = isDoneOpen ? columns.done.length : doneClosed
+  // A wide column's cards line their details up in slots, as the stacked board's do.
+  const wideSlots = Object.fromEntries(STATUSES.map(status =>
+    [status, isWide && roomOf(status) >= SPLIT_BELOW ? slotsOf(columns[status].slice(0, status === 'done' ? doneShown : 15)) : undefined])) as Record<Status, Slots | undefined>
   const heights = Object.fromEntries(STATUSES.map(status =>
     [status, columns[status].slice(0, status === 'done' ? doneShown : undefined)
-      .map(task => cardLayout(task, roomOf(status), !isWide, isSplit[status]).rows)])) as Record<Status, number[]>
+      .map(task => cardLayout(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status]).rows)])) as Record<Status, number[]>
   // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
   const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
@@ -539,7 +736,7 @@ export function drawPane(
               </Box>
             ) : heading(status)}
             {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
-            {shown.map(task => card(task, roomOf(status), !isWide, isSplit[status], stackSlots))}
+            {shown.map(task => card(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status] ?? stackSlots))}
             {column.length > shown.length && (
               <Text dimColor>
                 …{column.length - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
@@ -557,7 +754,7 @@ export function drawPane(
   const hasKids = (item: Item) => item.kind !== 'task' && childrenOf(items, item.id).length > 0
   // What holds the open card stays unfolded, so the card's row is always there to return to.
   const holdsPick = new Set<string>()
-  for (let at = find(items, pick ?? undefined)?.parent; at; at = find(items, at)?.parent ?? null) holdsPick.add(at)
+  for (let at = upOf(find(items, pick ?? undefined) ?? EMPTY); at; at = upOf(find(items, at) ?? EMPTY)) holdsPick.add(at)
   const isFolded = (item: Item) =>
     !query && hasKids(item) && !holdsPick.has(item.id) && (statusOf(items, item) === 'done') !== flipped.includes(item.id)
   // The timeline shows epics under milestones, not tasks: there, only a milestone with epics folds.
@@ -570,47 +767,6 @@ export function drawPane(
     ) : (
       <Text key={`fold-${item.id}`}> </Text>
     )
-  const treeRows = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
-  // Docked, a window of rows that keeps the open item in sight.
-  const treeFrom = isDocked && treeRows.length > topRows
-    ? Math.max(0, Math.min(treeRows.findIndex(row => row.item.id === pick) - Math.floor(topRows / 2), treeRows.length - (topRows - 1)))
-    : 0
-  const treeShown = isDocked && treeRows.length > topRows ? treeRows.slice(treeFrom, treeFrom + topRows - 1) : treeRows
-  const tree = (
-    <Box flexDirection="column">
-      {treeShown.map(({ item, depth }) => {
-        const p = progress(items, item)
-        const status = statusOf(items, item)
-        const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}`
-        const news = badge(item)
-        // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
-        // name, then the title, is cut.
-        const lead = depth * 2 + 2 + 2 + item.id.length + 1
-        const fullWho = item.assignee ? `  @${item.assignee}` : ''
-        const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
-        const room = width - lead - facts.length - who.length - news.length
-        const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
-        return (
-          <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
-            {foldToggle(item)}
-            <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
-              {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>} <Text dimColor>{item.id}</Text>{' '}
-              <Text bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
-                {title}
-              </Text>
-              <Text dimColor>{facts}</Text>
-              <Text color="cyan">{who}</Text>
-              <Text color="magenta" bold>
-                {news}
-              </Text>
-            </Button>
-          </Box>
-        )
-      })}
-      {treeShown.length < treeRows.length && <Text key="tree-more" dimColor>…{treeRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
-    </Box>
-  )
-
   // Handing several out at once takes a yes, naming them and what waits.
   const confirmParallel = (ids: string[], key: string) => {
     const waits = ids.filter(id => { const one = find(items, id); return one && waitingOn(items, one).length > 0 })
@@ -625,58 +781,110 @@ export function drawPane(
     )
   }
 
-  // Triage: what nobody holds yet, a priority picker and a hand-off on every row.
-  const triageAll = backlog(items).filter(isShown)
-  // Docked, as many rows as fit above the card, each as tall as its title wraps beside the picker and hand-off.
-  const triageRows = (task: Item) => {
-    const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
-    const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
-    return rowsOf(`${task.id} ${task.title}${where}${tags ? ` ${tags}` : ''}`, Math.max(10, width - BACKLOG_EDGES))
+  // The plan: milestones (by date, open first) with what targets them, then Unplanned: epics and tasks no
+  // milestone holds. There, a task nobody holds yet keeps the backlog's controls: a pick for running several
+  // at once, a priority picker and a hand-off.
+  // Finished tasks no epic or milestone holds fold behind one line at the foot of Unplanned, as finished
+  // epics do: open with its toggle (or a filter, or a card open on one of them).
+  const LOOSE = '_loose'
+  const isLooseDone = ({ item, depth }: { item: Item; depth: number }) => depth === 0 && item.kind === 'task' && item.status === 'done' && item.id !== pick
+  const showsLoose = Boolean(query) || flipped.includes(LOOSE)
+  const everyRow = treeRowsOf(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
+  const looseDone = everyRow.filter(isLooseDone)
+  const allRows = showsLoose ? everyRow : everyRow.filter(row => !isLooseDone(row))
+  // Merged work the next release would ship.
+  const waitingRelease = new Set(unreleased(snap, known).map(one => one.id))
+  const firstUnplanned = allRows.findIndex(({ item, depth }) => depth === 0 && item.kind !== 'milestone')
+  const isTriage = (item: Item) => item.kind === 'task' && item.status === 'todo' && !item.assignee && !targetOf(items, item)
+  const unheld = allRows.filter(({ item }) => isTriage(item)).length
+  // Docked, a window of rows that keeps the open item in sight.
+  const planRoom = topRows - 1 - (firstUnplanned >= 0 ? 1 : 0)
+  const treeFrom = isDocked && allRows.length > planRoom
+    ? Math.max(0, Math.min(allRows.findIndex(row => row.item.id === pick) - Math.floor(planRoom / 2), allRows.length - planRoom))
+    : 0
+  const treeShown = isDocked && allRows.length > planRoom ? allRows.slice(treeFrom, treeFrom + planRoom) : allRows
+  const planRow = ({ item, depth }: { item: Item; depth: number }) => {
+    const p = progress(items, item)
+    const status = statusOf(items, item)
+    const release = item.kind === 'task' ? releaseOf(snap, item.id) : undefined
+    const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}${release ? `  v${release.version}` : waitingRelease.has(item.id) ? '  unreleased' : ''}`
+    const news = badge(item)
+    const controls = isTriage(item)
+    // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
+    // name, then the title, is cut.
+    const lead = depth * 2 + 2 + 2 + item.id.length + 1 + (controls ? BACKLOG_EDGES : 0)
+    const fullWho = item.assignee ? `  @${item.assignee}` : ''
+    const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
+    const room = width - lead - facts.length - who.length - news.length
+    const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
+    const row = (
+      <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+        {foldToggle(item)}
+        {controls && (
+          <Button key={`pick-${item.id}`} plain
+            onPress={() => act.setPicked(picked.includes(item.id) ? picked.filter(id => id !== item.id) : [...picked, item.id])}>
+            <Text color={picked.includes(item.id) ? 'green' : undefined}>{picked.includes(item.id) ? '☑' : '☐'}</Text>
+          </Button>
+        )}
+        {controls && (Select ? (
+          <Select key={`prio-${item.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={item.priority}
+            onSelect={(value: string) => act.userAct({ action: 'update', id: item.id, priority: value })} />
+        ) : (
+          <Text key={`prio-${item.id}`} color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>
+        ))}
+        <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
+          {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>} <Text dimColor>{item.id}</Text>{' '}
+          <Text bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+            {title}
+          </Text>
+          <Text dimColor>{facts}</Text>
+          <Text color="cyan">{who}</Text>
+          <Text color="magenta" bold>
+            {news}
+          </Text>
+        </Button>
+        {controls && <Button key={`hand-${item.id}`} label="→ Claude" onPress={() => act.askHand(item.id)} />}
+      </Box>
+    )
+    return handing === item.id ? (
+      <Box key={`tree-wrap-${item.id}`} flexDirection="column">
+        {row}
+        {confirmHand(item)}
+      </Box>
+    ) : row
   }
-  const triage = isDocked ? fitRows(triageAll, triageAll.map(triageRows), topRows - 1) : triageAll
-  const backlogView = (
+  const tree = (
     <Box flexDirection="column">
-      {triage.length === 0 && <Text dimColor>The backlog is empty: every todo task has someone on it.</Text>}
-      {/* Picked rows run at once: each its own agent, worktree and branch. */}
-      {picked.length > 0 && (parallelAsk && !pick ? confirmParallel(parallelAsk, 'parallel-confirm') : (
-        <Box key="picked-row" flexDirection="row" columnGap={1}>
-          <Button key="run-picked" label={`Run ${picked.length} at once…`} variant="primary" onPress={() => act.askParallel(picked)} />
-          <Button key="unpick" label="Clear picks" onPress={() => act.setPicked([])} />
-        </Box>
-      ))}
-      {triage.length < triageAll.length && <Text key="backlog-more" dimColor>…{triageAll.length - triage.length} more (close the card to see them all)</Text>}
-      {triage.map(task => {
-        const where = task.parent ? ` [${task.parent}]` : ' (no epic)'
-        const tags = [...marks(task).filter(one => !PRIORITIES.includes(one as never)), ...task.labels.map(one => `#${one}`)].join(' ')
-        const row = (
-          <Box key={`back-${task.id}`} flexDirection="row" columnGap={1}>
-            <Button key={`pick-${task.id}`} plain
-              onPress={() => act.setPicked(picked.includes(task.id) ? picked.filter(id => id !== task.id) : [...picked, task.id])}>
-              <Text color={picked.includes(task.id) ? 'green' : undefined}>{picked.includes(task.id) ? '☑' : '☐'}</Text>
-            </Button>
-            {Select ? (
-              <Select key={`prio-${task.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={task.priority}
-                onSelect={(value: string) => act.userAct({ action: 'update', id: task.id, priority: value })} />
-            ) : (
-              <Text key={`prio-${task.id}`} color={PRIORITY_COLOR[task.priority]}>{task.priority}</Text>
-            )}
-            <Button key={`row-${task.id}`} plain onPress={choose(task.id)}>
-              <Text dimColor>{task.id}</Text> {task.title}
-              <Text dimColor>
-                {where}
-                {tags ? ` ${tags}` : ''}
+      {allRows.length === 0 && <Text dimColor>Nothing planned yet. Press n to add a milestone, an epic or a task.</Text>}
+      {treeShown.map((one, i) => {
+        const isHead = allRows.indexOf(one) === firstUnplanned
+        return isHead ? (
+          <Box key={`unplanned-${one.item.id}`} flexDirection="column">
+            <Box key="unplanned-head" flexDirection="row" columnGap={1} flexWrap="wrap">
+              <Text bold dimColor>
+                Unplanned{unheld ? `  ${unheld} for anyone to take` : ''}
               </Text>
-            </Button>
-            <Button key={`hand-${task.id}`} label="→ Claude" onPress={() => act.askHand(task.id)} />
+              {/* Picked rows run at once: each its own agent, worktree and branch. */}
+              {picked.length > 0 && !(parallelAsk && !pick) && (
+                <Button key="run-picked" label={`Run ${picked.length} at once…`} variant="primary" onPress={() => act.askParallel(picked)} />
+              )}
+              {picked.length > 0 && !(parallelAsk && !pick) && <Button key="unpick" label="Clear picks" onPress={() => act.setPicked([])} />}
+            </Box>
+            {picked.length > 0 && parallelAsk && !pick && confirmParallel(parallelAsk, 'parallel-confirm')}
+            {planRow(one)}
           </Box>
+        ) : (
+          planRow(one)
         )
-        return handing === task.id ? (
-          <Box key={`back-wrap-${task.id}`} flexDirection="column">
-            {row}
-            {confirmHand(task)}
-          </Box>
-        ) : row
       })}
+      {treeShown.length < allRows.length && <Text key="tree-more" dimColor>…{allRows.length - treeShown.length} more rows (close the card to see them all)</Text>}
+      {looseDone.length > 0 && !query && treeShown.length === allRows.length && (
+        <Button key="fold-loose" plain onPress={() => act.toggleFold(LOOSE)}>
+          <Text dimColor>
+            {showsLoose ? '▾' : '▸'} {looseDone.length} finished task{looseDone.length === 1 ? '' : 's'} in no epic
+          </Text>
+        </Button>
+      )}
     </Box>
   )
 
@@ -702,6 +910,169 @@ export function drawPane(
     Math.max(0, ...timelineAll.map(({ item, depth }) => depth * 2 + 2 + 2 + item.id.length + 1 + item.title.length)),
     Math.max(20, width - right - 2 - (whenWidth ? whenWidth + 2 : 0)),
   )
+  // The roadmap on a time axis, in a pane wide enough for one: a label column, then each milestone as a
+  // marker on its date and each epic as a bar from its start to its end, filled as far as its tasks are
+  // done; a line for today; late work in red. Work without dates is listed under it. A narrow pane keeps
+  // the list (timelineView) below.
+  const isAxis = width >= 100
+  const DAY = 86_400_000
+  const ZOOMS = [0, 120, 45] as const
+  const dayOf = (date: string) => Math.floor(Date.parse(`${date}T00:00:00Z`) / DAY)
+  const todayDay = now > 0 ? Math.floor(now / DAY) : undefined
+  // An epic without a due date still has a place: to when it finished (its last task's change), or, still
+  // going, to today with an open end (▸). A milestone without one shows when any of its epics does.
+  const todayDate = now > 0 ? dateOf(now) : undefined
+  const spans = new Map(timelineAll.map(({ item }) => {
+    const span = spanOf(snap, item)
+    if (span.end || item.kind !== 'epic') return [item.id, { ...span, isOpenEnded: false }]
+    const isDone = statusOf(items, item) === 'done'
+    const finished = tasksIn(items, item).map(one => one.updated_at.slice(0, 10)).sort().at(-1)
+    const end = isDone ? finished : todayDate
+    return [item.id, { ...span, end: end && end < span.start ? span.start : end, isOpenEnded: !isDone && Boolean(end) }]
+  }))
+  const isPlaced = (item: Item) => spans.get(item.id)!.end !== undefined || (item.kind === 'milestone' && Boolean(item.due))
+  const dated = timelineAll.filter(({ item }) => isPlaced(item) ||
+    (item.kind === 'milestone' && timelineAll.some(({ item: one }) => upOf(one) === item.id && isPlaced(one))))
+  const undated = timelineAll.filter(row => !dated.includes(row))
+  const days = [
+    ...dated.flatMap(({ item }) => { const one = spans.get(item.id)!; return [dayOf(one.start), ...(one.end ? [dayOf(one.end)] : [])] }),
+    // The releases too, so each has its place on the axis.
+    ...(dated.length ? shippedVersions.filter(one => one.at).map(one => dayOf(one.at)) : []),
+  ]
+  // With nothing dated and no clock, the axis has nothing to span: today's date stands in, unseen.
+  const fitFrom = days.length || todayDay !== undefined ? Math.min(...days, todayDay ?? Infinity) : 0
+  const fitTo = days.length || todayDay !== undefined ? Math.max(...days, todayDay ?? -Infinity) : 0
+  const zoomDays = ZOOMS[zoom % ZOOMS.length]!
+  // Zoomed in, the window centres on today; at fit it spans all the dated work (and today), a little padded.
+  const [from, to] = zoomDays && todayDay !== undefined
+    ? [todayDay - Math.floor(zoomDays / 3), todayDay + zoomDays - Math.floor(zoomDays / 3)]
+    : [fitFrom - 2, Math.max(fitTo + 2, fitFrom + 14)]
+  const labelWidth = Math.min(34, Math.max(18, Math.floor(width * 0.3)))
+  const chart = Math.max(10, width - labelWidth - 1)
+  const colOf = (day: number) => Math.round(((day - from) / Math.max(1, to - from)) * (chart - 1))
+  const inChart = (col: number) => col >= 0 && col < chart
+  // Ticks: weeks when they're far enough apart to label, else months.
+  const isWeekly = chart / Math.max(1, (to - from) / 7) >= 7
+  const ticks: { col: number; label: string }[] = []
+  // At most ten years of days are walked, whatever dates were typed.
+  for (let d = from; d <= Math.min(to, from + 3660); d++) {
+    const date = new Date(d * DAY)
+    const isTick = isWeekly ? date.getUTCDay() === 1 : date.getUTCDate() === 1
+    if (isTick) ticks.push({ col: colOf(d), label: isWeekly ? date.toISOString().slice(5, 10) : date.toLocaleString('en', { month: 'short', timeZone: 'UTC' }) })
+  }
+  const scale = Array<string>(chart).fill(' ')
+  let last = -2
+  for (const tick of ticks) {
+    if (tick.col <= last + 1 || tick.col + tick.label.length > chart) continue
+    for (const [i, ch] of [...tick.label].entries()) scale[tick.col + i] = ch
+    last = tick.col + tick.label.length
+  }
+  const todayCol = todayDay === undefined ? -1 : colOf(todayDay)
+  type Cell = { ch: string; color?: string; isDim?: boolean }
+  /** A row of the chart: the today line, then a milestone's marker or an epic's bar over it. */
+  const chartCells = (item: Item): Cell[] => {
+    const cells: Cell[] = Array.from({ length: chart }, (_, col) => (col === todayCol ? { ch: '│', color: 'yellow', isDim: true } : { ch: ' ' }))
+    const span = spans.get(item.id)!
+    const st = statusOf(items, item)
+    const late = isLate(items, item, now)
+    if (item.kind === 'milestone') {
+      if (!item.due) return cells
+      const col = colOf(dayOf(item.due))
+      if (inChart(col)) cells[col] = { ch: '◆', color: late ? 'red' : st === 'done' ? 'green' : 'blue' }
+      return cells
+    }
+    if (!span.end) return cells
+    // A start after the end (work begun past its date) draws from the end: the bar is at least its last day.
+    const a = Math.max(0, colOf(Math.min(dayOf(span.start), dayOf(span.end))))
+    const b = Math.min(chart - 1, colOf(dayOf(span.end)))
+    const p = progress(items, item)
+    const filled = p.total ? Math.round(((b - a + 1) * p.done) / p.total) : 0
+    for (let col = a; col <= b; col++)
+      cells[col] = col - a < filled ? { ch: '█', color: late ? 'red' : 'green' } : { ch: '░', color: late ? 'red' : undefined, isDim: !late }
+    // Still going with no date to end on: its bar runs to today and stays open.
+    if (span.isOpenEnded && inChart(b + 1)) cells[b + 1] = { ch: '▸', isDim: true }
+    return cells
+  }
+  /** Cells drawn as runs of one style each. */
+  const runs = (cells: Cell[], key: string) => {
+    const out: { text: string; cell: Cell }[] = []
+    for (const cell of cells) {
+      const prev = out.at(-1)
+      if (prev && prev.cell.color === cell.color && prev.cell.isDim === cell.isDim) prev.text += cell.ch
+      else out.push({ text: cell.ch, cell })
+    }
+    return out.map((run, i) => (
+      <Text key={`${key}-${i}`} color={run.cell.color} dimColor={run.cell.isDim}>
+        {run.text}
+      </Text>
+    ))
+  }
+  const axisLabel = (item: Item, depth: number) => {
+    // Indented with no-break spaces: a line's leading spaces are trimmed, and the bars must line up.
+    const text = `${'\u00a0\u00a0'.repeat(depth)}${item.id} ${item.title}`
+    return text.length > labelWidth - 1 ? `${text.slice(0, labelWidth - 2)}…` : text.padEnd(labelWidth - 1)
+  }
+  const axisRows = isDocked ? dated.slice(0, Math.max(1, topRows - 4)) : dated
+  // Releases as ticks on the axis at their dates, labelled with their versions; several on one day (or too
+  // close to label apart) share a tick, named for the newest, with how many more.
+  const releaseTicks: { col: number; end: number; version: string; label: string }[] = []
+  for (const one of [...shippedVersions].reverse()) {
+    if (!one.at) continue
+    const col = colOf(dayOf(one.at))
+    if (!inChart(col)) continue
+    const prev = releaseTicks.at(-1)
+    if (prev && col <= prev.end) {
+      const more = Number(/\+(\d+)$/.exec(prev.label)?.[1] ?? 0) + 1
+      prev.version = one.version
+      prev.label = `${one.version} +${more}`
+      prev.end = prev.col + 1 + prev.label.length
+      continue
+    }
+    const label = one.version
+    releaseTicks.push({ col, end: col + 1 + label.length, version: one.version, label })
+  }
+  // A label that would run past the chart's edge is cut to its tick.
+  for (const tick of releaseTicks) if (tick.end > chart) (tick.label = ''), (tick.end = tick.col + 1)
+  const axisView = (
+    <Box flexDirection="column">
+      {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
+      {dated.length > 0 && (
+        <Box key="axis-head" flexDirection="row" columnGap={1}>
+          <Button key="zoom" plain hotkey="w" onPress={() => act.setZoom(zoom + 1)}>
+            <Text dimColor>{(zoomDays ? `zoom ${zoomDays}d` : 'zoom: all').padEnd(labelWidth - 4)}</Text>
+          </Button>
+          <Text dimColor>{scale.join('')}</Text>
+        </Box>
+      )}
+      {releaseTicks.length > 0 && (
+        <Box key="axis-releases" flexDirection="row">
+          <Text dimColor>{'Releases'.padEnd(labelWidth - 1).replace(/ /g, '\u00a0')}{'\u00a0'}</Text>
+          {releaseTicks.flatMap((tick, i) => [
+            // No-break spaces hold each tick at its date's column: plain spaces would collapse.
+            <Text key={`tick-gap-${i}`}>{'\u00a0'.repeat(Math.max(0, tick.col - (i ? releaseTicks[i - 1]!.end : 0)))}</Text>,
+            <Button key={`release-tick-${tick.version}`} plain onPress={() => act.showRelease(tick.version)}>
+              <Text color="green">▲{tick.label}</Text>
+            </Button>,
+          ])}
+        </Box>
+      )}
+      {axisRows.map(({ item, depth }) => (
+        <Button key={`time-${item.id}`} plain onPress={choose(item.id)}>
+          <Text bold={item.kind === 'milestone'} color={item.kind === 'milestone' ? undefined : undefined} dimColor={statusOf(items, item) === 'done'}>
+            {axisLabel(item, depth)}
+          </Text>{' '}
+          {runs(chartCells(item), `cells-${item.id}`)}
+        </Button>
+      ))}
+      {axisRows.length < dated.length && <Text key="axis-more" dimColor>…{dated.length - axisRows.length} more (close the card to see them all)</Text>}
+      {undated.length > 0 && !isDocked && (
+        <Box key="undated" flexDirection="column">
+          <Text dimColor>No dates yet: {undated.map(({ item }) => item.id).join(', ')}</Text>
+        </Box>
+      )}
+    </Box>
+  )
+
   const timelineView = (
     <Box flexDirection="column">
       {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
@@ -789,6 +1160,7 @@ export function drawPane(
       isLong
         ? { key: 'edit-desc-long', rows: 1, node: <Text key="edit-desc-long" dimColor>Description runs several lines: ask Claude to change it.</Text> }
         : field('edit-desc', 'Description', item.description ?? '', v => save({ description: v }), 'one line; empty clears it'),
+      ...(item.kind === 'task' ? [] : [field('edit-start', 'Start', item.start ?? '', v => save({ start: v }), 'YYYY-MM-DD; empty: from its work')]),
       field('edit-due', 'Due', item.due ?? '', v => save({ due: v }), 'YYYY-MM-DD; empty clears it'),
       ...(item.kind === 'task'
         ? [
@@ -808,7 +1180,7 @@ export function drawPane(
         : []),
       ...(item.kind === 'milestone'
         ? []
-        : [choice('edit-parent', 'Under', item.parent ?? '', [
+        : [choice('edit-parent', 'Under', upOf(item) ?? '', [
             { value: '', label: '(top level)' },
             ...homesFor(items, item.kind).filter(one => !own.has(one.id)).map(one => ({ value: one.id, label: `${one.id} ${one.title}`.slice(0, 40) })),
           ], v => save({ parent: v }))]),
@@ -940,6 +1312,8 @@ export function drawPane(
   // Fixed rows: tabs, the panel's two borders, title, two bar rows (more as they wrap), the info line, the
   // footer, and the ↓ mark. The ↑ mark takes a content row only once the card is scrolled.
   const tagLine = item?.labels?.length ? item.labels.map(one => `#${one}`).join(' ') : ''
+  // Where it stands against releases: shipped in a version, or merged and waiting for the next.
+  const shipped = item ? shipNote(snap, item, known) : undefined
   const meta = item ? [item.assignee ? `@${item.assignee}` : 'unassigned', item.kind === 'task' ? `${item.priority} ${item.type}` : '', tagLine, item.due ? `due ${item.due}` : '', where ? `in ${where}` : ''].filter(Boolean).join(' · ') : ''
   // The title, beside the ✕ that closes the card.
   const titleRows = tall(`${item?.title ?? ''}${isCompact ? `  ${meta}` : ''}`, item ? item.kind.length + item.id.length + 2 + 2 : 0)
@@ -959,7 +1333,7 @@ export function drawPane(
   const buttonRows = (labels: string[]) => flowRows(labels.map(label => label.length + 4), inner)
   // The header as it wraps over the whole pane, when it shows above an open card.
   const headerRows = flowRows([
-    VIEWS.reduce((sum, [one, label]) => sum + label.length + 2 + (one === nextView ? 3 : 0), 0) + (VIEWS.length - 1) +
+    VIEWS.reduce((sum, [one, label]) => sum + tabLabel(one, label).length + 2 + (one === nextView ? 3 : 0), 0) + (VIEWS.length - 1) +
       2 + PROGRESS_BAR + ` ${doneCount}/${taskCount} done`.length +
       (unreadTotal > 0 ? 2 + `● ${unreadTotal} unread`.length : 0) + (stackRun ? 2 + `Merging a stack: ${stackRun}`.length : 0),
     [
@@ -968,6 +1342,7 @@ export function drawPane(
       ...(filter && !isFiltering ? ['Clear'.length + 4] : []),
       ...(canUndo ? ['Undo'.length + 4] : []),
       ...(!draft && !pick ? ['New'.length + 4] : []),
+      ...(!isFiling ? ['File…'.length + 4] : []),
     ].reduce((sum, one, i) => sum + one + (i ? 1 : 0), 0),
   ].filter(one => one > 0), width, 3)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
@@ -977,7 +1352,7 @@ export function drawPane(
   const isHandable = status !== 'done' && status !== 'review'
   // A milestone's or epic's tasks that could run at once: todo, and nobody's yet.
   const openUnder = item && item.kind !== 'task'
-    ? subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task' && one.status === 'todo' && !one.assignee).map(one => one.id)
+    ? tasksIn(items, item).filter(one => one.status === 'todo' && !one.assignee).map(one => one.id)
     : []
   // The pull request the item under review ships in, which Approve can merge.
   const reviewPr = isReview && item ? openPrOf(known, item) : undefined
@@ -996,14 +1371,14 @@ export function drawPane(
     : (item.kind === 'task' ? buttonRows([...STATUSES.map(one => (item.status === one ? `${GLYPH[one]} ${LABEL[one]}` : LABEL[one])), `${WONTDO_GLYPH} Won't do`]) : 1) +
       (isRequesting || handing === item.id || merging === item.id || noting === item.id || dropping === item.id || stacking === item.id ? 1 :
         parallelAsk && item.kind !== 'task' ? tall(`Run ${parallelAsk.join(', ')} at once, each by its own agent in its own worktree? [ Yes, start them ] [ Cancel ]`) : buttonRows([...(isReview ? ['Approve', 'Request changes'] : []), ...(isHandable ? ['Hand to Claude'] : []), 'Ask Claude', ...(item.kind !== 'task' ? ['Add item'] : []), ...(openUnder.length > 1 ? ['Run its tasks at once…'] : []), isEditing ? 'Done editing' : 'Edit', 'Assign me', 'Unassign', 'Close']))
-  const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}` : ''
+  const info = item ? `assignee ${item.assignee ?? 'none'}${item.kind === 'task' ? `  priority ${item.priority}  ${item.type}` : ''}${tagLine ? `  ${tagLine}` : ''}${item.due ? `  due ${item.due}` : ''}${where ? `  in ${where}` : ''}${shipped ? `  ${shipped}` : ''}` : ''
   // Key hints, most useful first: as many as fit in the rows the pane gives them (one wide, two narrow),
   // each whole, the rest dropped from the end. Drawn in that order of usefulness, not of the keys.
   const hints = (draft
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
     ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', 'n new', 'f filter', canUndo ? 'z undo' : '']
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', mode === 'roadmap' && isAxis ? 'w zoom' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
   ).filter(Boolean)
   const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
   const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
@@ -1183,6 +1558,7 @@ export function drawPane(
           {tagLine && <Text color="blue">  {tagLine}</Text>}
           {item.due && <Text dimColor>  due {item.due}</Text>}
           {where && <Text dimColor>  in {where}</Text>}
+          {shipped && <Text color={shipped.startsWith('merged') ? 'yellow' : 'green'}>  {shipped}</Text>}
         </Text>
       )}
       {body}
@@ -1193,10 +1569,10 @@ export function drawPane(
   const homes = draft ? homesFor(items, draft.kind) : []
   const form = draft && (
     <Box key="new-form" flexDirection="column" borderStyle="round" paddingX={1}>
-      <Text bold>New {draft.kind}</Text>
+      <Text bold>New {draft.kind}{draft.from ? ` from ${draft.from}` : ''}</Text>
       {Select ? (
         <Box key="new-choices" flexDirection="row" columnGap={2} flexWrap="wrap">
-          <Select key="new-kind" label="Kind" options={KINDS.map(one => ({ value: one }))} value={draft.kind}
+          <Select key="new-kind" label="Kind" options={KINDS.filter(one => !draft.from || one !== 'milestone').map(one => ({ value: one }))} value={draft.kind}
             onSelect={(value: string) => act.setDraft(fitDraft({ ...draft, kind: value as Draft['kind'] }))} />
           {draft.kind === 'task' && (
             <Select key="new-priority" label="Priority" options={PRIORITIES.map(one => ({ value: one }))} value={draft.priority}
@@ -1216,7 +1592,7 @@ export function drawPane(
         <Text dimColor>{draft.kind}{draft.parent ? ` under ${draft.parent}` : ''}</Text>
       )}
       {Input && (
-        <Input key="new-title" label="Title" placeholder="What it is; Enter creates it" autoFocus submitLabel="create"
+        <Input key="new-title" label="Title" placeholder="What it is; Enter creates it" autoFocus submitLabel="create" value={draft.title}
           onSubmit={(value: string) => value.trim() && act.create(draft, value.trim())} />
       )}
       <Button key="new-cancel" label="Cancel" onPress={() => act.setDraft(null)} />
@@ -1225,7 +1601,7 @@ export function drawPane(
   // Where a new item goes by default: under the open card, when it can hold one.
   function newDraft(under: Item | null): Draft {
     const kind = under?.kind === 'milestone' ? 'epic' : 'task'
-    return fitDraft({ kind, priority: 'p2', type: 'feature', parent: under && under.kind !== 'task' ? under.id : under?.parent ?? '' })
+    return fitDraft({ kind, priority: 'p2', type: 'feature', parent: under && under.kind !== 'task' ? under.id : (under && upOf(under)) || '' })
   }
   // A parent the chosen kind can't sit under is dropped.
   function fitDraft(next: Draft): Draft {
@@ -1249,6 +1625,7 @@ export function drawPane(
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
         {!(isCompact && (panel || form)) && header}
         {(!panel || isDocked) && !form && filterRow}
+        {!form && fileRow}
         {!panel && !form && query && !items.some(isShown) && <Text key="no-match" dimColor>Nothing matches the filter.</Text>}
         {offer}
         {trouble ? (
@@ -1263,12 +1640,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView}
+                {mode === 'board' ? board : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'tree' ? tree : mode === 'timeline' ? timelineView : backlogView)
+            panel ?? (mode === 'board' ? board : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
           )
         )}
         {items.length > 0 && !trouble && (
@@ -1318,7 +1695,7 @@ export function drawBand(els: Elements[keyof Elements], e: EventOf['ui.render'],
   }
   const milestone = (() => {
     let at: Item | undefined = task
-    while (at && at.kind !== 'milestone') at = find(snap.items, at.parent ?? undefined)
+    while (at && at.kind !== 'milestone') at = find(snap.items, upOf(at) ?? undefined)
     return at
   })()
   const list = task.checklist ?? []

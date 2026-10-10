@@ -1,4 +1,4 @@
-import type { Check, IssueType, Item, Kind, Priority, Relation, Snapshot, Status } from '../types'
+import type { Check, IssueType, Item, Kind, Priority, Relation, Release, Snapshot, Status } from '../types'
 import { PREFIX } from './model'
 
 export const DB = '.claude/roadmap.db'
@@ -10,6 +10,9 @@ const NOW = `strftime('%Y-%m-%dT%H:%M:%SZ','now')`
  * has shipped. A database made before versioning (the tables there, version 0) runs entry 0 harmlessly,
  * every statement of it being IF NOT EXISTS.
  */
+/** Moves epics and tasks parented to a milestone onto it as their target (v7, and imports from before). */
+const RETARGET = `UPDATE items SET milestone=parent, parent=NULL WHERE kind IN ('epic', 'task') AND parent IN (SELECT id FROM items WHERE kind='milestone');`
+
 export const MIGRATIONS: string[] = [
   `CREATE TABLE IF NOT EXISTS items(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'todo',
@@ -53,6 +56,18 @@ ALTER TABLE activity ADD COLUMN reverts INTEGER;`,
 ALTER TABLE items ADD COLUMN section TEXT;`,
   // v6: a task closed as won't do: done, but dropped rather than finished.
   `ALTER TABLE items ADD COLUMN resolution TEXT;`,
+  // v7: milestones are targets, not containers: what sat under a milestone targets it instead.
+  `ALTER TABLE items ADD COLUMN milestone TEXT;
+${RETARGET}`,
+  // v8: releases: each version shipped, and the tasks it carried with their notes as they went out.
+  `CREATE TABLE IF NOT EXISTS releases(version TEXT PRIMARY KEY, tag TEXT, at TEXT NOT NULL, pr INTEGER, notes TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS shipped(version TEXT NOT NULL, item_id TEXT NOT NULL, note TEXT NOT NULL, section TEXT,
+  PRIMARY KEY (version, item_id));`,
+  // v9: the inbox: things filed to sort later, kept apart from planned work.
+  `CREATE TABLE IF NOT EXISTS inbox(id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, author TEXT NOT NULL,
+  at TEXT NOT NULL DEFAULT (${NOW}), state TEXT NOT NULL DEFAULT 'open', became TEXT, reason TEXT);`,
+  // v10: when a milestone or epic is meant to start, for the roadmap's time axis.
+  `ALTER TABLE items ADD COLUMN start TEXT;`,
 ]
 
 /** The schema version this build of the mod reads and writes. */
@@ -183,7 +198,7 @@ export const RECENT = 20
 /** Loads the roadmap, with what `reader` has seen of each item. */
 export const load = (reader: string) => `SELECT json_object(
       'items', (SELECT json_group_array(json_object('id', id, 'kind', kind, 'title', title, 'status', status,
-        'parent', parent, 'description', description, 'assignee', assignee, 'due', due,
+        'parent', parent, 'milestone', milestone, 'description', description, 'assignee', assignee, 'start', start, 'due', due,
         'priority', priority, 'type', type, 'note', note, 'section', section, 'resolution', resolution, 'lease_at', lease_at, 'created_at', created_at, 'updated_at', updated_at,
         'labels', json((SELECT json_group_array(label) FROM (SELECT label FROM labels WHERE item_id=items.id ORDER BY label))),
         'relations', json((SELECT json_group_array(json_object('type', type, 'id', b)) FROM relations WHERE a=items.id)),
@@ -196,7 +211,12 @@ export const load = (reader: string) => `SELECT json_object(
           SELECT *, ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY id DESC) AS nth FROM activity)
         WHERE nth <= ${RECENT} OR id IN (SELECT MAX(id) FROM activity WHERE type='handoff' GROUP BY item_id)
         ORDER BY id DESC)),
-      'seen', (SELECT json_group_object(item_id, seen) FROM reads WHERE reader=${q(reader)}));`
+      'seen', (SELECT json_group_object(item_id, seen) FROM reads WHERE reader=${q(reader)}),
+      'releases', (SELECT json_group_array(json_object('version', version, 'tag', tag, 'at', at, 'pr', pr, 'notes', notes,
+        'tasks', json((SELECT json_group_array(json_object('id', item_id, 'note', note, 'section', section)) FROM shipped
+          WHERE shipped.version=releases.version)))) FROM releases),
+      'inbox', (SELECT json_group_array(json_object('id', id, 'title', title, 'body', body, 'author', author, 'at', at,
+        'state', state, 'became', became, 'reason', reason)) FROM (SELECT * FROM inbox ORDER BY CAST(SUBSTR(id, 2) AS INTEGER))));`
 
 /** An item's whole timeline, oldest first, as a JSON list. */
 export const history = (id: string) =>
@@ -217,13 +237,15 @@ export function parseLoad(out: string): Snapshot {
     checklist: (item.checklist ?? []).map(c => ({ ...c, done: Boolean(c.done) })).sort((a, b) => a.n - b.n),
   }))
   const activity = data.activity.map(one => ({ ...one, undoable: Boolean(one.undoable) }))
-  return { items, activity, seen: data.seen ?? {} }
+  return { items, activity, seen: data.seen ?? {}, releases: data.releases ?? [], inbox: data.inbox ?? [] }
 }
 
 export type NewItem = {
   kind: Kind
   title: string
   parent: string | null
+  milestone?: string | null
+  start?: string
   description?: string
   due?: string
   status?: Status
@@ -244,15 +266,15 @@ export function insert(actor: string, item: NewItem): string {
 INSERT INTO counters(prefix, n) VALUES (${q(prefix)},
   COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM items WHERE SUBSTR(id, 1, 1)=${q(prefix)}), 0) + 1)
   ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
-INSERT INTO items(id, kind, title, status, parent, description, assignee, due, priority, type) VALUES (${id}, ${q(item.kind)},
-  ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.description || null)},
-  ${q(item.assignee || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
+INSERT INTO items(id, kind, title, status, parent, milestone, description, assignee, start, due, priority, type) VALUES (${id}, ${q(item.kind)},
+  ${q(item.title)}, ${q(item.status ?? 'todo')}, ${q(item.parent)}, ${q(item.milestone ?? null)}, ${q(item.description || null)},
+  ${q(item.assignee || null)}, ${q(item.start || null)}, ${q(item.due || null)}, ${q(item.priority ?? 'p2')}, ${q(item.type ?? 'feature')});
 INSERT INTO activity(item_id, author, type, body, op) VALUES (${id}, ${q(actor)}, 'create', ${q(created)}, (SELECT n FROM op));
 SELECT ${id};
 COMMIT;`
 }
 
-export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
+export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'milestone' | 'start' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
 
 /** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
@@ -267,7 +289,8 @@ export function change(actor: string, item: Item, changes: Changes): { script: s
     if (field === 'status') log('status', `status ${item.status} → ${value}`)
     else if (field === 'assignee')
       log('assign', value === null ? `unassigned ${item.assignee}` : value === actor ? 'claimed' : `assigned to ${value}`)
-    else if (field === 'parent') log('edit', value === null ? 'moved to top level' : `moved under ${value}`)
+    else if (field === 'parent') log('edit', value === null ? 'out of its epic' : `moved under ${value}`)
+    else if (field === 'milestone') log('edit', value === null ? 'no longer targets a milestone' : `targets ${value}`)
     else if (field === 'description') log('edit', value ? 'description updated' : 'description cleared')
     else if (field === 'note') log('edit', value === null ? 'release note cleared' : value === NO_NOTE ? 'no release note needed' : `release note: ${value}`)
     else if (field === 'resolution') log('edit', value === null ? "no longer won't do" : "closed as won't do")
@@ -341,13 +364,16 @@ export function remove(ids: string[], log?: { actor: string; body: string; rows:
 
 /** Every table's columns, as `dump` reads and `restore` writes them. */
 export const TABLES = {
-  items: ['id', 'kind', 'title', 'status', 'parent', 'description', 'assignee', 'due', 'priority', 'type', 'note', 'section', 'resolution', 'lease_at', 'created_at', 'updated_at'],
+  items: ['id', 'kind', 'title', 'status', 'parent', 'milestone', 'description', 'assignee', 'start', 'due', 'priority', 'type', 'note', 'section', 'resolution', 'lease_at', 'created_at', 'updated_at'],
   activity: ['id', 'item_id', 'author', 'type', 'body', 'at', 'undo', 'redo', 'op', 'undone', 'reverts'],
   links: ['blocker', 'blocked'],
   checks: ['item_id', 'n', 'text', 'done'],
   labels: ['item_id', 'label'],
   relations: ['a', 'b', 'type'],
   reads: ['reader', 'item_id', 'seen'],
+  releases: ['version', 'tag', 'at', 'pr', 'notes'],
+  shipped: ['version', 'item_id', 'note', 'section'],
+  inbox: ['id', 'title', 'body', 'author', 'at', 'state', 'became', 'reason'],
   counters: ['prefix', 'n'],
 } as const
 
@@ -364,6 +390,10 @@ const OWNED: Record<Exclude<Table, 'counters'>, (list: string) => string> = {
   labels: list => `item_id IN (${list})`,
   relations: list => `a IN (${list}) OR b IN (${list})`,
   reads: list => `item_id IN (${list})`,
+  // A release belongs to no item; what it shipped of an item goes with that item.
+  releases: () => 'FALSE',
+  shipped: list => `item_id IN (${list})`,
+  inbox: () => 'FALSE',
 }
 
 /** Reads every row on the items `ids` (all of the roadmap, counters too, when absent) as JSON: Rows. */
@@ -424,7 +454,7 @@ export function importOf(text: string): Rows {
 export const COUNT = `SELECT (SELECT count(*) FROM items) || ' ' || (SELECT count(*) FROM activity);`
 
 /** Writes an export's rows into an empty roadmap, in one transaction. */
-export const importRows = (rows: Rows) => `BEGIN IMMEDIATE;\n${restore(rows)}\nCOMMIT;`
+export const importRows = (rows: Rows) => `BEGIN IMMEDIATE;\n${restore(rows)}\n${RETARGET}\nCOMMIT;`
 
 /** A logged entry as `entries` reads it: what undo needs. */
 export type Entry = { id: number; item_id: string; author: string; type: string; body: string; at: string; op: number | null; undo: string | null; redo: string | null; undone: number | null; reverts: number | null }
@@ -468,6 +498,33 @@ export function revert(actor: string, list: { entry: Entry; undo: string; redo: 
 export function atomic(scripts: string[]): string {
   const bodies = scripts.filter(Boolean).map(one => one.split('\n').filter(line => line !== 'BEGIN IMMEDIATE;' && line !== OP && line !== 'COMMIT;').join('\n'))
   return bodies.length ? `${BEGIN}\n${bodies.join('\n')}\nCOMMIT;` : ''
+}
+
+/** Files `title` (and `body`) to the inbox under a fresh I-id; the script answers that id. */
+export function fileInbox(author: string, title: string, body?: string | null): string {
+  const id = `'I'||(SELECT n FROM counters WHERE prefix='I')`
+  return `BEGIN IMMEDIATE;
+INSERT INTO counters(prefix, n) VALUES ('I', COALESCE((SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM inbox), 0) + 1)
+  ON CONFLICT(prefix) DO UPDATE SET n = n + 1;
+INSERT INTO inbox(id, title, body, author) VALUES (${id}, ${q(title)}, ${q(body || null)}, ${q(author)});
+SELECT ${id};
+COMMIT;`
+}
+
+/** Sorts an inbox item: triaged into the item `became`, or dropped with `reason`; only while it is open. */
+export const resolveInbox = (id: string, state: 'triaged' | 'dropped', became: string | null, reason: string | null) => `BEGIN IMMEDIATE;
+${guard(`EXISTS (SELECT 1 FROM inbox WHERE id=${q(id)} AND state='open')`, `${id} was sorted meanwhile; nothing was changed`)}
+UPDATE inbox SET state=${q(state)}, became=${q(became)}, reason=${q(reason)} WHERE id=${q(id)};
+COMMIT;`
+
+/** Records a release and what it shipped, replacing any record of that version. */
+export function recordRelease(r: Release): string {
+  const rows = r.tasks.map(one => `INSERT INTO shipped(version, item_id, note, section) VALUES (${q(r.version)}, ${q(one.id)}, ${q(one.note)}, ${q(one.section)});`)
+  return `BEGIN IMMEDIATE;
+INSERT OR REPLACE INTO releases(version, tag, at, pr, notes) VALUES (${q(r.version)}, ${q(r.tag)}, ${q(r.at)}, ${r.pr === null ? 'NULL' : Math.trunc(r.pr)}, ${q(r.notes)});
+DELETE FROM shipped WHERE version=${q(r.version)};
+${rows.join('\n')}
+COMMIT;`
 }
 
 /** Marks everything on an item as seen by `reader`, up to its newest activity. */

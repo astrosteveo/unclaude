@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { Activity, Item, Snapshot } from '../types'
+import type { Activity, InboxItem, Item, Snapshot } from '../types'
 import { VERSION } from './db'
 import { paintPane } from './paint'
 import { columnWidths, fitHints, progressBar } from './pane'
@@ -14,7 +14,7 @@ const HEIGHTS = [30, 50]
 const SHOW = ''
 
 const item = (id: string, over: Partial<Item> = {}): Item => ({
-  id, kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task', title: `${id} title`, status: 'todo', parent: null,
+  id, kind: id[0] === 'M' ? 'milestone' : id[0] === 'E' ? 'epic' : 'task', title: `${id} title`, status: 'todo', parent: null, milestone: null, start: null,
   description: null, assignee: null, due: null, priority: 'p2', type: 'feature', note: null, section: null, resolution: null, lease_at: null,
   labels: [], relations: [], blocked_by: [], checklist: [], created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
   ...over,
@@ -53,7 +53,11 @@ export function bigRoadmap(): Snapshot {
   const activity: Activity[] = items.slice(6, 20).map((one, i) => ({
     id: i + 1, item_id: one.id, author: i % 2 ? 'user' : 'claude', type: 'comment', body: `${titled(i)}, and a second sentence to wrap.`, at: '2026-10-09T10:00:00Z',
   }))
-  return { items, activity, seen: {} }
+  const inbox: InboxItem[] = [1, 2, 3].map(n => ({
+    id: `I${n}`, title: titled(n * 5), body: n === 2 ? `${titled(n)}. `.repeat(6) : null, author: n === 3 ? 'general-purpose-implement-the-login-and-session-flow' : 'user',
+    at: '2026-10-09T10:00:00Z', state: 'open', became: null, reason: null,
+  }))
+  return { items, activity, seen: {}, inbox }
 }
 
 const fake = (stdin: string | undefined, snap: Snapshot) => {
@@ -70,9 +74,10 @@ const fake = (stdin: string | undefined, snap: Snapshot) => {
 /** Each view: the tab that shows it, and the key of a row that opens a card from it. */
 const VIEWS = [
   ['board', 'tab-board', 'card-T5'],
-  ['tree', 'tab-tree', 'row-T5'],
-  ['backlog', 'tab-backlog', 'row-T8'],
-  ['timeline', 'tab-timeline', 'time-E2'],
+  ['plan', 'tab-plan', 'row-T5'],
+  ['roadmap', 'tab-roadmap', 'time-E2'],
+  ['inbox', 'tab-inbox', null],
+  ['releases', 'tab-releases', null],
 ] as const
 
 test('every view fits the pane at narrow and wide widths, with and without a docked card', async ($, on) => {
@@ -94,6 +99,7 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
         const plain = paintPane(await ui.drawn(), width)
         if (SHOW === `${view} ${width}x${height}`) found.push(...plain.lines.map(line => `|${line}`))
         for (const problem of plain.problems) found.push(`${view} ${width}x${height}: ${problem}`)
+        if (row === null) continue
         if (!(await ui.find({ key: row }))) {
           found.push(`${view} ${width}x${height}: no ${row} to open`)
           continue
@@ -209,9 +215,9 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
 test('the header: views as tabs, a progress bar, actions apart; one row wide, two at 84; hints whole, least useful dropped', async ($, on) => {
   expect(progressBar(3, 4, 8)).toEqual({ done: '██████', left: '░░' })
   expect(progressBar(0, 0, 8)).toEqual({ done: '', left: '░░░░░░░░' })
-  const hints = ['Enter opens', 'Tab/↑↓ move', 'v tree', 't p b r d jump to a column', 'n new', 'f filter']
+  const hints = ['Enter opens', 'Tab/↑↓ move', 'v releases', 't p b r d jump to a column', 'n new', 'i file to the inbox', 'f filter']
   expect(fitHints(hints, 200, 1)).toEqual(hints)
-  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v tree'])
+  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v releases'])
   expect(fitHints(hints, 40, 2)).toEqual(hints.slice(0, 5))
 
   const snap = bigRoadmap()
@@ -228,7 +234,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     const { lines } = paintPane(await ui.drawn(), width)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Board +v: +Tree +Backlog +Timeline +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +v: +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -259,7 +265,7 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   })
   const rowsOf = async (prefix: string) =>
     (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   // Open milestones lead, done tasks after open ones; finished M1 is one line, its epic and tasks folded away.
   expect(await rowsOf('row-')).toEqual(['M2', 'E2', 'T4', 'T3', 'M3', 'E3', 'T5', 'M1'])
   expect((await ui.find({ key: 'fold-M1' }))?.text).toBe('▸')
@@ -277,11 +283,11 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   // A card open on work inside a folded scope unfolds what holds it.
   await ui.press({ key: 'tab-board' })
   await ui.press({ key: 'card-T1' })
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   expect(await rowsOf('row-')).toContain('T1')
   await ui.press({ key: 'close' })
 
-  await ui.press({ key: 'tab-timeline' })
+  await ui.press({ key: 'tab-roadmap' })
   expect(await rowsOf('time-')).toEqual(['M2', 'E2', 'M3', 'E3', 'M1'])
   // Only milestones fold here, where epics have no rows under them.
   expect(await ui.find({ key: 'fold-E2', type: 'Button' })).toBeUndefined()
@@ -317,7 +323,7 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   const card = await ui.find({ key: 'card-T2' })
   expect(card?.text).toContain("✕ won't do")
   expect(JSON.stringify(card)).toContain('"strikethrough":true')
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2 Dropped/)
   // Its card shows Won't do where Done would be.
   await ui.press({ key: 'row-T2' })
@@ -333,5 +339,273 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   expect(write).toContain("resolution='wontdo'")
   expect(write).toContain("Won''t do: not needed after all")
   expect(await ui.find({ key: 'wontdo-reason' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('inbox: i files a line from any tab; the Inbox tab lists what waits, with who filed it, and counts it', async ($, on) => {
+  const snap = bigRoadmap()
+  const ran: string[] = []
+  on('process.run', ($, e) => (ran.push(e.init?.stdin ?? ''), { value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  expect((await ui.find({ key: 'tab-inbox' }))?.text).toMatch(/Inbox \d+/)
+  expect((await ui.find({ key: 'file' }))?.props.hotkey).toBe('i')
+  await ui.press({ key: 'file' })
+  ran.length = 0
+  await ui.input({ key: 'inbox-input', text: "we should export to CSV" })
+  expect(ran.some(one => one.includes('INSERT INTO inbox(id, title, body, author)') && one.includes("'we should export to CSV'") && one.includes("'user'"))).toBe(true)
+  expect(await ui.find({ key: 'inbox-input' })).toBeUndefined()
+  await ui.press({ key: 'tab-inbox' })
+  const { lines } = paintPane(await ui.drawn(), 120)
+  expect(lines.some(line => /^I1 .* — user, 10-09$/.test(line))).toBe(true)
+  expect(lines.some(line => /^I3 .* — general-purpose-implement-the-login-and-session-flow, 10-09$/.test(line))).toBe(true)
+  await ui.unmount()
+})
+
+test('releases on the board: a done card and its plan row name the version it shipped in, or say unreleased; the card says so too', async ($, on) => {
+  const items = [
+    item('T1', { status: 'done', title: 'Shipped one', note: 'One.' }),
+    item('T2', { status: 'done', title: 'Merged one', note: 'Two.' }),
+  ]
+  const snap = { items, activity: [], seen: {}, releases: [{ version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: '- One.', tasks: [{ id: 'T1', note: 'One.', section: 'Added' as const }] }] }
+  on('process.run', ($, e) => ({ value: e.argv[0] === 'sqlite3' ? fake(e.init?.stdin, snap) : { exitCode: 0, stdout: '[]', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  expect((await ui.find({ key: 'card-T1' }))?.text).toContain('v0.6.3')
+  expect((await ui.find({ key: 'card-T2' }))?.text).toContain('unreleased')
+  await ui.press({ key: 'tab-plan' })
+  await ui.press({ key: 'fold-loose' })
+  expect((await ui.find({ key: 'row-T1' }))?.text).toContain('v0.6.3')
+  await ui.press({ key: 'row-T1' })
+  expect(paintPane(await ui.drawn(), 84).lines.some(line => line.includes('shipped in v0.6.3'))).toBe(true)
+  await ui.unmount()
+})
+
+test('releases tab: what the next release carries by section, each version newest first (older folded), stable marked; Release… runs ship', async ($, on) => {
+  const items = [
+    item('T1', { status: 'done', note: 'One.' }), item('T2', { status: 'done', note: 'A fix.', type: 'bug' }),
+    item('T3', { status: 'done', note: 'New thing.' }),
+  ]
+  const releases = [
+    { version: '0.6.2', tag: 'v0.6.2', at: '2026-10-08', pr: 31, notes: '### Fixed\n\n- One.', tasks: [{ id: 'T1', note: 'One.', section: 'Fixed' as const }] },
+    { version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: '### Changed\n\n- Installs get releases.', tasks: [] },
+  ]
+  const snap = { items, activity: [], seen: {}, releases }
+  const toasts: string[] = []
+  const ran: string[] = []
+  on('process.run', ($, e) => {
+    const line = e.argv.join(' ')
+    ran.push(line)
+    if (e.argv[0] === 'sqlite3') return { value: fake(e.init?.stdin, snap) }
+    const stdout = line.startsWith('git ls-remote') ? 'abc\trefs/heads/stable\n' : line.startsWith('git tag --points-at') ? 'v0.6.3\n' : '[]'
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('fs.read', () => ({ deny: 'ENOENT' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', ($, e) => (toasts.push(String((e as { text?: string }).text ?? '')), { value: undefined }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('clock.every', () => ({ value: {} }) as never)
+  on('store.get', () => ({ value: undefined }) as never)
+  on('store.set', () => ({ value: undefined }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }) as never)
+  await $.session.start({ source: 'startup', cwd: '/work/project' } as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-releases' })
+  const { lines, problems } = paintPane(await ui.drawn(), 100)
+  expect(problems).toEqual([])
+  const text = lines.join('\n')
+  // T2 and T3 merged since; T1 shipped in 0.6.2. By section, Added before Fixed.
+  expect(text).toMatch(/Unreleased +2 notes merged since the last release +\[ Release… \]\nAdded\n- New thing\. \(T3\)\nFixed\n- A fix\. \(T2\)/)
+  // Newest open with its notes, stable marked; the older one folded to its line.
+  expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +PR #33 +stable ●\n *Changed\n *- Installs get releases\./)
+  expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 task +PR #31\n/)
+  // Release… suggests the next minor (an Added note waits) and runs ship with what is typed.
+  await ui.press({ key: 'release' })
+  expect((await ui.find({ key: 'release-version' }))?.props.value).toBe('0.7.0')
+  await ui.input({ key: 'release-version', text: '0.7.0' })
+  expect(toasts.at(-1)).toMatch(/^roadmap: no manifest with a version here/)
+  await ui.unmount()
+})
+
+test('roadmap on a time axis: epics as bars filled by progress, milestones as markers, a today line, late in red, undated listed; w zooms', async ($, on) => {
+  const items = [
+    item('M1', { title: 'Launch', due: '2026-11-15', created_at: '2026-09-01T00:00:00Z' }),
+    item('E1', { milestone: 'M1', title: 'Billing', start: '2026-09-15', due: '2026-10-05' }),
+    item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude' }),
+    item('E2', { milestone: 'M1', title: 'Auth', start: '2026-10-10' }),
+    item('T3', { parent: 'E2' }),
+    item('M2', { title: 'Later' }),
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-roadmap' })
+  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  expect(problems).toEqual([])
+  const row = (id: string) => lines.find(line => line.replace(/^\u00a0+/, '').startsWith(`${id} `))!
+  // E1: late (its date passed, a task open), half done; a bar of red, half filled.
+  const e1 = await ui.find({ key: 'time-E1' })
+  expect(JSON.stringify(e1)).toContain('"color":"red"')
+  expect(row('E1')).toMatch(/█+░+/)
+  // M1 is a marker on its date; E2 runs to it (its milestone's date), nothing done yet.
+  expect(row('M1')).toContain('◆')
+  expect(row('E2')).toMatch(/░+/)
+  expect(row('E2').lastIndexOf('░')).toBe(row('M1').indexOf('◆'))
+  // Today is a line through every row, at the same column.
+  const today = row('M1').indexOf('│')
+  expect(today).toBeGreaterThan(0)
+  expect(row('E2').charAt(today) === '│' || row('E2').charAt(today) === '░').toBe(true)
+  // Weeks mark the scale over two months (months over longer); M2 has no dates and is listed under the axis.
+  expect(lines.some(line => /09-28 +10-05 +10-12/.test(line))).toBe(true)
+  expect(lines.some(line => line === 'No dates yet: M2')).toBe(true)
+  // w zooms in around today, and again, then back to all of it.
+  expect((await ui.find({ key: 'zoom' }))?.props.hotkey).toBe('w')
+  await ui.press({ key: 'zoom' })
+  expect((await ui.find({ key: 'zoom' }))?.text).toContain('zoom 120d')
+  await ui.press({ key: 'zoom' })
+  await ui.press({ key: 'zoom' })
+  expect((await ui.find({ key: 'zoom' }))?.text).toContain('zoom: all')
+  // A bar opens its card.
+  await ui.press({ key: 'time-E1' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('releases on the roadmap: a tick at each release\'s date, named for its version (one day, one tick); pressing it opens that release', async ($, on) => {
+  const items = [item('M1', { title: 'Launch', due: '2026-11-15', start: '2026-09-01' })]
+  const releases = [
+    { version: '0.6.0', tag: 'v0.6.0', at: '2026-09-20', pr: 27, notes: '- A.', tasks: [] },
+    { version: '0.6.2', tag: 'v0.6.2', at: '2026-10-09', pr: 31, notes: '- B.', tasks: [] },
+    { version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: '- C.', tasks: [] },
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity: [], seen: {}, releases }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-12T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-roadmap' })
+  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  expect(problems).toEqual([])
+  const ticks = lines.find(line => line.startsWith('Releases'))!
+  expect(ticks).toMatch(/▲0\.6\.0[\s\u00a0]+▲0\.6\.3 \+1/)
+  // 0.6.3's tick sits where the scale would put 10-09: before today's line on M1's row.
+  const m1 = lines.find(line => line.startsWith('M1 '))!
+  expect(ticks.indexOf('▲0.6.3')).toBeLessThan(m1.indexOf('│'))
+  // Pressing a tick opens the Releases tab on that release, unfolded even if it is not the newest.
+  await ui.press({ key: 'release-tick-0.6.0' })
+  expect((await ui.find({ key: 'tab-releases' }))?.props.variant).toBe('primary')
+  const text = paintPane(await ui.drawn(), 140).lines.join('\n')
+  expect(text).toMatch(/▾ v0\.6\.0[^\n]*\n *- A\./)
+  await ui.unmount()
+})
+
+test('triage in the Inbox: → Task opens the form with the title filled in and sorts the item; Into… and Drop… ask, then sort it', async ($, on) => {
+  const snap = bigRoadmap()
+  const ran: string[] = []
+  // A new item answers with its id, as sqlite3 does.
+  on('process.run', ($, e) => (ran.push(e.init?.stdin ?? ''), {
+    value: (e.init?.stdin ?? '').includes('INSERT INTO items') ? { exitCode: 0, stdout: 'T99\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } : fake(e.init?.stdin, snap),
+  }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  on('ui.toast', () => ({ value: undefined }) as never)
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-inbox' })
+  expect(paintPane(await ui.drawn(), 100).problems).toEqual([])
+  await ui.press({ key: 'to-task-I1' })
+  expect((await ui.find({ key: 'new-title' }))?.props.value).toBe(snap.inbox![0]!.title)
+  ran.length = 0
+  await ui.input({ key: 'new-title', text: 'Export, as a task' })
+  // Made from I1: the item goes in with its new title and I1 is marked sorted, in one go.
+  expect(ran.some(one => one.includes("'Export, as a task'"))).toBe(true)
+  expect(ran.some(one => one.includes("UPDATE inbox SET state='triaged'") && one.includes("WHERE id='I1'"))).toBe(true)
+  await ui.press({ key: 'into-I2' })
+  ran.length = 0
+  await ui.input({ key: 'triage-input', text: 'T7 checklist' })
+  expect(ran.some(one => one.includes("INSERT INTO checks") && one.includes("UPDATE inbox SET state='triaged', became='T7'"))).toBe(true)
+  await ui.press({ key: 'drop-I3' })
+  ran.length = 0
+  await ui.input({ key: 'triage-input', text: 'not worth it' })
+  expect(ran.some(one => one.includes("UPDATE inbox SET state='dropped', became=NULL, reason='not worth it' WHERE id='I3'"))).toBe(true)
+  await ui.unmount()
+})
+
+test('needs you: work in review, unread comments, stale claims and late work head the Inbox, each once, opening its card; they agree with the board', async ($, on) => {
+  const items = [
+    item('E1', { title: 'Handed', assignee: 'claude' }),
+    item('T1', { parent: 'E1', status: 'done' }),
+    item('T2', { status: 'review', title: 'Reviewed' }),
+    item('T3', { status: 'in_progress', assignee: 'explore:x', lease_at: '2026-10-09T08:00:00Z', title: 'Quiet' }),
+    item('T4', { due: '2026-10-01', title: 'Overdue' }),
+    item('T5', { title: 'Talked about' }),
+  ]
+  const activity = [
+    { id: 1, item_id: 'T5', author: 'claude', type: 'comment', body: 'a question', at: '2026-10-09T10:00:00Z' },
+    { id: 2, item_id: 'T2', author: 'claude', type: 'comment', body: 'ready', at: '2026-10-09T10:00:00Z' },
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity, seen: {}, inbox: [] }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  // The Board's Review column holds T2 and the handed E1; the header counts 2 unread.
+  const reviewColumn = (await ui.find({ key: 'col-review-head' }))?.text
+  expect(reviewColumn).toContain('Review 2')
+  expect(paintPane(await ui.drawn(), 100).lines[0]).toContain('● 2 unread')
+  expect((await ui.find({ key: 'tab-inbox' }))?.text).toContain('Inbox 5')
+  await ui.press({ key: 'tab-inbox' })
+  const needs = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('need-')).map(one => `${String(one.key).slice(5)}: ${String(one.text).replace(/ {2,}/g, '  ')}`)
+  expect(needs).toEqual([
+    'E1: review  E1 Handed',
+    'T2: review · 1 unread  T2 Reviewed',
+    'T3: stale claim  T3 Quiet',
+    'T4: late  T4 Overdue',
+    'T5: 1 unread  T5 Talked about',
+  ])
+  await ui.press({ key: 'need-T4' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
   await ui.unmount()
 })

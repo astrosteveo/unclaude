@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import type { Activity, Item, Snapshot } from '../types'
 import { q, VERSION } from './db'
 import { columnCaps, rowsOf } from './pane'
-import { ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
+import { spanOf, nextVersion, shipNote, unreleased, progress, tasksIn, readyIn, changelogVersions, shippedIn, targetOf, upOf, ancestors, noRoadmapHere, agentName, approvalNote, commentNote, cutRelease, dueOf, isLate, timelineOf, isAfter, stackFrom, versionOf, webOf, withVersion, lastChange, mergedNotes, withNotes, backlog, branchFor, brief, checksOf, checkLinks, handedScope, pullRequest, unitOf, homesFor, checkPlan, isStale, letGo, matches, parseQuery, linksOf, ignoreState, IGNORE_LINE, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, find, idsIn, parseGitLog, parsePrs, refsFor, refsText, nextUp, outline, statusOf, subtree, unread, waitingOn } from './model'
 
 /** Hooks that stand in for a project with no roadmap: no database file, and every process recorded. */
 /** A fresh git repository with no roadmap in it yet. */
@@ -43,6 +43,8 @@ const item = (id: string, over: Partial<Item> = {}): Item => ({
   title: `${id} title`,
   status: 'todo',
   parent: null,
+  milestone: null,
+  start: null,
   description: null,
   assignee: null,
   due: null,
@@ -295,7 +297,7 @@ test('the board draws on terminal and desktop, and a card opens and closes from 
       await ui.press({ key: 'close' })
       expect(await ui.find({ key: 'hand' })).toBeUndefined()
       expect(await ui.find({ key: 'card-T2' })).toBeDefined()
-      await ui.press({ key: 'tab-tree' })
+      await ui.press({ key: 'tab-plan' })
       expect(await ui.find({ key: 'row-M1' })).toBeDefined()
       await ui.press({ key: 'tab-board' })
       await ui.unmount()
@@ -418,7 +420,7 @@ test('the detail bar sits right under the title on every card, short or long, ta
     expect((await ui.find({ key: 'set-done' }))?.props.variant).toBe('secondary')
     await ui.press({ key: 'close' })
   }
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   at.push(await barIndex())
   expect(await ui.find({ key: 'set-todo' })).toBeUndefined()
@@ -528,6 +530,111 @@ for (const [label, exitCode, isOffered] of [['not ignored', 1, true], ['ignored'
     await ui.unmount()
   })
 }
+
+test('targets: a task takes its own milestone, else its epic\'s; the tree puts it under its epic, else its milestone', () => {
+  const some = [
+    item('M1'), item('M2'), item('E1', { milestone: 'M1' }),
+    item('T1', { parent: 'E1' }), item('T2', { parent: 'E1', milestone: 'M2' }), item('T3', { milestone: 'M2' }), item('T4'),
+  ]
+  expect(['E1', 'T1', 'T2', 'T3', 'T4', 'M1'].map(id => targetOf(some, find(some, id)!))).toEqual(['M1', 'M1', 'M2', 'M2', null, 'M1'])
+  expect(['E1', 'T1', 'T2', 'T3', 'T4'].map(id => upOf(find(some, id)!))).toEqual(['M1', 'E1', 'E1', 'M2', null])
+})
+
+test('roll-ups follow targets: a milestone is the tasks that target it; hand-offs, due dates and next follow suit', () => {
+  const some = [
+    item('M1', { due: '2026-11-01' }), item('M2', { due: '2026-12-01' }),
+    item('E1', { milestone: 'M1', due: '2026-10-20' }),
+    item('T1', { parent: 'E1', status: 'done' }),
+    item('T2', { parent: 'E1', milestone: 'M2' }),
+    item('T3', { milestone: 'M1' }),
+    item('T4', { milestone: 'M2', status: 'done' }),
+  ]
+  // T2 sits in E1 but targets M2: it counts for M2, not M1.
+  expect(tasksIn(some, find(some, 'M1')!).map(one => one.id)).toEqual(['T1', 'T3'])
+  expect(tasksIn(some, find(some, 'M2')!).map(one => one.id)).toEqual(['T2', 'T4'])
+  expect(progress(some, find(some, 'M1')!)).toEqual({ done: 1, total: 2 })
+  expect(progress(some, find(some, 'M2')!)).toEqual({ done: 1, total: 2 })
+  expect(progress(some, find(some, 'E1')!)).toEqual({ done: 1, total: 2 })
+  // Due: its own, else its epic's, else its milestone's.
+  expect(['T1', 'T2', 'T3'].map(id => dueOf(some, find(some, id)!))).toEqual(['2026-10-20', '2026-10-20', '2026-11-01'])
+  // Handing M2 over takes T2 too, though it sits in E1; next in M2 offers it.
+  const handed = some.map(one => (one.id === 'M2' ? { ...one, assignee: 'claude' } : one))
+  expect(handedScope(handed, find(handed, 'T2')!)?.id).toBe('M2')
+  expect(handedScope(handed, find(handed, 'T1')!)).toBeUndefined()
+  expect(readyIn(handed, find(handed, 'M2')!, 'claude')?.id).toBe('T2')
+})
+
+test('shipped in vX: a task says which release carried it, or that it is merged and waiting; a milestone how many are out', () => {
+  const items = [
+    item('M1'), item('E1', { milestone: 'M1' }),
+    item('T1', { parent: 'E1', status: 'done', note: 'One.' }),
+    item('T2', { parent: 'E1', status: 'done', note: 'Two.' }),
+    item('T3', { parent: 'E1', status: 'done', note: 'Three.' }),
+    item('T4', { parent: 'E1', status: 'done', note: '-' }),
+  ]
+  const releases = [
+    { version: '0.6.0', tag: 'v0.6.0', at: '2026-10-09', pr: 27, notes: '- One.', tasks: [{ id: 'T1', note: 'One.', section: 'Added' as const }] },
+    { version: '0.6.1', tag: 'v0.6.1', at: '2026-10-09', pr: 29, notes: '- Two.', tasks: [{ id: 'T2', note: 'Two.', section: 'Added' as const }] },
+  ]
+  const snap = { items, activity: [], seen: {}, releases }
+  const refs = { commits: [], prs: [] }
+  expect(shipNote(snap, find(items, 'T1')!, refs)).toBe('shipped in v0.6.0')
+  expect(shipNote(snap, find(items, 'T3')!, refs)).toBe('merged, not released')
+  expect(shipNote(snap, find(items, 'T4')!, refs)).toBeUndefined()
+  expect(shipNote(snap, find(items, 'M1')!, refs)).toBe('2/3 shipped (v0.6.0, v0.6.1)')
+  expect(unreleased(snap, refs).map(one => one.id)).toEqual(['T3'])
+  expect(detail(snap, find(items, 'T2')!, 15, refs)).toContain('\nShipped in v0.6.1')
+  expect(brief(snap, 'claude', [], undefined, refs)).toContain('Merged, not released yet: T3.')
+})
+
+test('the next version: a patch when the waiting notes only fix, else a minor; notes of a unit still under way do not wait', () => {
+  expect(nextVersion('0.6.3', [item('T1', { type: 'bug', note: 'x' })])).toBe('0.6.4')
+  expect(nextVersion('0.6.3', [item('T1', { type: 'bug', note: 'x' }), item('T2', { note: 'y' })])).toBe('0.7.0')
+  expect(nextVersion(undefined, [])).toBe('0.1.0')
+  const some = [item('E1', { assignee: 'claude' }), item('T1', { parent: 'E1', status: 'done', note: 'Not yet.' }), item('T2', { parent: 'E1' }), item('T3', { status: 'done', note: 'Lone.' })]
+  expect(mergedNotes(some, { commits: [], prs: [] }).map(one => one.id)).toEqual(['T3'])
+})
+
+test('spans on the roadmap: a start given or derived (first claim, else made), to the due date or the milestone\'s', () => {
+  const items = [
+    item('M1', { due: '2026-12-01', created_at: '2026-09-01T00:00:00Z' }),
+    item('E1', { milestone: 'M1', created_at: '2026-09-10T00:00:00Z' }),
+    item('T1', { parent: 'E1' }),
+    item('E2', { milestone: 'M1', start: '2026-10-15', due: '2026-11-01' }),
+    item('E3', { created_at: '2026-09-20T00:00:00Z' }),
+  ]
+  const activity = [
+    { id: 1, item_id: 'T1', author: 'claude', type: 'assign', body: 'claimed', at: '2026-10-02T10:00:00Z' },
+    { id: 2, item_id: 'T1', author: 'claude', type: 'status', body: 'status todo → in_progress', at: '2026-10-02T10:00:00Z' },
+  ]
+  const snap = { items, activity, seen: {} } as never
+  expect(spanOf(snap, find(items, 'E1')!)).toEqual({ start: '2026-10-02', end: '2026-12-01', isStartGiven: false })
+  expect(spanOf(snap, find(items, 'E2')!)).toEqual({ start: '2026-10-15', end: '2026-11-01', isStartGiven: true })
+  expect(spanOf(snap, find(items, 'E3')!)).toEqual({ start: '2026-09-20', end: undefined, isStartGiven: false })
+  expect(spanOf(snap, find(items, 'M1')!)).toEqual({ start: '2026-10-02', end: '2026-12-01', isStartGiven: false })
+})
+
+test('the filter takes m:M2: what targets M2, and M2 itself', () => {
+  const some = [item('M1'), item('M2'), item('E1', { milestone: 'M1' }), item('T1', { parent: 'E1' }), item('T2', { parent: 'E1', milestone: 'M2' })]
+  const query = parseQuery('m:m2')!
+  expect(query).toEqual({ milestone: 'M2' })
+  const snap = { items: some, activity: [], seen: {} }
+  expect(some.filter(one => matches(snap, one, query)).map(one => one.id)).toEqual(['M2', 'T2'])
+})
+
+test('releases: a CHANGELOG reads as versions with their dates and notes; a version carries the tasks whose notes it holds', () => {
+  const text = '# Changelog\n\n## [Unreleased]\n\n- Soon.\n\n## [0.6.1] - 2026-10-09\n\n### Fixed\n\n- ship writes the notes.\n\n## 0.4.0 - 2026-10-01\n\n- Old style.\n\n[Unreleased]: https://x/compare\n'
+  expect(changelogVersions(text)).toEqual([
+    { version: '0.6.1', date: '2026-10-09', body: '### Fixed\n\n- ship writes the notes.' },
+    { version: '0.4.0', date: '2026-10-01', body: '- Old style.' },
+  ])
+  const some = [
+    item('T1', { status: 'done', note: 'ship writes the notes.' }), item('T2', { status: 'done', note: 'Old style.' }),
+    item('T3', { status: 'done', note: 'ship writes the notes.', resolution: 'wontdo' }), item('T4', { status: 'done', note: '-' }),
+  ]
+  expect(shippedIn(some, '- ship writes the notes.')).toEqual([{ id: 'T1', note: 'ship writes the notes.', section: 'Added' }])
+  expect(shippedIn(some, '- ship writes the notes.', new Set(['T1']))).toEqual([])
+})
 
 test('a roadmap is started only at a repository top; a refusal points at the roadmaps below', () => {
   expect(ancestors('/home/me/Projects/')).toEqual(['/home/me/Projects', '/home/me', '/home', '/'])
@@ -1032,7 +1139,7 @@ test('board filter: a typed query narrows the board and the tree, shows in the h
   expect(await ui.find({ key: 'card-T1' })).toBeDefined()
   expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
   expect((await ui.find({ key: 'filter' }))?.text).toContain('Filter: #ui')
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   expect(await ui.find({ key: 'row-M1' })).toBeDefined()
   expect(await ui.find({ key: 'row-T1' })).toBeDefined()
   expect(await ui.find({ key: 'row-T2' })).toBeUndefined()
@@ -1046,8 +1153,9 @@ test('board filter: a typed query narrows the board and the tree, shows in the h
   await ui.unmount()
 })
 
-test('backlog: unheld todo tasks, homeless first then by priority; a row sets priority and hands off', async ($, on) => {
+test('plan: milestones first, then Unplanned; there an unheld todo task keeps the backlog\'s picker, priority and hand-off', async ($, on) => {
   const some = [
+    item('M1'), item('E2', { milestone: 'M1' }), item('T6', { parent: 'E2' }),
     item('E1'),
     item('T1', { parent: 'E1', priority: 'p3' }),
     item('T2', { parent: 'E1', priority: 'p0', labels: ['ui'] }),
@@ -1055,7 +1163,6 @@ test('backlog: unheld todo tasks, homeless first then by priority; a row sets pr
     item('T4', { assignee: 'claude' }),
     item('T5', { status: 'done' }),
   ]
-  expect(backlog(some).map(one => one.id)).toEqual(['T3', 'T2', 'T1'])
   const scripts: string[] = []
   let submitted = ''
   on('process.run', ($, e) => (scripts.push(e.init?.stdin ?? ''), { value: fakeSqlite(e.init?.stdin, { items: some, activity: [], seen: {} }) }))
@@ -1068,11 +1175,15 @@ test('backlog: unheld todo tasks, homeless first then by priority; a row sets pr
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
   })
-  // v steps board → tree → backlog.
-  await ui.press({ key: 'tab-tree' })
-  await ui.press({ key: 'tab-backlog' })
-  expect(await ui.find({ key: 'row-T3' })).toBeDefined()
-  expect(await ui.find({ key: 'row-T4' })).toBeUndefined()
+  await ui.press({ key: 'tab-plan' })
+  const order = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('row-')).map(key => key.slice(4))
+  // M1 and what targets it, then Unplanned: E1 with its tasks, then loose open tasks; finished loose ones fold.
+  expect(order).toEqual(['M1', 'E2', 'T6', 'E1', 'T1', 'T2', 'T3', 'T4'])
+  expect((await ui.find({ key: 'fold-loose' }))?.text).toBe('▸ 1 finished task in no epic')
+  expect((await ui.find({ key: 'unplanned-head' }))?.text).toContain('Unplanned  3 for anyone to take')
+  // Controls on unplanned, unheld todo tasks only: not on T6 (M1 holds it), T4 (held) or T5 (done).
+  for (const id of ['T1', 'T2', 'T3']) expect(await ui.find({ key: `hand-${id}` })).toBeDefined()
+  for (const id of ['T6', 'T4', 'T5']) expect(await ui.find({ key: `hand-${id}` })).toBeUndefined()
   await ui.select({ key: 'prio-T1', value: 'p1' } as never)
   expect(scripts.some(one => one.includes("priority='p1'") && one.includes("WHERE id='T1'"))).toBe(true)
   await ui.press({ key: 'hand-T2' })
@@ -1140,7 +1251,7 @@ test('a handed epic in review is approved, or sent back, from its card', async (
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock' } as never,
   })
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   await ui.press({ key: 'approve' })
   expect(scripts.some(one => one.includes("status='done'") && one.includes("WHERE id='E1'"))).toBe(true)
@@ -1177,7 +1288,7 @@ test("an epic up for review waits in the board's Review column, whose card appro
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
   expect(await ui.find({ key: 'card-E1' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /2\/2 tasks/ })).toBeDefined()
+  expect((await ui.find({ key: 'card-E1' }))?.text).toMatch(/\b2\/2 PR #9/)
   expect(await ui.find({ key: 'card-E2' })).toBeUndefined()
   expect(await ui.find({ key: 'card-E3' })).toBeUndefined()
   await ui.press({ key: 'card-E1' })
@@ -1220,7 +1331,7 @@ test('new item from the board: n opens the form, choices narrow the parents, Ent
 
   // From an open epic, n adds under it; switching to a milestone drops the parent it can't take.
   await ui.press({ key: 'close' }).catch(() => undefined)
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   await ui.press({ key: 'new-under' })
   expect((await ui.find({ key: 'new-parent' }))?.props.value).toBe('E1')
@@ -1568,7 +1679,7 @@ test('review with a pull request: checks on the card; Approve offers to merge an
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
-  await ui.press({ key: 'tab-tree' })
+  await ui.press({ key: 'tab-plan' })
   await ui.press({ key: 'row-E1' })
   expect(await ui.find({ type: 'Text', text: /✗ checks failing/ })).toBeDefined()
   const wrote = (needle: string) => scripts.some(one => one.includes(needle))
@@ -2036,7 +2147,7 @@ test('run tasks at once: picked backlog rows each get an agent, a worktree and a
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
-  await ui.press({ key: 'tab-backlog' })
+  await ui.press({ key: 'tab-plan' })
   for (const id of ['T1', 'T2', 'T3']) await ui.press({ key: `pick-${id}` })
   await ui.press({ key: 'run-picked' })
   expect(await ui.find({ type: 'Text', text: /Run T1, T2, T3 at once, each by its own agent in its own worktree\? T3 starts when what it waits on is done\./ })).toBeDefined()
@@ -2137,6 +2248,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
     '/p/CHANGELOG.md': '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Undo.\n\n## 0.4.0 - 2026-10-09\n\n- Old.\n\n[Unreleased]: https://github.com/o/r/commits/main\n',
   }
   const ran: string[] = []
+  const scripts: string[] = []
   let dirty = ''
   let mergedPr = '[]'
   let branch = 'main'
@@ -2158,6 +2270,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
         (stableFails && line.endsWith(':refs/heads/stable')) ? 1 : 0
       return { value: { ...fakeSqlite('', null), stdout, exitCode } }
     }
+    scripts.push(e.init?.stdin ?? '')
     return { value: fakeSqlite(e.init?.stdin, { items: [], activity: [], seen: {} }) }
   })
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -2184,7 +2297,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(files['/p/.claude-plugin/plugin.json']).toContain('"version": "0.4.0"')
   ran.length = 0
   expect(await ship({ version: '0.5.0' })).toContain('Opened https://github.com/o/r/pull/30 for 0.5.0: .claude-plugin/plugin.json bumped')
-  expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state'))).toEqual([
+  expect(ran.filter(one => !one.startsWith('git log') && !one.startsWith('gh pr list --state') && !one.startsWith('git ls-remote --heads origin stable') && !one.startsWith('git tag --points-at'))).toEqual([
     'git remote get-url origin', 'git status --porcelain', 'git symbolic-ref --short refs/remotes/origin/HEAD', 'git rev-parse --abbrev-ref HEAD',
     'git fetch origin main', 'git rev-list --count HEAD..origin/main', 'git switch -c release-v0.5.0', 'git commit -am Release 0.5.0',
     'git push -u origin release-v0.5.0', 'git switch main', 'gh pr create --head release-v0.5.0 --title Release 0.5.0 --body ### Added\n\n- Undo.',
@@ -2195,7 +2308,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(await ship({ version: '0.5.0' })).toBe('no merged PR from release-v0.5.0 yet: merge the release PR first')
   mergedPr = JSON.stringify([{ number: 30, mergeCommit: { oid: 'abc123' } }])
   expect(await ship({ version: '0.5.0' })).toContain("Tagging v0.5.0 and publishing the release is the user's call")
-  expect(ran.some(one => one.startsWith('git tag'))).toBe(false)
+  expect(ran.some(one => one.startsWith('git tag -a'))).toBe(false)
   ran.length = 0
   expect(await ship({ version: '0.5.0', approved: true })).toBe(
     "Released 0.5.0: tagged v0.5.0 on PR #30's merge and published https://github.com/o/r/releases/tag/v0.5.0. stable now serves 0.5.0. Deleted release-v0.5.0.")
@@ -2221,6 +2334,7 @@ test('ship: a bump goes out as a PR; refused when lower, a first 1.0 unasked, or
   expect(await ship({ version: '0.5.0', approved: true })).toContain('stable was not moved')
   stableFails = false
   expect(ran).toContain('git tag -a v0.5.0 -m v0.5.0 abc123')
+  expect(scripts.some(one => one.includes("INSERT OR REPLACE INTO releases(version, tag, at, pr, notes) VALUES ('0.5.0', 'v0.5.0', '2026-10-10', 30,"))).toBe(true)
   expect(ran).toContain('git push origin v0.5.0')
   expect(ran).toContain('gh release create v0.5.0 --title v0.5.0 --verify-tag --notes ### Added\n\n- Undo.')
   // A subagent's approval doesn't count.
@@ -2307,12 +2421,12 @@ test('timeline: milestones and epics by due date with their progress; late work 
   await $.command.run({ command: 'roadmap', args: '' } as never)
   const ui = await $.ui.mount({
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
-    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock' } as never,
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 96, placement: 'dock' } as never,
   })
-  // On the board, a task past its (inherited) date is marked late.
+  // On the board, a task past its (inherited) date is marked late. (A narrow pane: the roadmap is a list.)
   expect((await ui.find({ key: 'card-T2' }))?.text).toContain('⚠late')
   expect((await ui.find({ key: 'card-T3' }))?.text).not.toContain('late')
-  await ui.press({ key: 'tab-timeline' })
+  await ui.press({ key: 'tab-roadmap' })
   expect((await ui.find({ key: 'time-E1' }))?.text).toContain('2026-10-05  ▓▓▓▓▓░░░░░ 1/2  4 days late, 1 open')
   expect((await ui.find({ key: 'time-M1' }))?.text).toContain('2026-10-20  ▓▓▓░░░░░░░ 1/3  in 11 days')
   expect((await ui.find({ key: 'time-M2' }))?.text).toMatch(/M2 Later +— /)

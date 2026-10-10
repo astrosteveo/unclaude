@@ -1,4 +1,4 @@
-import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Section, Snapshot, Status } from '../types'
+import type { Activity, Checks, Commit, IssueType, Item, Kind, PlanNode, PlannedItem, Pr, Priority, Query, Refs, Release, Section, Snapshot, Status } from '../types'
 
 // The person at the board, and the main loop's agent; subagents go by names from agentName.
 export const USER = 'user'
@@ -50,13 +50,30 @@ function indexOf(items: Item[]): Index {
     for (const item of items) {
       const key = item.id.toUpperCase()
       if (!index.byId.has(key)) index.byId.set(key, item)
-      const siblings = index.children.get(item.parent)
+      const up = upOf(item)
+      const siblings = index.children.get(up)
       if (siblings) siblings.push(item)
-      else index.children.set(item.parent, [item])
+      else index.children.set(up, [item])
     }
     indexes.set(items, index)
   }
   return index
+}
+
+/**
+ * What an item sits under in the tree: a task its epic, else (a task in no epic, or an epic) the milestone it
+ * targets. A milestone is a target, not a container, but the tree shows what targets it beneath it.
+ */
+export const upOf = (item: Item): string | null => item.parent ?? item.milestone ?? null
+
+/** The milestone a task or epic targets: its own, else (a task) its epic's; a milestone is its own. */
+export function targetOf(items: Item[], item: Item): string | null {
+  if (item.kind === 'milestone') return item.id
+  if (item.milestone) return item.milestone
+  const up = find(items, item.parent ?? undefined)
+  // Under a milestone, as data from before targets had it: that milestone; under an epic, the epic's.
+  if (!up) return null
+  return up.kind === 'milestone' ? up.id : item.kind === 'task' ? targetOf(items, up) : null
 }
 
 export const find = (items: Item[], id: string | undefined) =>
@@ -64,6 +81,26 @@ export const find = (items: Item[], id: string | undefined) =>
 
 /** An item's children, as a list of the caller's own (free to sort). */
 export const childrenOf = (items: Item[], id: string | null): Item[] => [...(indexOf(items).children.get(id) ?? [])]
+
+/**
+ * Where "under X" puts an item: under an epic, `parent` is the epic (and a task's own target goes, so it
+ * follows its epic's); under a milestone, `milestone` is it and there is no epic; under nothing, neither.
+ */
+export function placeOf(items: Item[], kind: Kind, under: string | undefined, self?: string): { parent: string | null; milestone: string | null } {
+  const at = checkParent(items, kind, under, self)
+  const found = at ? find(items, at) : undefined
+  return found?.kind === 'milestone' ? { parent: null, milestone: found.id } : { parent: at, milestone: null }
+}
+
+/** The milestone a target names, or throws: only epics and tasks target, and only milestones are targets. */
+export function checkTarget(items: Item[], kind: Kind, milestone: string): string | null {
+  if (milestone === '') return null
+  if (kind === 'milestone') throw new Error('A milestone targets nothing; epics and tasks target milestones')
+  const found = find(items, milestone)
+  if (!found) throw new Error(`No item ${milestone}`)
+  if (found.kind !== 'milestone') throw new Error(`${found.id} is a ${found.kind}; a target is a milestone`)
+  return found.id
+}
 
 /** The parent id to store, or throws when the nesting is not allowed. */
 export function checkParent(items: Item[], kind: Kind, parent: string | undefined, self?: string): string | null {
@@ -108,6 +145,13 @@ export function checkPlan(items: Item[], nodes: PlanNode[], parent: string | und
       if (node.type && !TYPES.includes(node.type)) throw new Error(`${where}: type must be one of ${TYPES.join(', ')}`)
       if (node.kind !== 'task' && (node.checklist?.length || node.blocked_by?.length))
         throw new Error(`${where}: only tasks carry a checklist or blocked_by`)
+      if (node.milestone !== undefined) {
+        if (node.kind === 'milestone') throw new Error(`${where}: a milestone targets nothing`)
+        const named = String(node.milestone).trim()
+        const local = nodes.flatMap(function all(one: PlanNode): PlanNode[] { return [one, ...(one.children ?? []).flatMap(all)] }).find(one => one.ref === named)
+        if (local ? local.kind !== 'milestone' : (find(items, named)?.kind ?? 'none') !== 'milestone')
+          throw new Error(`${where}: milestone ${named} is not a milestone here or in the plan`)
+      }
       if (parentKind === null) checkParent(items, node.kind, parentId ?? undefined)
       else if (!PARENTS[node.kind].includes(parentKind)) throw new Error(`${where}: a ${node.kind} cannot sit under a ${parentKind}`)
       const planned: PlannedItem = { ref, node, parentId: parentRef ? null : parentId, parentRef, blockerRefs: [], blockerIds: [] }
@@ -164,6 +208,7 @@ export function parseQuery(text: string): Query | undefined {
     if (low.startsWith('@') && low.length > 1) add('assignee', low.slice(1))
     else if (low.startsWith('#') && low.length > 1) add('labels', low.slice(1))
     else if (low.startsWith('under:') && low.length > 6) q.under = low.slice(6).toUpperCase()
+    else if (low.startsWith('m:') && low.length > 2) q.milestone = low.slice(2).toUpperCase()
     else if ((PRIORITIES as string[]).includes(low)) add('priority', low as Priority)
     else if ((TYPES as string[]).includes(low)) add('type', low as IssueType)
     else if (STATUS_WORDS[low]) add('status', STATUS_WORDS[low]!)
@@ -190,6 +235,7 @@ export function matches(snap: Snapshot, item: Item, query: Query, said?: Record<
     const root = find(snap.items, query.under)
     if (!root || root.id === item.id || !subtree(snap.items, root.id).includes(item.id)) return false
   }
+  if (query.milestone && item.id !== query.milestone.toUpperCase() && targetOf(snap.items, item) !== query.milestone.toUpperCase()) return false
   if (query.text?.trim()) {
     const words = query.text.toLowerCase().split(/\s+/).filter(Boolean)
     const written = said ? [said[item.id] ?? ''] : snap.activity.filter(one => one.item_id === item.id && isMessage(one)).map(one => one.body)
@@ -271,10 +317,17 @@ export function subtree(items: Item[], id: string): string[] {
   return out
 }
 
-const tasksUnder = (items: Item[], item: Item) =>
-  subtree(items, item.id)
-    .map(id => find(items, id)!)
-    .filter(one => one.kind === 'task' && one.id !== item.id)
+/**
+ * The tasks an item is made of: an epic's, its tasks; a milestone's, the tasks that target it, directly
+ * or through their epic (a task can target another milestone than its epic's).
+ */
+export const tasksIn = (items: Item[], item: Item): Item[] =>
+  item.kind === 'milestone'
+    ? items.filter(one => one.kind === 'task' && targetOf(items, one) === item.id)
+    : subtree(items, item.id)
+        .map(id => find(items, id)!)
+        .filter(one => one.kind === 'task' && one.id !== item.id)
+const tasksUnder = tasksIn
 
 /** Tasks in an item's subtree: done and total. */
 export function progress(items: Item[], item: Item): { done: number; total: number } {
@@ -299,9 +352,12 @@ export const isAgent = (who: string | null | undefined) => Boolean(who) && who !
  * are several: the unit of work that is reviewed once, at its end, in place of what is inside it.
  */
 export function handedScope(items: Item[], item: Item): Item | undefined {
+  // What holds it, inner first: a task's epic, then the milestone it targets (its own, else its epic's).
+  if (item.kind === 'milestone') return undefined
+  const epic = item.kind === 'task' && item.parent ? find(items, item.parent) : undefined
+  const milestone = find(items, targetOf(items, item) ?? undefined)
   let scope: Item | undefined
-  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined))
-    if (at.kind !== 'task' && isAgent(at.assignee)) scope = at
+  for (const at of [epic, milestone]) if (at && isAgent(at.assignee)) scope = at
   return scope
 }
 
@@ -355,7 +411,7 @@ export function rows(items: Item[], root: string | null = null): { item: Item; d
 /** The item's ancestors, root first, as `M1 v1 launch › E2 Billing`. */
 export const path = (items: Item[], item: Item): string => {
   const chain: Item[] = []
-  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined)) chain.unshift(at)
+  for (let at = find(items, upOf(item) ?? undefined); at; at = find(items, upOf(at) ?? undefined)) chain.unshift(at)
   return chain.map(one => `${one.id} ${one.title}`).join(' › ')
 }
 
@@ -429,10 +485,12 @@ export const isMessage = (one: Activity) => one.type === 'comment' || one.type =
 export const timeline = (activity: Activity[], id: string) =>
   activity.filter(one => one.item_id === id).sort((a, b) => a.id - b.id)
 
-export function detail(snap: Snapshot, item: Item, limit = 15): string {
+export function detail(snap: Snapshot, item: Item, limit = 15, refs?: Refs): string {
   const parts = [line(snap.items, item)]
   const where = path(snap.items, item)
   if (where) parts.push(`in: ${where}`)
+  const shipped = shipNote(snap, item, refs)
+  if (shipped) parts.push(shipped.charAt(0).toUpperCase() + shipped.slice(1))
   // Whoever picks the task up reads the last holder's note before anything else.
   const handoff = timeline(snap.activity, item.id).filter(one => one.type === 'handoff').at(-1)
   if (handoff) parts.push(`Handoff from ${handoff.author} (${handoff.at.slice(0, 16).replace('T', ' ')}):\n  ${handoff.body}`)
@@ -462,7 +520,7 @@ export function detail(snap: Snapshot, item: Item, limit = 15): string {
 export const backlog = (items: Item[]): Item[] =>
   items
     .filter(item => item.kind === 'task' && item.status === 'todo' && !item.assignee)
-    .sort((a, b) => Number(a.parent !== null) - Number(b.parent !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
+    .sort((a, b) => Number(upOf(a) !== null) - Number(upOf(b) !== null) || byPriority(a, b) || Number(a.id.slice(1)) - Number(b.id.slice(1)))
 
 /**
  * What to work on next for `actor`: their own open tasks (those still waiting on others last), then
@@ -472,11 +530,7 @@ export const backlog = (items: Item[]): Item[] =>
 export function nextUp(items: Item[], actor: string, now?: number): Item[] {
   const tasks = items.filter(item => item.kind === 'task')
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done')
-  const due = (task: Item) => {
-    let at: Item | undefined = task
-    while (at && !at.due) at = find(items, at.parent ?? undefined)
-    return at?.due ?? '9999'
-  }
+  const due = (task: Item) => dueOf(items, task) ?? '9999'
   const isWaiting = (task: Item) => waitingOn(items, task).length > 0
   const free = tasks
     .filter(task => !task.assignee && task.status === 'todo' && !isWaiting(task))
@@ -496,7 +550,7 @@ export function nextUp(items: Item[], actor: string, now?: number): Item[] {
  * the first free todo task that waits on nothing unfinished, as next orders them; never `besides`.
  */
 export function readyIn(items: Item[], unit: Item, actor: string, besides?: string): Item | undefined {
-  const under = new Set(subtree(items, unit.id).filter(id => id !== besides))
+  const under = new Set(tasksIn(items, unit).map(one => one.id).filter(id => id !== besides))
   return nextUp(items, actor).find(
     task => under.has(task.id) && (task.status === 'todo' || task.status === 'in_progress') && !waitingOn(items, task).length,
   )
@@ -507,9 +561,36 @@ export const dateOf = (now: number) => new Date(now).toISOString().slice(0, 10)
 
 /** When an item is due: its own date, else the nearest one above it. */
 export function dueOf(items: Item[], item: Item): string | undefined {
-  let at: Item | undefined = item
-  while (at && !at.due) at = find(items, at.parent ?? undefined)
-  return at?.due ?? undefined
+  // Its own date, else its epic's, else the milestone it targets.
+  if (item.due) return item.due
+  const epic = item.kind === 'task' && item.parent ? find(items, item.parent) : undefined
+  if (epic?.due) return epic.due
+  return item.kind === 'milestone' ? undefined : find(items, targetOf(items, item) ?? undefined)?.due ?? undefined
+}
+
+/**
+ * Where a milestone or epic sits on the roadmap's time axis: from its start, given or derived, to its
+ * end, its due date (an epic's, else its milestone's). An epic without a start begins at its first claim
+ * (the earliest claim or status change on its tasks), else when it was made; a milestone at the earliest
+ * of what targets it, else when it was made. `isStartGiven` says which.
+ */
+export function spanOf(snap: Snapshot, item: Item): { start: string; end?: string; isStartGiven: boolean } {
+  const items = snap.items
+  const end = dueOf(items, item)
+  if (item.start) return { start: item.start, end, isStartGiven: true }
+  const made = item.created_at.slice(0, 10)
+  if (item.kind === 'milestone') {
+    const parts = items.filter(one => one.kind === 'epic' && targetOf(items, one) === item.id).map(one => spanOf(snap, one).start)
+    const loose = tasksIn(items, item).filter(one => !one.parent).map(one => one.created_at.slice(0, 10))
+    const first = [...parts, ...loose].sort()[0]
+    return { start: first ?? made, end, isStartGiven: false }
+  }
+  const ids = new Set(tasksIn(items, item).map(one => one.id))
+  const begun = snap.activity
+    .filter(one => ids.has(one.item_id) && (one.type === 'status' || (one.type === 'assign' && one.body === 'claimed')))
+    .map(one => one.at.slice(0, 10))
+    .sort()[0]
+  return { start: begun ?? made, end, isStartGiven: false }
 }
 
 /** Whether an item is past when it was due (its own date or one above it) and not done; never without a clock. */
@@ -525,6 +606,63 @@ export const daysBetween = (a: string, b: string) => Math.round((Date.parse(b) -
  * The timeline: milestones (and epics under none) by due date, soonest first and undated last, each
  * milestone followed by its epics in the same order.
  */
+/** A CHANGELOG's released versions, newest first as written: each with its date and the text under it. */
+export function changelogVersions(text: string): { version: string; date: string; body: string }[] {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const out: { version: string; date: string; body: string }[] = []
+  lines.forEach((line, i) => {
+    const head = /^## \[?(\d+\.\d+\.\d+)\]?(?: - (\d{4}-\d{2}-\d{2}))?/.exec(line)
+    if (!head) return
+    const next = lines.findIndex((other, j) => j > i && (other.startsWith('## ') || /^\[[^\]]+\]: \S/.test(other)))
+    out.push({ version: head[1]!, date: head[2] ?? '', body: lines.slice(i + 1, next < 0 ? undefined : next).join('\n').trim() })
+  })
+  return out
+}
+
+/** The tasks a release's notes carry: those whose note is in `body`, but not ones `taken` by another release. */
+export function shippedIn(items: Item[], body: string, taken: Set<string> = new Set()): { id: string; note: string; section: Section | null }[] {
+  return items
+    .filter(task => task.kind === 'task' && hasNote(task) && !taken.has(task.id) && body.includes(task.note!))
+    .map(task => ({ id: task.id, note: task.note!, section: sectionFor(task) }))
+}
+
+/** The release a task shipped in, from the record of releases. */
+export const releaseOf = (snap: Snapshot, id: string): Release | undefined => (snap.releases ?? []).find(one => one.tasks.some(task => task.id === id))
+
+/** Merged work no release carries yet: the tasks whose notes the next release would ship. */
+export function unreleased(snap: Snapshot, refs: Refs): Item[] {
+  const shipped = new Set((snap.releases ?? []).flatMap(one => one.tasks.map(task => task.id)))
+  return mergedNotes(snap.items, refs).filter(task => !shipped.has(task.id))
+}
+
+/**
+ * How an item stands against releases, in a few words, or undefined: a task "shipped in vX", or "merged,
+ * not released" (given `refs`); a milestone how many of its noted tasks are out, and in which versions.
+ */
+export function shipNote(snap: Snapshot, item: Item, refs?: Refs): string | undefined {
+  if (item.kind === 'task') {
+    const release = releaseOf(snap, item.id)
+    if (release) return `shipped in v${release.version}`
+    return refs && unreleased(snap, refs).some(one => one.id === item.id) ? 'merged, not released' : undefined
+  }
+  if (item.kind !== 'milestone') return undefined
+  const noted = tasksIn(snap.items, item).filter(hasNote)
+  const out = noted.map(task => releaseOf(snap, task.id)).filter((one): one is Release => one !== undefined)
+  if (out.length === 0) return undefined
+  const versions = [...new Set(out.map(one => one.version))].sort((a, b) => (isAfter(versionOf(a)!, versionOf(b)!) ? 1 : -1))
+  return `${out.length}/${noted.length} shipped (${versions.map(one => `v${one}`).join(', ')})`
+}
+
+/** The version to suggest for the next release after `last`: a patch when it only fixes, else a minor. */
+export function nextVersion(last: string | undefined, notes: Item[]): string {
+  const [major, minor, patch] = versionOf(last) ?? [0, 0, 0]
+  return notes.length > 0 && notes.every(task => sectionFor(task) === 'Fixed') ? `${major}.${minor}.${patch + 1}` : `${major}.${minor + 1}.0`
+}
+
+/** Releases, newest version first. */
+export const releasesOf = (snap: Snapshot): Release[] =>
+  [...(snap.releases ?? [])].sort((a, b) => (isAfter(versionOf(a.version) ?? [0, 0, 0], versionOf(b.version) ?? [0, 0, 0]) ? -1 : 1))
+
 /** Open work first, then what is done, each in the order `list` gives. */
 export const openFirst = (items: Item[], list: Item[]): Item[] => [
   ...list.filter(one => statusOf(items, one) !== 'done'),
@@ -547,16 +685,16 @@ export function treeRows(items: Item[], isFolded: (item: Item) => boolean): { it
 /** The timeline's rows: `timelineOf`'s, open work first, a milestone's epics left out while it is folded. */
 export function timelineRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
   const all = timelineOf(items)
-  const tops = openFirst(items, all.filter(one => !find(items, one.parent ?? undefined)))
+  const tops = openFirst(items, all.filter(one => !find(items, upOf(one) ?? undefined)))
   return tops.flatMap(top => [
     { item: top, depth: 0 },
-    ...(isFolded(top) ? [] : openFirst(items, all.filter(one => one.parent === top.id)).map(item => ({ item, depth: 1 }))),
+    ...(isFolded(top) ? [] : openFirst(items, all.filter(one => upOf(one) === top.id)).map(item => ({ item, depth: 1 }))),
   ])
 }
 
 export function timelineOf(items: Item[]): Item[] {
   const byDue = (list: Item[]) => [...list].sort((a, b) => (a.due ?? '9999').localeCompare(b.due ?? '9999') || byId(a, b))
-  const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, one.parent ?? undefined)))
+  const top = byDue(items.filter(one => one.kind !== 'task' && !find(items, upOf(one) ?? undefined)))
   return top.flatMap(one => [one, ...(one.kind === 'milestone' ? byDue(childrenOf(items, one.id).filter(child => child.kind === 'epic')) : [])])
 }
 
@@ -566,7 +704,7 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
   const items = snap.items
   const tasks = items.filter(item => item.kind === 'task')
   const list = (some: Item[], cap = 8) =>
-    some.slice(0, cap).map(item => `- ${line(items, item)}${item.parent ? ` [${item.parent}]` : ''}`).join('\n') +
+    some.slice(0, cap).map(item => `- ${line(items, item)}${upOf(item) ? ` [${upOf(item)}]` : ''}`).join('\n') +
     (some.length > cap ? `\n- …${some.length - cap} more` : '')
   const milestones = items.filter(item => item.kind === 'milestone' && statusOf(items, item) !== 'done').sort(byId)
   const mine = tasks.filter(task => task.assignee === actor && task.status !== 'done' && task.status !== 'review')
@@ -598,6 +736,9 @@ export function brief(snap: Snapshot, actor: string, news: Activity[], now?: num
         review.slice(0, 8).map(item => `- ${line(items, item)}${pr(item)}`).join('\n'),
     )
   }
+  // What a release would ship now: said so a "release" from the user finds it in hand.
+  const waiting = refs ? unreleased(snap, refs) : []
+  if (waiting.length) parts.push(`Merged, not released yet: ${waiting.slice(0, 8).map(one => one.id).join(', ')}${waiting.length > 8 ? ` and ${waiting.length - 8} more` : ''}.`)
   if (news.length)
     parts.push(
       'Changes by the user since you last looked:\n' +
@@ -705,7 +846,7 @@ export const branchFor = (item: Item) => `${item.id.toLowerCase()}-${slug(item.t
 
 /** A unit's pull request: titled with its id, the body listing what was done and what done meant. */
 export function pullRequest(items: Item[], item: Item): { branch: string; title: string; body: string } {
-  const tasks = item.kind === 'task' ? [item] : subtree(items, item.id).map(id => find(items, id)!).filter(one => one.kind === 'task')
+  const tasks = item.kind === 'task' ? [item] : tasksIn(items, item)
   const parts: string[] = []
   if (item.description) parts.push(item.description)
   parts.push(
@@ -726,7 +867,7 @@ export function pullRequest(items: Item[], item: Item): { branch: string; title:
       const some = noted.filter(task => sectionFor(task) === section)
       return some.length ? ['', `${section}:`, ...some.map(task => `- ${task.note} (${task.id})`)] : []
     })].join('\n'))
-  parts.push(`Tracked on the roadmap as ${item.id}${item.parent ? `, in ${path(items, item)}` : ''}.`)
+  parts.push(`Tracked on the roadmap as ${item.id}${upOf(item) ? `, in ${path(items, item)}` : ''}.`)
   return { branch: branchFor(item), title: `${item.id}: ${item.title}`, body: parts.filter(Boolean).join('\n\n') }
 }
 
@@ -781,7 +922,8 @@ export function parsePrs(out: string): Pr[] {
       number: pr.number, title: pr.title, state: pr.state.toLowerCase(), url: pr.url,
       ids: idsIn(`${pr.title} ${pr.headRefName}`), checks: checksOf(pr.statusCheckRollup), branch: pr.headRefName, base: pr.baseRefName ?? '',
     }))
-    .filter(pr => pr.ids.length > 0)
+    // Those naming items, and release PRs, which the record of releases names.
+    .filter(pr => pr.ids.length > 0 || pr.branch.startsWith('release-v'))
 }
 
 /** The open pull request a unit of work ships in: the one naming the unit itself. */
@@ -845,7 +987,7 @@ export const isMainLine = (branch: string) => branch === 'main' || branch === 'm
 export function refsFor(items: Item[], refs: Refs, item: Item): Refs {
   const ids = new Set(subtree(items, item.id))
   const above = new Set<string>()
-  for (let at = find(items, item.parent ?? undefined); at; at = find(items, at.parent ?? undefined)) above.add(at.id)
+  for (let at = find(items, upOf(item) ?? undefined); at; at = find(items, upOf(at) ?? undefined)) above.add(at.id)
   return {
     commits: refs.commits.filter(commit => commit.ids.some(id => ids.has(id))),
     prs: refs.prs.filter(pr => pr.ids.some(id => ids.has(id) || above.has(id))),
@@ -904,7 +1046,7 @@ export function withIgnore(text: string | undefined): string {
 
 /**
  * The release notes of merged work: done tasks with a note whose unit of work has no open pull request,
- * and has a merged one or none at all (work committed straight to the main line).
+ * and has a merged one, or none at all and is done (work committed straight to the main line).
  */
 export function mergedNotes(items: Item[], refs: Refs): Item[] {
   return rows(items)
@@ -913,7 +1055,10 @@ export function mergedNotes(items: Item[], refs: Refs): Item[] {
     .filter(task => {
       const unit = unitOf(items, task)
       const prs = refs.prs.filter(pr => pr.ids.includes(unit.id))
-      return !prs.some(pr => pr.state === 'open') && (prs.length === 0 || prs.some(pr => pr.state === 'merged'))
+      if (prs.some(pr => pr.state === 'open')) return false
+      // Merged by its PR; or, with none, once its whole unit is done (committed straight to the main line),
+      // not while a milestone or epic it ships in is still under way on its branch.
+      return prs.some(pr => pr.state === 'merged') || (prs.length === 0 && statusOf(items, unit) === 'done')
     })
     // Newest first, as a CHANGELOG reads.
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || Number(b.id.slice(1)) - Number(a.id.slice(1)))

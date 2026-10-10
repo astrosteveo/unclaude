@@ -51,6 +51,8 @@ let loads = 0
 let dir
 let $
 let call
+let start
+let hooksAll
 
 /** A stand-in for the engine handle: real processes and files in the project, the rest recorded or quiet. */
 function engine(root) {
@@ -106,6 +108,9 @@ async function load(root) {
     return chain
   })
   const tool = hooks.find(one => one.name === 'tool.call' && one.filter?.tool === TOOL).hook
+  hooksAll = hooks
+  // A session starting: the poll that loads the board, links commits and PRs, and fills in what's missing.
+  start = () => hooks.find(one => one.name === 'session.start').hook($, { source: 'startup', cwd: root }, async e => e)
   // As the model calls it: the main loop, or a subagent by its id.
   call = async (input, agentId) => {
     const reply = await tool($, { tool: TOOL, tool_use_id: 't', ...(agentId ? { agentId } : {}), ...input })
@@ -125,7 +130,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
 /** What the database holds, read straight from it. */
 const query = sql => execFileSync('sqlite3', ['-batch', '-noheader', '-list', join(dir, '.claude/roadmap.db'), sql], { encoding: 'utf8' }).trim()
-const everything = () => query("SELECT group_concat(id || ' ' || kind || ' ' || status || ' ' || COALESCE(parent, '-') || ' ' || COALESCE(assignee, '-'), '; ') FROM (SELECT * FROM items ORDER BY id);") +
+const everything = () => query("SELECT group_concat(id || ' ' || kind || ' ' || status || ' ' || COALESCE(parent, milestone, '-') || ' ' || COALESCE(assignee, '-'), '; ') FROM (SELECT * FROM items ORDER BY id);") +
   ` | ${query('SELECT count(*) FROM activity;')} | ${query("SELECT group_concat(blocker || '>' || blocked) FROM links;")}`
 
 const ok = async (input, agentId) => {
@@ -325,4 +330,154 @@ test("won't do: a reason closes a task as dropped, not finished; no ticks or not
   // Back to work, it is no longer won't do.
   await ok({ action: 'update', id: 'T2', status: 'todo' })
   assert.equal(query("SELECT status || ' ' || COALESCE(resolution, '-') FROM items WHERE id='T2';"), 'todo -')
+})
+
+test('milestones are targets: under a milestone an epic or task targets it; under an epic a task joins it; old exports map the same', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1' })
+  await ok({ action: 'add', kind: 'epic', title: 'Auth', parent: 'M1' })
+  await ok({ action: 'add', kind: 'task', title: 'Login', parent: 'E1' })
+  await ok({ action: 'add', kind: 'task', title: 'Loose', parent: 'M1' })
+  await ok({ action: 'plan', parent: 'M1', tree: [{ ref: 'e', kind: 'epic', title: 'Billing', children: [{ ref: 't', kind: 'task', title: 'Invoice' }] }] })
+  const at = id => query(`SELECT COALESCE(parent, '-') || ' ' || COALESCE(milestone, '-') FROM items WHERE id='${id}';`)
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), 'E1 -')
+  assert.equal(at('T2'), '- M1')
+  assert.equal(at('E2'), '- M1')
+  assert.equal(at('T3'), 'E2 -')
+  // Moved into an epic, a task follows the epic's target; out to a milestone, it targets that and leaves its epic.
+  await ok({ action: 'update', id: 'T2', parent: 'E1' })
+  assert.equal(at('T2'), 'E1 -')
+  await ok({ action: 'update', id: 'T1', parent: 'M1' })
+  assert.equal(at('T1'), '- M1')
+  // The tree still reads milestone > epic > task.
+  assert.match(await ok({ action: 'show' }), /M1 .*\n  E1 .*\n    T2 /)
+  // Undo takes a move back whole.
+  await call({ action: 'show' })
+  const undoId = query("SELECT max(op) FROM activity WHERE item_id='T1';")
+  assert.ok(undoId)
+  // An export from before targets (epics parented to milestones) imports mapped the same.
+  const old = { roadmap: 'export', schema: 6, exported_at: '2026-10-01T00:00:00Z', tables: {
+    items: [
+      { id: 'M1', kind: 'milestone', title: 'v1', status: 'todo', parent: null, created_at: 'x', updated_at: 'x' },
+      { id: 'E1', kind: 'epic', title: 'Auth', status: 'todo', parent: 'M1', created_at: 'x', updated_at: 'x' },
+      { id: 'T1', kind: 'task', title: 'Loose', status: 'todo', parent: 'M1', created_at: 'x', updated_at: 'x' },
+    ],
+    counters: [{ prefix: 'M', n: 1 }, { prefix: 'E', n: 1 }, { prefix: 'T', n: 1 }],
+  } }
+  writeFileSync(join(dir, 'old.json'), JSON.stringify(old))
+  rmSync(join(dir, '.claude'), { recursive: true, force: true })
+  await load(dir)
+  await ok({ action: 'import', path: 'old.json' })
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), '- M1')
+})
+
+test('releases: the first session fills in the record of past releases from CHANGELOG.md, with their tags and the tasks they carried', async () => {
+  await ok({ action: 'add', kind: 'task', title: 'Fix', note: 'ship writes the notes itself.', type: 'bug' })
+  await ok({ action: 'update', id: 'T1', status: 'done', approved: true })
+  await ok({ action: 'add', kind: 'task', title: 'Old', note: 'Undo on the board.' })
+  await ok({ action: 'update', id: 'T2', status: 'done', approved: true })
+  writeFileSync(join(dir, 'CHANGELOG.md'), [
+    '# Changelog', '', '## [Unreleased]', '', '## [0.6.1] - 2026-10-09', '', '### Fixed', '', '- ship writes the notes itself.', '',
+    '## 0.4.0 - 2026-10-01', '', '- Undo on the board.', '- Something from before the roadmap.', '',
+  ].join('\n'))
+  execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'release'])
+  execFileSync('git', ['-C', dir, 'tag', 'v0.6.1'])
+  await start()
+  const rows = query("SELECT group_concat(version || ' ' || COALESCE(tag, '-') || ' ' || at, '; ') FROM (SELECT * FROM releases ORDER BY version);")
+  assert.equal(rows, '0.4.0 - 2026-10-01; 0.6.1 v0.6.1 2026-10-09')
+  assert.equal(query("SELECT group_concat(version || ':' || item_id, ' ') FROM (SELECT * FROM shipped ORDER BY version);"), '0.4.0:T2 0.6.1:T1')
+  // Once: a second session with a record already there leaves it as it is.
+  execFileSync('sqlite3', [join(dir, '.claude/roadmap.db'), "DELETE FROM shipped WHERE item_id='T2';"])
+  await load(dir)
+  await start()
+  assert.equal(query("SELECT count(*) FROM shipped;"), '1')
+})
+
+test('inbox: the tool files what Claude notices, and /roadmap inbox files what the user types; numbered I1, I2, kept apart from planned work', async () => {
+  assert.equal((await call({ action: 'file' })).ok, false)
+  assert.match(await ok({ action: 'file', title: 'Board flickers on resize', description: 'Seen at 84 columns.' }), /Filed I1 to the inbox: Board flickers on resize$/)
+  const command = hooksAll.find(one => one.name === 'command.run').hook
+  assert.deepEqual(await command($, { command: 'roadmap', args: 'inbox  we should export to CSV' }), { text: 'Filed I2 to the inbox.' })
+  assert.equal(query("SELECT group_concat(id || ' ' || author || ' ' || state || ' ' || COALESCE(body, '-'), '; ') FROM inbox;"),
+    'I1 claude open Seen at 84 columns.; I2 user open -')
+  // Not planned work: no items, nothing on the board or in next.
+  assert.equal(query('SELECT count(*) FROM items;'), '0')
+  assert.match(await ok({ action: 'next' }), /^Nothing/)
+})
+
+test('a handed milestone holds every task that targets it, in an epic or not', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1' })
+  await ok({ action: 'add', kind: 'task', title: 'Loose', parent: 'M1', priority: 'p0' })
+  await ok({ action: 'add', kind: 'epic', title: 'Auth', parent: 'M1' })
+  await ok({ action: 'add', kind: 'task', title: 'Login', parent: 'E1' })
+  const claimed = await ok({ action: 'claim', id: 'M1' })
+  assert.match(claimed, /T1 is yours/)
+  assert.match(claimed, /T2 /)
+  await ok({ action: 'update', id: 'T1', status: 'done', note: '-' })
+  assert.match(await ok({ action: 'show', id: 'M1' }), /1\/2 tasks/)
+})
+
+test('targets in the tool: add, update and plan take milestone; a task can target another milestone than its epic; find and the filter take it', async () => {
+  await ok({ action: 'plan', tree: [
+    { ref: 'auth', kind: 'epic', title: 'Auth', milestone: 'v1', children: [{ ref: 'login', kind: 'task', title: 'Login' }] },
+    { ref: 'v1', kind: 'milestone', title: 'v1' },
+  ] })
+  const at = id => query(`SELECT COALESCE(parent, '-') || ' ' || COALESCE(milestone, '-') FROM items WHERE id='${id}';`)
+  assert.equal(at('E1'), '- M1')
+  assert.equal(at('T1'), 'E1 -')
+  await ok({ action: 'add', kind: 'milestone', title: 'v2' })
+  await ok({ action: 'add', kind: 'task', title: 'Later', parent: 'E1', milestone: 'M2' })
+  assert.equal(at('T2'), 'E1 M2')
+  assert.match((await call({ action: 'add', kind: 'task', title: 'x', parent: 'M1', milestone: 'M2' })).text, /already targets it/)
+  assert.match((await call({ action: 'update', id: 'T1', milestone: 'E1' })).text, /a target is a milestone/)
+  await ok({ action: 'update', id: 'T1', milestone: 'M2' })
+  await ok({ action: 'update', id: 'T1', milestone: '' })
+  assert.equal(at('T1'), 'E1 -')
+  const found = await ok({ action: 'find', milestone: 'M2' })
+  assert.match(found, /T2 /)
+  assert.doesNotMatch(found, /T1 /)
+  assert.match(await ok({ action: 'find', milestone: 'M1' }), /E1 [\s\S]*T1 /)
+})
+
+test('start dates: milestones and epics take one on add, update and plan; a task is refused; empty clears it', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1', start: '2026-10-01', due: '2026-12-01' })
+  await ok({ action: 'plan', parent: 'M1', tree: [{ kind: 'epic', title: 'Auth', start: '2026-10-15' }] })
+  assert.match((await call({ action: 'add', kind: 'task', title: 'x', start: '2026-10-01' })).text, /Only milestones and epics take a start date/)
+  assert.match((await call({ action: 'update', id: 'E1', start: 'soon' })).text, /start must be a date/)
+  assert.equal(query("SELECT group_concat(id || ' ' || COALESCE(start, '-'), '; ') FROM items;"), 'M1 2026-10-01; E1 2026-10-15')
+  await ok({ action: 'update', id: 'E1', start: '' })
+  assert.equal(query("SELECT COALESCE(start, '-') FROM items WHERE id='E1';"), '-')
+})
+
+test('triage: the inbox is listed to propose a sort; an item becomes a task or epic, joins existing work, or is dropped; several at once', async () => {
+  await ok({ action: 'add', kind: 'milestone', title: 'v1' })
+  await ok({ action: 'add', kind: 'epic', title: 'Board', parent: 'M1' })
+  await ok({ action: 'add', kind: 'task', title: 'Cards', parent: 'E1', checklist: ['draw'] })
+  for (const title of ['Export to CSV', 'Flicker on resize', 'Cards need a footer', 'Mention it in the README', 'Dark mode', 'Fix typo'])
+    await ok({ action: 'file', title, description: title === 'Flicker on resize' ? 'Seen at 84 columns.' : undefined })
+  const listed = await ok({ action: 'triage' })
+  assert.match(listed, /^The inbox \(6\): propose to the user/)
+  assert.match(listed, /- I2 Flicker on resize: Seen at 84 columns\. \(claude, /)
+  // A task, under an epic, with its text and where it came from.
+  assert.match(await ok({ action: 'triage', id: 'I2', kind: 'task', parent: 'E1', priority: 'p1', type: 'bug' }), /^I2 became T2: Flicker on resize$/)
+  assert.equal(query("SELECT parent || ' ' || priority || ' ' || type FROM items WHERE id='T2';"), 'E1 p1 bug')
+  assert.match(query("SELECT description FROM items WHERE id='T2';"), /^Seen at 84 columns\.\n\nFiled to the inbox as I2 by claude on \d{4}-\d{2}-\d{2}\.$/)
+  // An epic targeting a milestone, retitled.
+  assert.match(await ok({ action: 'triage', id: 'I1', kind: 'epic', milestone: 'M1', title: 'Export' }), /^I1 became E2: Export$/)
+  // Into existing work: a checklist entry, or a comment.
+  assert.match(await ok({ action: 'triage', id: 'I3', into: 'T1', fold: 'checklist' }), /joined T1 as a checklist entry/)
+  assert.equal(query("SELECT group_concat(text, '|') FROM (SELECT text FROM checks WHERE item_id='T1' ORDER BY n);"), 'draw|Cards need a footer')
+  assert.match(await ok({ action: 'triage', id: 'I4', into: 'E1' }), /joined E1 as a comment/)
+  assert.match(query("SELECT body FROM activity WHERE item_id='E1' AND type='comment';"), /^Mention it in the README\n\n\(Filed to the inbox as I4/)
+  // Dropped, with a reason; a second sort is refused.
+  assert.equal(await ok({ action: 'triage', id: 'I5', wontdo: 'not now' }), 'I5 dropped: not now')
+  assert.match((await call({ action: 'triage', id: 'I5', kind: 'task' })).text, /already dropped/)
+  assert.match((await call({ action: 'triage', id: 'I6' })).text, /triage takes one of/)
+  // Several at once in a batch, all or nothing.
+  await ok({ action: 'file', title: 'Another' })
+  await ok({ action: 'batch', ops: [{ action: 'triage', id: 'I6', kind: 'task' }, { action: 'triage', id: 'I7', wontdo: 'dupe' }] })
+  assert.equal(query("SELECT group_concat(id || ' ' || state || ' ' || COALESCE(became, '-'), '; ') FROM inbox;"),
+    'I1 triaged E2; I2 triaged T2; I3 triaged T1; I4 triaged E1; I5 dropped -; I6 triaged T3; I7 dropped -')
+  assert.equal(await ok({ action: 'triage' }), 'The inbox is empty.')
 })
