@@ -351,7 +351,7 @@ export function drawPane(
         // Cut by an edge: the lines of it in the window, drawn as the painter lays them out.
         paint(one.node as never, width)
           .slice(Math.max(0, at - top), Math.min(one.lines, at + room - top))
-          .forEach((text, i) => nodes.push(<Text key={`${one.key}-cut-${i}`}>{text || ' '}</Text>))
+          .forEach((text, i) => nodes.push(<Text key={`${one.key}-cut-${i}`}>{text.replace(/^ +/, lead => '\u00a0'.repeat(lead.length)) || ' '}</Text>))
     }
     const above = Math.min(at, total)
     const below = Math.max(0, total - at - room)
@@ -706,7 +706,7 @@ export function drawPane(
   const openRelease = releasePrs.find(pr => pr.state === 'open')
   const toPublish = releasePrs.find(pr => pr.state === 'merged' && !shippedVersions.some(one => `release-v${one.version}` === pr.branch))
   const releaseLine = (text: string, key: string) => (
-    <Text key={key} dimColor={!/^- /.test(text)}>
+    <Text key={key} dimColor={!/^\s*- /.test(text)}>
       {text.length > width - 2 ? `${text.slice(0, width - 3)}…` : text || ' '}
     </Text>
   )
@@ -843,6 +843,8 @@ export function drawPane(
         const shown = isWide && canScroll ? capped.slice(from, from + cardsFrom(status, from)) : capped
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
+            // Side by side and scrolling, every column's frame reaches the foot of the list.
+            height={isWide && canScroll && viewSpace !== Infinity ? viewSpace : undefined}
             {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1 } : {})}>
             {status === 'done' && doneToggle ? (
               <Box key="col-done-top" flexDirection="row" columnGap={1}>
@@ -1608,7 +1610,8 @@ export function drawPane(
     if (drawn < space + 1) body.push(<Box key="pad" height={space + 1 - drawn} />)
   }
 
-  const panel = item && status && (
+  // The card; docked, `grow` blank rows at its foot keep the two frames filling the pane, whatever the split.
+  const panelWith = (grow: number) => item && status && (
     <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}
       borderColor={!isDocked || region === 'card' ? ACTIVE : undefined} borderDimColor={isDocked && region !== 'card'}>
       <Box key="title-row" flexDirection="row" justifyContent="space-between">
@@ -1775,8 +1778,10 @@ export function drawPane(
         </Text>
       )}
       {body}
+      {grow > 0 && <Box key="detail-grow" height={grow} />}
     </Box>
   )
+  const panel = panelWith(0)
 
   // The new-item form: the choices first, the title last (Enter on it creates the item).
   const homes = draft ? homesFor(items, draft.kind) : []
@@ -1840,7 +1845,10 @@ export function drawPane(
     top.forEach((child, i) => {
       if (mode === 'board' && i > 0) viewRows.push({ node: <Text key={`gap-${i}`}> </Text>, rows: 1 })
       const key = String((child as { props?: { key?: unknown } } | null)?.props?.key ?? (child as { key?: unknown } | null)?.key ?? '')
-      const parts = mode === 'board' && key.startsWith('col-') && key !== 'col-empty' ? kids(child as never) : [child]
+      // A stacked board's columns and Releases' sections and versions go in line by line, so an edge cuts as
+      // little as it can (a block cut by one is drawn plain).
+      const isSplit = mode === 'board' ? key.startsWith('col-') && key !== 'col-empty' : mode === 'releases' && /^(pending|release)-/.test(key)
+      const parts = isSplit ? kids(child as never) : [child]
       for (const part of parts) if (part !== null && part !== undefined && part !== false && part !== '') viewRows.push({ node: part, rows: Math.max(1, paint(part as never, width).length) })
     })
   }
@@ -1903,8 +1911,7 @@ export function drawPane(
                   </Button>
                 )}
               </Box>
-              {pad > 0 && <Box key="card-pad" height={pad} />}
-              {panel}
+              {panelWith(pad)}
             </Box>
           ) : (
             panel ? (

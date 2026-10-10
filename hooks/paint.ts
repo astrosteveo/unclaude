@@ -17,10 +17,13 @@ export const cells = (text: string) => [...text].length
 /** `text` wrapped at word boundaries to `width`, a word longer than a line broken across lines. */
 export function wrap(text: string, width: number): string[] {
   const out: string[] = []
-  for (const para of text.split('\n')) {
-    let line = ''
+  for (const whole of text.split('\n')) {
+    // A line's indentation stays, as the terminal draws it.
+    const lead = /^ */.exec(whole)![0]
+    const para = whole.slice(lead.length)
+    let line = lead.length < width ? lead : ''
     for (const word of para.split(' ')) {
-      if (line === '') line = word
+      if (line.trim() === '') line += word
       else if (cells(line) + 1 + cells(word) <= width) line += ` ${word}`
       else {
         out.push(line)
