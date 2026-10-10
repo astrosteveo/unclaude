@@ -88,6 +88,33 @@ export function fitHints(hints: string[], width: number, rows: number): string[]
 // An item with nothing above it, for walks that start from one that may be missing.
 const EMPTY = { parent: null, milestone: null } as Item
 
+/**
+ * A table's column: its header, its width (or `fill`: what the others leave), and when it goes as the room
+ * runs short (the highest `drop` first; 0 never). `align: 'right'` for counts; `most`: the widest a fill column needs.
+ */
+export type TableColumn = { key: string; label: string; width: number | 'fill'; drop: number; align?: 'right'; most?: number }
+// The fewest columns a table's fill column keeps.
+const FILL_MIN = 16
+
+/** The columns that fit in `room`, one apart, each with its width: the fill column takes what is left. */
+export function fitColumns(columns: TableColumn[], room: number): (TableColumn & { width: number })[] {
+  let kept = [...columns]
+  // The fill column (a title) keeps at least two fifths of the room.
+  const least = Math.max(FILL_MIN, Math.floor(room * 0.4))
+  const need = (list: TableColumn[]) => list.reduce((sum, one) => sum + (one.width === 'fill' ? least : one.width), 0) + list.length - 1
+  while (need(kept) > room) {
+    const next = kept.filter(one => one.drop > 0).sort((a, b) => b.drop - a.drop)[0]
+    if (!next) break
+    kept = kept.filter(one => one !== next)
+  }
+  const fixed = kept.reduce((sum, one) => sum + (one.width === 'fill' ? 0 : one.width), 0) + kept.length - 1
+  return kept.map(one => ({ ...one, width: one.width === 'fill' ? Math.max(least, Math.min(room - fixed, one.most ?? Infinity)) : one.width }))
+}
+
+/** `text` in a cell `width` wide: cut with … when longer, padded (on the left when `right`) when shorter. */
+export const cellOf = (text: string, width: number, align?: 'right') =>
+  [...text].length > width ? `${[...text].slice(0, Math.max(0, width - 1)).join('')}…` : align === 'right' ? text.padStart(width) : text.padEnd(width)
+
 // The outline of the frame in use, when a card is docked under the list.
 const ACTIVE = 'cyan'
 // Docked: the list's fewest rows (its frame included), the divider's row, and how far one press moves it.
@@ -95,8 +122,9 @@ const LIST_MIN = 8
 const DIVIDER_ROWS = 1
 const SPLIT_STEP = 2
 
-// The space between board columns side by side.
-const COLUMN_GAP = 2
+// The space between board columns side by side, and what a column's frame (border and padding) takes across.
+const COLUMN_GAP = 1
+const FRAME = 4
 
 /**
  * The width of each board column side by side in `width`: a column with a fixed width (`fixed`, 0 for
@@ -578,6 +606,13 @@ export function drawPane(
       <Button key="file-cancel" label="Cancel" onPress={() => act.setFiling(false)} />
     </Box>
   )
+  // What waits to be sorted, as a table: the narrowest columns go first as the room runs short.
+  const inboxColumns = fitColumns([
+    { key: 'id', label: 'ID', width: Math.max(2, ...waiting.map(one => one.id.length)), drop: 0 },
+    { key: 'title', label: 'Title', width: 'fill', drop: 0, most: Math.max(5, ...waiting.map(one => one.title.length)) },
+    { key: 'by', label: 'Filed by', width: Math.min(16, Math.max(8, ...waiting.map(one => one.author.length))), drop: 2 },
+    { key: 'at', label: 'When', width: 10, drop: 1 },
+  ], width - 2)
   const inboxView = (
     <Box flexDirection="column">
       {needs.length > 0 && (
@@ -598,15 +633,21 @@ export function drawPane(
       )}
       {needs.length > 0 && waiting.length > 0 && <Text bold>To sort  <Text dimColor>{waiting.length}</Text></Text>}
       {waiting.length === 0 && <Text dimColor>Nothing filed to sort. Press i to file something for later.</Text>}
+      {waiting.length > 0 && (
+        <Text key="inbox-head" dimColor bold>{inboxColumns.map(one => cellOf(one.label, one.width)).join(' ')}</Text>
+      )}
       {waiting.map(one => {
-        const by = ` — ${one.author}, ${one.at.slice(5, 10)}`
-        const room = Math.max(8, width - one.id.length - 1 - by.length)
+        const value: Record<string, string> = { id: one.id, title: one.title, by: one.author, at: one.at.slice(0, 10) }
         const asking = triaging?.id === one.id ? triaging.mode : null
         return (
           <Box key={`inbox-${one.id}`} flexDirection="column">
             <Text>
-              <Text dimColor>{one.id}</Text> {one.title.length > room ? `${one.title.slice(0, room - 1)}…` : one.title}
-              <Text dimColor>{by}</Text>
+              {inboxColumns.map((column, i) => (
+                <Text key={`c-${column.key}`} dimColor={column.key !== 'title'}>
+                  {i ? ' ' : ''}
+                  {cellOf(value[column.key] ?? '', column.width)}
+                </Text>
+              ))}
             </Text>
             {/* Sorting it: into a new task or epic (the form, its title filled in), into existing work, or dropped. */}
             {asking && Input ? (
@@ -659,6 +700,13 @@ export function drawPane(
       {text.length > width - 2 ? `${text.slice(0, width - 3)}…` : text || ' '}
     </Text>
   )
+  const releaseColumns = fitColumns([
+    { key: 'version', label: 'Version', width: Math.max(7, ...shippedVersions.map(one => one.version.length + 1)), drop: 0 },
+    { key: 'at', label: 'Date', width: 10, drop: 3 },
+    { key: 'tasks', label: 'Tasks', width: 5, drop: 2, align: 'right' },
+    { key: 'pr', label: 'PR', width: 6, drop: 1 },
+    { key: 'stable', label: '', width: 8, drop: 4 },
+  ], width - 4)
   const releasesView = (
     <Box flexDirection="column">
       <Box key="unreleased-head" flexDirection="row" columnGap={1} flexWrap="wrap">
@@ -689,6 +737,9 @@ export function drawPane(
           </Box>
         ) : null
       })}
+      {shippedVersions.length > 0 && (
+        <Text key="releases-head" dimColor bold>{`\u00a0\u00a0${releaseColumns.map(one => cellOf(one.label, one.width, one.align)).join(' ')}`}</Text>
+      )}
       {shippedVersions.length === 0 && <Text dimColor>No releases yet. ship records each one; past versions are read from CHANGELOG.md.</Text>}
       {shippedVersions.map((one, i) => {
         const key = `v${one.version}`
@@ -696,13 +747,20 @@ export function drawPane(
         return (
           <Box key={`release-${one.version}`} flexDirection="column">
             <Button key={`fold-${key}`} plain onPress={() => act.toggleFold(key)}>
-              <Text dimColor>{isOpen ? '▾' : '▸'}</Text> <Text bold>v{one.version}</Text>
-              <Text dimColor>
-                {one.at ? `  ${one.at}` : ''}
-                {one.tasks.length ? `  ${one.tasks.length} task${one.tasks.length === 1 ? '' : 's'}` : ''}
-                {one.pr ? `  PR #${one.pr}` : ''}
-              </Text>
-              <Text color="green">{known.stable === one.version ? '  stable ●' : ''}</Text>
+              <Text dimColor>{isOpen ? '▾' : '▸'}</Text>{' '}
+              {releaseColumns.map((column, n) => {
+                const value: Record<string, string> = {
+                  version: `v${one.version}`, at: one.at ?? '', tasks: one.tasks.length ? String(one.tasks.length) : '',
+                  pr: one.pr ? `#${one.pr}` : '', stable: known.stable === one.version ? 'stable ●' : '',
+                }
+                return (
+                  <Text key={`c-${column.key}`} bold={column.key === 'version'} color={column.key === 'stable' ? 'green' : undefined}
+                    dimColor={column.key !== 'version' && column.key !== 'stable'}>
+                    {n ? ' ' : ''}
+                    {cellOf(value[column.key] ?? '', column.width, column.align)}
+                  </Text>
+                )
+              })}
             </Button>
             {isOpen && one.notes.split('\n').filter(text => text.trim()).map((text, n) => releaseLine(`  ${text.replace(/^### /, '')}`, `${key}-${n}`))}
           </Box>
@@ -720,9 +778,10 @@ export function drawPane(
   // A heading is drawn with its jump key: "t: ○ Todo 0".
   const headOf = (status: Status) => `${HOTKEY[status]}: ${GLYPH[status]} ${LABEL[status]} ${columns[status].length}`
   const widths = columnWidths(
-    Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length])) as Record<Status, number>,
+    Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length + FRAME])) as Record<Status, number>,
     width, COLUMN_GAP)
-  const roomOf = (status: Status) => (isWide ? widths[status] : width - 2)
+  // Side by side, each column is framed: its border and padding take FRAME of its width.
+  const roomOf = (status: Status) => (isWide ? widths[status] - FRAME : width - 2)
   // Side by side, a narrow column whose cards don't all fit on one line gives every card two, so they line
   // up; a column wide enough to read a title in keeps cards to one line, the title cut.
   const SPLIT_BELOW = 44
@@ -745,7 +804,7 @@ export function drawPane(
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
   const budget = !isDocked && isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
   const caps = budget !== Infinity
-    ? columnCaps(heights, isWide ? budget - 1 : budget, isWide)
+    ? columnCaps(heights, isWide ? budget - 3 : budget, isWide)
     : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : canScroll ? Infinity : 15])) as Record<Status, number>)
   // Stacked, the empty columns fold into one line, and every card's pieces sit in slots shared by the board.
   const empties = isWide ? [] : STATUSES.filter(status => columns[status].length === 0)
@@ -779,14 +838,14 @@ export function drawPane(
         const from = isWide && canScroll ? Math.min(wideFrom, Math.max(0, capped.length - wideCap(status))) : 0
         const shown = isWide && canScroll ? capped.slice(from, from + wideCap(status)) : capped
         return (
-          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}>
+          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
+            {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1 } : {})}>
             {status === 'done' && doneToggle ? (
               <Box key="col-done-top" flexDirection="row" columnGap={1}>
                 {heading(status)}
                 {doneToggle}
               </Box>
             ) : heading(status)}
-            {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
             {from > 0 && <Text key={`col-${status}-above`} dimColor>↑ {from} above</Text>}
             {shown.map(task => card(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status] ?? stackSlots))}
             {column.length > from + shown.length && (
@@ -851,46 +910,88 @@ export function drawPane(
   const unheld = allRows.filter(({ item }) => isTriage(item)).length
   // The plan's rows: scrolled in the tab's window (docked over a card, in the list's frame).
   const treeShown = allRows
-  const planRow = ({ item, depth }: { item: Item; depth: number }) => {
+  // The plan as a table: a fold toggle and (in Unplanned) a pick in slots of their own, then the item's columns,
+  // the narrowest going first as the room runs short; a task nobody holds keeps a priority picker and a hand-off
+  // after its row.
+  // What an item shows in a column of the plan's table.
+  const planValue = (item: Item, key: string) => {
     const p = progress(items, item)
-    const status = statusOf(items, item)
     const release = item.kind === 'task' ? releaseOf(snap, item.id) : undefined
-    const facts = `${item.kind !== 'task' && p.total > 0 ? `  ${p.done}/${p.total}` : ''}${item.due ? `  due ${item.due}` : ''}${release ? `  v${release.version}` : waitingRelease.has(item.id) ? '  unreleased' : ''}`
-    const news = badge(item)
+    const list = item.checklist ?? []
+    if (key === 'news') return badge(item).trim()
+    if (key === 'ship') return release ? `v${release.version}` : waitingRelease.has(item.id) ? 'unreleased' : ''
+    if (key === 'due') return item.due ?? ''
+    if (key === 'type') return item.kind === 'task' ? item.type : item.kind
+    if (key === 'done') return item.kind !== 'task' ? (p.total ? `${p.done}/${p.total}` : '') : list.length ? `${list.filter(c => c.done).length}/${list.length}` : ''
+    if (key === 'who') return item.assignee ? `@${item.assignee}` : ''
+    if (key === 'pri') return item.kind === 'task' ? item.priority : ''
+    return ''
+  }
+  const hasTriage = allRows.some(({ item }) => isTriage(item))
+  const TRIAGE_TAIL = hasTriage ? 1 + 6 + 1 + 12 : 0
+  const idWidth = 2 + Math.max(2, ...allRows.map(({ item }) => item.id.length))
+  const planColumns = fitColumns([
+    { key: 'id', label: 'ID', width: idWidth, drop: 0 },
+    { key: 'title', label: 'Title', width: 'fill', drop: 0, most: Math.max(5, ...allRows.map(({ item, depth }) => depth * 2 + item.title.length)) },
+    { key: 'news', label: '', width: 3, drop: 8 },
+    { key: 'ship', label: 'Release', width: 10, drop: 4 },
+    { key: 'due', label: 'Due', width: 10, drop: 6 },
+    { key: 'type', label: 'Type', width: 9, drop: 7 },
+    { key: 'done', label: 'Done', width: 5, drop: 3, align: 'right' },
+    { key: 'who', label: 'Assignee', width: Math.min(14, Math.max(8, ...allRows.map(({ item }) => (item.assignee ?? '').length + 1))), drop: 5 },
+    { key: 'pri', label: 'Pri', width: 3, drop: 2 },
+  ].filter(one => one.drop === 0 || allRows.some(({ item }) => planValue(item, one.key))) as TableColumn[], width - 2 - (hasTriage ? 2 : 0) - TRIAGE_TAIL)
+  const planHead = (
+    <Text key="plan-head" dimColor bold>
+      {'\u00a0\u00a0'}
+      {hasTriage ? '\u00a0\u00a0' : ''}
+      {planColumns.map(one => cellOf(one.label, one.width, one.align)).join(' ')}
+    </Text>
+  )
+  const planRow = ({ item, depth }: { item: Item; depth: number }) => {
+    const status = statusOf(items, item)
     const controls = isTriage(item)
-    // A row keeps to one line, so the rows line up and a window of them fits above a docked card: a long
-    // name, then the title, is cut.
-    const lead = depth * 2 + 2 + 2 + item.id.length + 1 + (controls ? BACKLOG_EDGES : 0)
-    const fullWho = item.assignee ? `  @${item.assignee}` : ''
-    const who = fullWho.length > 20 ? `${fullWho.slice(0, 19)}…` : fullWho
-    const room = width - lead - facts.length - who.length - news.length
-    const title = item.title.length > room ? `${item.title.slice(0, Math.max(1, room - 1))}…` : item.title
+    const color: Record<string, string | undefined> = { ship: waitingRelease.has(item.id) ? 'yellow' : 'green', who: 'cyan', news: 'magenta', pri: PRIORITY_COLOR[item.priority] }
     const row = (
-      <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
+      <Box key={`tree-${item.id}`} flexDirection="row" columnGap={1}>
         {foldToggle(item)}
-        {controls && (
+        {hasTriage && (controls ? (
           <Button key={`pick-${item.id}`} plain
             onPress={() => act.setPicked(picked.includes(item.id) ? picked.filter(id => id !== item.id) : [...picked, item.id])}>
             <Text color={picked.includes(item.id) ? 'green' : undefined}>{picked.includes(item.id) ? '☑' : '☐'}</Text>
           </Button>
-        )}
+        ) : <Text key={`pick-${item.id}`}> </Text>)}
+        <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
+          {planColumns.map((one, i) => {
+            const gap = i ? ' ' : ''
+            if (one.key === 'id')
+              return (
+                <Text key={`c-${one.key}`}>
+                  {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>}{' '}
+                  <Text dimColor>{cellOf(item.id, one.width - 2)}</Text>
+                </Text>
+              )
+            if (one.key === 'title')
+              return (
+                <Text key={`c-${one.key}`} bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+                  {gap}
+                  {cellOf(`${'\u00a0\u00a0'.repeat(depth)}${item.title}`, one.width)}
+                </Text>
+              )
+            return (
+              <Text key={`c-${one.key}`} color={color[one.key]} dimColor={!color[one.key] || one.key === 'ship'} bold={one.key === 'news'}>
+                {gap}
+                {cellOf(planValue(item, one.key), one.width, one.align)}
+              </Text>
+            )
+          })}
+        </Button>
         {controls && (Select ? (
           <Select key={`prio-${item.id}`} options={PRIORITIES.map(one => ({ value: one }))} value={item.priority}
             onSelect={(value: string) => act.userAct({ action: 'update', id: item.id, priority: value })} />
         ) : (
           <Text key={`prio-${item.id}`} color={PRIORITY_COLOR[item.priority]}>{item.priority}</Text>
         ))}
-        <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
-          {isDropped(item) ? <Text dimColor>{WONTDO_GLYPH}</Text> : <Text color={COLOR[status]}>{GLYPH[status]}</Text>} <Text dimColor>{item.id}</Text>{' '}
-          <Text bold={item.kind === 'milestone'} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
-            {title}
-          </Text>
-          <Text dimColor>{facts}</Text>
-          <Text color="cyan">{who}</Text>
-          <Text color="magenta" bold>
-            {news}
-          </Text>
-        </Button>
         {controls && <Button key={`hand-${item.id}`} label="→ Claude" onPress={() => act.askHand(item.id)} />}
       </Box>
     )
@@ -901,9 +1002,11 @@ export function drawPane(
       </Box>
     ) : row
   }
+
   const tree = (
     <Box flexDirection="column">
       {allRows.length === 0 && <Text dimColor>Nothing planned yet. Press n to add a milestone, an epic or a task.</Text>}
+      {allRows.length > 0 && planHead}
       {treeShown.map((one, i) => {
         const isHead = allRows.indexOf(one) === firstUnplanned
         return isHead ? (
@@ -1124,6 +1227,12 @@ export function drawPane(
   const timelineView = (
     <Box flexDirection="column">
       {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
+      {timelineAll.length > 0 && (
+        <Text key="timeline-head" dimColor bold>
+          {`\u00a0\u00a0${'Name'.padEnd(nameWidth - 2)}  ${'Due'.padEnd(10)}  ${'Progress'.padEnd(BAR + 1 + countWidth)}`}
+          {width - nameWidth - right - 2 > 4 ? '  Standing' : ''}
+        </Text>
+      )}
       {timelineShown.map(({ item: one, depth }) => {
         const p = progress(items, one)
         const st = statusOf(items, one)
@@ -1453,7 +1562,8 @@ export function drawPane(
       ? topRows - 2
       : Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
   // Side by side, scrolling moves every column a card at a time: as many as fit under the headings.
-  const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 4) / (isSplit[status] ? 2 : 1)))
+  // (Under each heading, inside the frame's two borders, with a line for each mark.)
+  const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 5) / (isSplit[status] ? 2 : 1)))
   const wideMax = isWide && canScroll
     ? Math.max(0, ...STATUSES.map(status => Math.min(columns[status].length, caps[status]) - wideCap(status)))
     : 0
