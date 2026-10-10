@@ -34,6 +34,10 @@ const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
 const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
 // Where each tab is scrolled to, in rows (a wide board's columns, in cards).
 const viewScrolled = atom({ plugin: 'roadmap', key: 'viewScrolled' } as const, {} as Record<string, number>)
+// With a card docked under the list, which one the wheel last moved: the card when it opens.
+const region = atom({ plugin: 'roadmap', key: 'region' } as const, 'card' as 'list' | 'card')
+// Where the docked list's frame ends, in body rows, as last drawn.
+let listEnd = 0
 // How far the tab showing can scroll, as last drawn.
 let viewScrollMax = 0
 // The inbox item whose row asks where it goes (Into…) or why it's dropped (Drop…).
@@ -1264,6 +1268,8 @@ async function closeDetail($: EngineInterface, id: string) {
 async function open($: EngineInterface, id: string | null) {
   await update($, selected, () => id)
   await update($, scrolled, () => 0)
+  // A card opens with the wheel on it.
+  await update($, region, () => 'card')
   await update($, requesting, () => false)
   await update($, editing, () => false)
   await update($, handing, () => null)
@@ -1760,12 +1766,17 @@ export const register: Register = on => {
 
   // While a card is open its title and bar hold still and only the sections under them scroll.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    // An open card scrolls under its title and bar; otherwise the tab showing scrolls under the header.
-    if ((await read($, selected)) !== null) {
+    // With a card open, the wheel moves what is under it: the docked list above the card's frame, else the card
+    // (keys, which have no pointer, move whichever the wheel last did). Otherwise the tab showing scrolls.
+    const isCard = (await read($, selected)) !== null
+    const isOverList = listEnd > 0 && (e.pointer ? e.pointer.row < listEnd : (await read($, region)) === 'list')
+    if (isCard && !isOverList) {
+      await update($, region, () => 'card')
       await update($, scrolled, at => Math.max(0, Math.min(scrollMax, at + e.by)))
       return {}
     }
-    if (viewScrollMax <= 0) return next(e)
+    if (isCard) await update($, region, () => 'list')
+    if (viewScrollMax <= 0) return isCard ? {} : next(e)
     const mode = await read($, view)
     await update($, viewScrolled, at => ({ ...at, [mode]: Math.max(0, Math.min(viewScrollMax, (at[mode] ?? 0) + e.by)) }))
     return {}
@@ -1801,6 +1812,7 @@ export const register: Register = on => {
       dropping: await read($, dropping),
       scrolledTo: await read($, scrolled),
       viewScrolledTo: (await read($, viewScrolled))[await read($, view)] ?? 0,
+      region: await read($, region),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
     }
@@ -1858,6 +1870,7 @@ export const register: Register = on => {
     const drawn = drawPane($.ui.resolve(e), e, state, actions)
     scrollMax = drawn.scrollMax
     viewScrollMax = drawn.viewScrollMax
+    listEnd = drawn.listEnd
     return drawn.node
   })
 }

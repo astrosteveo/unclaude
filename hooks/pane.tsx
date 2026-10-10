@@ -89,6 +89,9 @@ export function fitHints(hints: string[], width: number, rows: number): string[]
 // An item with nothing above it, for walks that start from one that may be missing.
 const EMPTY = { parent: null, milestone: null } as Item
 
+// The outline of the frame in use, when a card is docked under the list.
+const ACTIVE = 'cyan'
+
 // The space between board columns side by side.
 const COLUMN_GAP = 2
 
@@ -189,6 +192,8 @@ export type PaneState = {
   scrolledTo: number
   /** Where the tab showing is scrolled to, in rows from its top. */
   viewScrolledTo: number
+  /** With a card docked under the list, which of the two the wheel last moved (the card when it opens). */
+  region: 'list' | 'card'
   /** The clock, for stale claims; 0 when it can't be read. */
   now: number
 }
@@ -286,7 +291,7 @@ export function wrap(text: string, width: number): string[] {
  */
 export function drawPane(
   els: Elements[keyof Elements], e: EventOf['ui.render'], state: PaneState, act: PaneActions,
-): { node: RenderElement; scrollMax: number; viewScrollMax: number } {
+): { node: RenderElement; scrollMax: number; viewScrollMax: number; listEnd: number } {
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   /**
@@ -316,7 +321,7 @@ export function drawPane(
     return { nodes, total, above, below }
   }
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, region, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -329,18 +334,22 @@ export function drawPane(
   // What the filter lets through: everything without one; with one, what matches and, in the tree, what holds it.
   const isShown = (item: Item) => !query || matches(snap, item, query)
   const items = snap.items
-  const width = (e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 100
-  // Five columns side by side need room for a readable title in each; narrower, they stack.
-  const isWide = width >= 100
+  const paneWidth = (e.props as { bodyColumns?: number }).bodyColumns ?? e.viewport?.columns ?? 100
   // Inline the pane gets about a third of the screen, so an open card there spends as few rows as it can.
   const isCompact = e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'inline'
   // On the terminal, the rows the pane's body has; elsewhere the tree just grows.
   const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
   // An open card docks under the board when the pane has room for both; the board keeps the top part.
-  const isDocked = Boolean(pick) && !isCompact && !draft && bodyRows !== undefined && bodyRows >= DOCK_MIN_ROWS
-  // A tab longer than the pane scrolls under the header (the wheel moves it), unless a card or form is up.
-  const canScroll = e.surface === 'terminal' && bodyRows !== undefined && !pick && !draft && !isCompact
-  const topRows = isDocked ? Math.max(6, Math.floor(bodyRows! * DOCK_SHARE)) : Infinity
+  // (Only a card for an item that is there: one removed meanwhile docks nothing.)
+  const isDocked = Boolean(pick && find(items, pick)) && !isCompact && !draft && bodyRows !== undefined && bodyRows >= DOCK_MIN_ROWS
+  // Docked, the list is framed like the card under it (two cards stacked): its border and padding take four columns.
+  const width = isDocked ? paneWidth - 4 : paneWidth
+  // Five columns side by side need room for a readable title in each; narrower, they stack.
+  const isWide = width >= 100
+  // A tab longer than its room scrolls (the wheel moves it): under the header, or docked, in its frame over a card.
+  const canScroll = e.surface === 'terminal' && bodyRows !== undefined && !draft && !isCompact && (!(pick && find(items, pick)) || isDocked)
+  // Docked, the list's frame: its rows, borders included.
+  const topRows = isDocked ? Math.max(8, Math.floor(bodyRows! * DOCK_SHARE)) : Infinity
   // Pressing the open card again closes it.
   const choose = (id: string | null) => () => (id !== null && id === pick ? act.closeDetail(id) : act.open(id))
   const badge = (item: Item) => {
@@ -729,7 +738,7 @@ export function drawPane(
       .concat(status === 'done' && columns.done.length > doneShown ? [Infinity] : [])])) as Record<Status, number[]>
   // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
-  const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
+  const budget = !isDocked && isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
   const caps = budget !== Infinity
     ? columnCaps(heights, isWide ? budget - 1 : budget, isWide)
     : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : canScroll ? Infinity : 15])) as Record<Status, number>)
@@ -835,12 +844,8 @@ export function drawPane(
   const firstUnplanned = allRows.findIndex(({ item, depth }) => depth === 0 && item.kind !== 'milestone')
   const isTriage = (item: Item) => item.kind === 'task' && item.status === 'todo' && !item.assignee && !targetOf(items, item)
   const unheld = allRows.filter(({ item }) => isTriage(item)).length
-  // Docked, a window of rows that keeps the open item in sight.
-  const planRoom = topRows - 1 - (firstUnplanned >= 0 ? 1 : 0)
-  const treeFrom = isDocked && allRows.length > planRoom
-    ? Math.max(0, Math.min(allRows.findIndex(row => row.item.id === pick) - Math.floor(planRoom / 2), allRows.length - planRoom))
-    : 0
-  const treeShown = isDocked && allRows.length > planRoom ? allRows.slice(treeFrom, treeFrom + planRoom) : allRows
+  // The plan's rows: scrolled in the tab's window (docked over a card, in the list's frame).
+  const treeShown = allRows
   const planRow = ({ item, depth }: { item: Item; depth: number }) => {
     const p = progress(items, item)
     const status = statusOf(items, item)
@@ -929,7 +934,7 @@ export function drawPane(
   // The timeline: milestones and epics by due date, each with its progress and how it stands against the date.
   const today = now > 0 ? dateOf(now) : undefined
   const timelineAll = timelineRows(items, isFolded).filter(({ item }) => !query || subtree(items, item.id).some(id => isShown(find(items, id)!)))
-  const timelineShown = isDocked ? timelineAll.slice(0, Math.max(1, topRows - 1)) : timelineAll
+  const timelineShown = timelineAll
   const BAR = 10
   // The timeline lines up in columns: the name, the date (a dim dash for none), the bar and its count,
   // then how it stands against its date.
@@ -1050,7 +1055,7 @@ export function drawPane(
     const text = `${'\u00a0\u00a0'.repeat(depth)}${item.id} ${item.title}`
     return text.length > labelWidth - 1 ? `${text.slice(0, labelWidth - 2)}…` : text.padEnd(labelWidth - 1)
   }
-  const axisRows = isDocked ? dated.slice(0, Math.max(1, topRows - 4)) : dated
+  const axisRows = dated
   // Releases as ticks on the axis at their dates, labelled with their versions; several on one day (or too
   // close to label apart) share a tick, named for the newest, with how many more.
   const releaseTicks: { col: number; end: number; version: string; label: string }[] = []
@@ -1103,7 +1108,7 @@ export function drawPane(
         </Button>
       ))}
       {axisRows.length < dated.length && <Text key="axis-more" dimColor>…{dated.length - axisRows.length} more (close the card to see them all)</Text>}
-      {undated.length > 0 && !isDocked && (
+      {undated.length > 0 && (
         <Box key="undated" flexDirection="column">
           <Text dimColor>No dates yet: {undated.map(({ item }) => item.id).join(', ')}</Text>
         </Box>
@@ -1154,7 +1159,7 @@ export function drawPane(
   const where = item && path(items, item)
   // The card's sections as rows, so they can scroll under the fixed title and bar.
   type Row = { key: string; node: RenderChildren; rows: number }
-  const inner = width - 4
+  const inner = paneWidth - 4
   const tall = (text: string, indent = 0) => Math.max(1, Math.ceil((text.length + indent) / Math.max(1, inner)))
   const sections: Row[] = []
   const section = (key: string, heading: string, rows: Row[]) => {
@@ -1382,7 +1387,7 @@ export function drawPane(
       ...(!draft && !pick ? ['New'.length + 4] : []),
       ...(!isFiling ? ['File…'.length + 4] : []),
     ].reduce((sum, one, i) => sum + one + (i ? 1 : 0), 0),
-  ].filter(one => one > 0), width, 3)
+  ].filter(one => one > 0), paneWidth, 3)
   // Approve on what is itself up for review: a task, or a milestone or epic handed over whole; not on
   // one that reads review only because a part of it does.
   const isReview = status === 'review' && (item?.kind === 'task' || isAgent(item?.assignee))
@@ -1421,12 +1426,14 @@ export function drawPane(
     ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
     : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', mode === 'roadmap' && isAxis ? 'w zoom' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
   ).filter(Boolean)
-  const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
-  const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
+  const footerHints = fitHints(hints, paneWidth, paneWidth >= 100 ? 1 : 2)
+  const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), paneWidth)
   // The rows a tab has under the header and above the hints, when it can scroll.
-  const viewSpace = canScroll
-    ? Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
-    : Infinity
+  const viewSpace = !canScroll
+    ? Infinity
+    : isDocked
+      ? topRows - 2
+      : Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
   // Side by side, scrolling moves every column a card at a time: as many as fit under the headings.
   const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 4) / (isSplit[status] ? 2 : 1)))
   const wideMax = isWide && canScroll
@@ -1455,7 +1462,8 @@ export function drawPane(
   }
 
   const panel = item && status && (
-    <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}>
+    <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}
+      borderColor={!isDocked || region === 'card' ? ACTIVE : undefined} borderDimColor={isDocked && region !== 'card'}>
       <Box key="title-row" flexDirection="row" justifyContent="space-between">
         <Text>
           <Text dimColor>
@@ -1730,8 +1738,9 @@ export function drawPane(
           // both, the open item stands in for the board, so a long board never pushes it off screen.
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
-              <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? drawBoard() : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
+              <Box key="top" flexDirection="column" height={topRows} borderStyle="round" paddingX={1}
+                borderColor={region === 'list' ? ACTIVE : undefined} borderDimColor={region !== 'list'}>
+                {scrolledView}
               </Box>
               {pad > 0 && <Box key="card-pad" height={pad} />}
               {panel}
@@ -1755,12 +1764,18 @@ export function drawPane(
   // Docked, the key hints sit on the pane's last rows, whatever is showing: what is above them is padded down.
   const isDock = (e.props as { placement?: string }).placement === 'dock'
   const hintsPad = isDock && e.surface === 'terminal' && bodyRows !== undefined && items.length > 0 && !trouble
-    ? Math.max(0, bodyRows - paint(overHints(0) as never, width).length - footerRows)
+    ? Math.max(0, bodyRows - paint(overHints(0) as never, paneWidth).length - footerRows)
+    : 0
+
+  // Docked, where the list's frame ends, in body rows: the wheel above it moves the list, below it the card.
+  const listEnd = isDocked
+    ? headerRows + (filterRow ? 1 : 0) + (fileRow ? 1 : 0) + (isIgnoreOffered ? 2 : 0) + topRows
     : 0
 
   return {
     scrollMax,
     viewScrollMax: viewMax,
+    listEnd,
     node: (
       <Box flexDirection="column">
         {overHints(hintsPad)}
