@@ -673,7 +673,12 @@ export const openFirst = (items: Item[], list: Item[]): Item[] => [
 export function treeRows(items: Item[], isFolded: (item: Item) => boolean): { item: Item; depth: number }[] {
   const out: { item: Item; depth: number }[] = []
   const walk = (parent: string | null, depth: number) => {
-    for (const item of openFirst(items, childrenOf(items, parent).sort(byId))) {
+    const level = childrenOf(items, parent).sort(byId)
+    // At the top, milestones come before what no milestone holds, each open first.
+    const ordered = parent === null
+      ? [...openFirst(items, level.filter(one => one.kind === 'milestone')), ...openFirst(items, level.filter(one => one.kind !== 'milestone'))]
+      : openFirst(items, level)
+    for (const item of ordered) {
       out.push({ item, depth })
       if (!isFolded(item)) walk(item.id, depth + 1)
     }

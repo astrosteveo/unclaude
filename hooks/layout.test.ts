@@ -100,11 +100,14 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
         if (SHOW === `${view} ${width}x${height}`) found.push(...plain.lines.map(line => `|${line}`))
         for (const problem of plain.problems) found.push(`${view} ${width}x${height}: ${problem}`)
         if (row === null) continue
-        if (!(await ui.find({ key: row }))) {
+        // A short pane shows the board's first screen; its first card stands in when T5 is further down.
+        const first = view === 'board' ? (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).find(key => key.startsWith('card-')) : undefined
+        const target = view === 'board' && !(await ui.find({ key: row })) && first ? first : row
+        if (!(await ui.find({ key: target }))) {
           found.push(`${view} ${width}x${height}: no ${row} to open`)
           continue
         }
-        await ui.press({ key: row })
+        await ui.press({ key: target })
         const docked = paintPane(await ui.drawn(), width)
         for (const problem of docked.problems) found.push(`${view} + card ${width}x${height}: ${problem}`)
         await ui.press({ key: 'close' })
@@ -608,4 +611,52 @@ test('needs you: work in review, unread comments, stale claims and late work hea
   await ui.press({ key: 'need-T4' })
   expect(await ui.find({ key: 'detail' })).toBeDefined()
   await ui.unmount()
+})
+
+test('mouse scroll: a tab longer than the pane scrolls under a header that stays put; each tab keeps its place; a wide board scrolls its columns', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const props = (width: number) => ({ title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 20 } }) as never
+  const wheel = (by: number) => $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by, bodyRows: 20, contentRows: 20, origin: { kind: 'person' } } as never)
+  const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props: props(84) })
+  await ui.press({ key: 'tab-plan' })
+  const lines = async () => paintPane(await ui.drawn(), 84)
+  let drawn = await lines()
+  expect(drawn.problems).toEqual([])
+  expect(drawn.lines.length).toBeLessThanOrEqual(21)
+  expect(drawn.lines.some(line => /^↓ \d+ more lines below · scroll down$/.test(line))).toBe(true)
+  const firstRow = drawn.lines.find(line => /^[▾▸ ] +[○◐✗◉●✕]/.test(line))
+  // The wheel moves the plan; the header and hints stay.
+  await wheel(3)
+  await ui.redraw(props(84))
+  drawn = await lines()
+  expect(drawn.lines[0]).toContain('Plan')
+  expect(drawn.lines.some(line => /^↑ 3 more lines above · scroll up$/.test(line))).toBe(true)
+  expect(drawn.lines.some(line => line === firstRow)).toBe(false)
+  // Past the end, it stops at the end.
+  await wheel(500)
+  await ui.redraw(props(84))
+  drawn = await lines()
+  expect(drawn.lines.some(line => /more lines? below/.test(line))).toBe(false)
+  // The board keeps its own place: still at the top.
+  await ui.press({ key: 'tab-board' })
+  expect((await lines()).lines.some(line => /above · scroll up/.test(line))).toBe(false)
+  await ui.press({ key: 'tab-plan' })
+  expect((await lines()).lines.some(line => /above · scroll up/.test(line))).toBe(true)
+  await ui.unmount()
+  // Side by side, the columns scroll a card at a time.
+  const wide = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props: props(180) })
+  await wide.press({ key: 'tab-board' })
+  const before = (await wide.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('card-'))
+  await wheel(2)
+  await wide.redraw(props(180))
+  const after = (await wide.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('card-'))
+  expect(after).not.toEqual(before)
+  expect(paintPane(await wide.drawn(), 180).lines.some(line => line.includes('↑ 2 above'))).toBe(true)
+  expect(paintPane(await wide.drawn(), 180).problems).toEqual([])
+  await wide.unmount()
 })
