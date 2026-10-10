@@ -960,6 +960,16 @@ export function stackFrom(refs: Refs, pr: Pr): Pr[] {
   }
 }
 
+/**
+ * What merging `pr` takes when it is stacked: the open PRs beneath it, bottom first, then it. Each is
+ * stacked on the next one down; those above `pr` are not part of it. Just `[pr]` when it stands on its own.
+ */
+export function stackBelow(refs: Refs, pr: Pr): Pr[] {
+  const out = [pr]
+  for (let under = stackedOn(refs, pr); under && !out.includes(under); under = stackedOn(refs, under)) out.unshift(under)
+  return out
+}
+
 /** A stack as the card shows it: `#11 ← #12 ← #15`, bottom first. */
 export const stackText = (stack: Pr[]) => stack.map(pr => `#${pr.number}`).join(' ← ')
 
