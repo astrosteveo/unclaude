@@ -73,6 +73,7 @@ function textOf(node: Node): string {
 
 /** The width a node takes when nothing limits it. */
 function natural(node: Node): number {
+  if (node && typeof node === 'object' && node.props?.display === 'none') return 0
   if (isInline(node) || (typeof node === 'object' && node && node.type !== 'Box')) return Math.max(0, ...textOf(node).split('\n').map(cells))
   const props = (node as { props?: Record<string, unknown> }).props ?? {}
   if (typeof props.width === 'number') return props.width
@@ -99,6 +100,8 @@ const keyOf = (node: Node) => (node && typeof node === 'object' ? String(node.pr
 /** Paints `node` into `width` columns. */
 export function paint(node: Node, width: number, problems: string[] = [], path = 'pane'): string[] {
   if (node === null || node === undefined || typeof node === 'boolean') return []
+  // A Box drawn `display: "none"` takes no room (a hover may show it, over the rest).
+  if (typeof node === 'object' && node.props?.display === 'none') return []
   if (isInline(node) || (typeof node === 'object' && node.type !== 'Box')) {
     const text = textOf(node)
     if (text === '') return []

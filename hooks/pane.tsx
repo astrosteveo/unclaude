@@ -473,9 +473,13 @@ export function drawPane(
       // The details sit under the title, past the id too.
       const who = cutWho(Math.max(0, room - head - others + 1))
       const details = others + who.length - 1
+      // Every line padded out to the column's width, so the card is a solid block when lit.
+      const across = Math.max(1, room - head)
+      const fill = (text: string) => `${text}${'\u00a0'.repeat(Math.max(0, across - [...text].length))}`
       return {
-        ...bits, title: kept.join(`\n${'\u00a0'.repeat(head)}`), who, pad: 0, isSplit: details > 0,
-        rows: kept.length + (details > 0 ? Math.ceil(details / Math.max(1, room - head)) : 0),
+        ...bits, title: kept.map(fill).join(`\n${'\u00a0'.repeat(head)}`), who, pad: 0, isSplit: details > 0,
+        tail: details > 0 && details % across ? across - (details % across) : 0,
+        rows: kept.length + (details > 0 ? Math.ceil(details / across) : 0),
       }
     }
     // Too narrow for a title beside its details, a line keeps the title alone.
@@ -494,7 +498,11 @@ export function drawPane(
     const laid = cardLayout(item, room, isStacked, slots)
     const { title, tag, ticks, pr, prTag, wait, who, stale, late, ship, news, pad } = laid
     const isSplit = 'isSplit' in laid && laid.isSplit
+    const tail = 'tail' in laid ? laid.tail : 0
+    const head = item.id.length + 1
     const id = 'id' in laid && laid.id ? laid.id : item.id
+    // Under the pointer the button inverts: every piece in its column's colour, so the card lights as one block.
+    const lit = { color: COLOR[statusOf(items, item)], dimColor: false, bold: true }
     const isOpen = pick === item.id
     // A detail line leads with its first detail, its space dropped, under the title.
     let isFirst = isSplit
@@ -504,34 +512,47 @@ export function drawPane(
       return text.slice(1)
     }
     return (
-      <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
-        <Text dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
-          {id}
-        </Text>{' '}
-        <Text bold={isOpen} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
-          {title}
-        </Text>
-        {isSplit ? `\n${'\u00a0'.repeat(item.id.length + 1)}` : ' '.repeat(pad)}
-        <Text color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
-          {detail(tag)}
-        </Text>
-        <Text dimColor>{detail(ticks)}</Text>
-        <Text color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{detail(prTag)}</Text>
-        <Text color="yellow" dimColor>
-          {detail(wait)}
-        </Text>
-        <Text color="cyan">{detail(who)}</Text>
-        <Text color="red" dimColor>
-          {detail(stale)}
-        </Text>
-        <Text color="red">{detail(late)}</Text>
-        <Text color={ship.trim() === 'unreleased' ? 'yellow' : 'green'} dimColor>
-          {detail(ship)}
-        </Text>
-        <Text color="magenta" bold>
-          {detail(news)}
-        </Text>
-      </Button>
+      // A keyed box of its own: the card's hover scope.
+      <Box key={`card-box-${item.id}`}>
+        <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
+          <Text hover={lit} dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
+            {id}
+          </Text>
+          <Text hover={lit}> </Text>
+          {/* Each line starts a Text of its own (a line break, then its indent): the inversion under the
+              pointer takes a Text's first line only, so every line lights whole. */}
+          {title.split('\n').map((line, n) => [
+            ...(n ? [<Text key={`br-${n}`} hover={lit}>{'\n'}</Text>, <Text key={`in-${n}`} hover={lit}>{line.slice(0, head)}</Text>] : []),
+            <Text key={`title-${n}`} hover={lit} bold={isOpen} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+              {n ? line.slice(head) : line}
+            </Text>,
+          ])}
+          {isSplit ? [
+            <Text key="br-details" hover={lit}>{'\n'}</Text>,
+            <Text key="in-details" hover={lit}>{'\u00a0'.repeat(head)}</Text>,
+          ] : <Text hover={lit}>{' '.repeat(pad)}</Text>}
+          <Text hover={lit} color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
+            {detail(tag)}
+          </Text>
+          <Text hover={lit} dimColor>{detail(ticks)}</Text>
+          <Text hover={lit} color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{detail(prTag)}</Text>
+          <Text hover={lit} color="yellow" dimColor>
+            {detail(wait)}
+          </Text>
+          <Text hover={lit} color="cyan">{detail(who)}</Text>
+          <Text hover={lit} color="red" dimColor>
+            {detail(stale)}
+          </Text>
+          <Text hover={lit} color="red">{detail(late)}</Text>
+          <Text hover={lit} color={ship.trim() === 'unreleased' ? 'yellow' : 'green'} dimColor>
+            {detail(ship)}
+          </Text>
+          <Text hover={lit} color="magenta" bold>
+            {detail(news)}
+          </Text>
+          {tail > 0 && <Text hover={lit}>{'\u00a0'.repeat(tail)}</Text>}
+        </Button>
+      </Box>
     )
   }
 
@@ -567,10 +588,12 @@ export function drawPane(
     <Box flexDirection="row" columnGap={3} flexWrap="wrap">
       <Box key="views" flexDirection="row" columnGap={2}>
         <Box key="tabs" flexDirection="row" columnGap={1}>
-          {/* `v` steps to the next view: one hotkey, held by the tab after the one showing. */}
+          {/* `v` steps to the next view: a hotkey held by a Button out of sight, so the tabs read clean. */}
+          <Box key="tab-next-key" display="none">
+            <Button key="tab-next" plain hotkey="v" label={nextView} onPress={() => act.setView(nextView)} />
+          </Box>
           {VIEWS.map(([one, label]) => (
-            <Button key={`tab-${one}`} plain variant={mode === one ? 'primary' : 'secondary'}
-              hotkey={one === nextView ? 'v' : undefined} onPress={() => act.setView(one)}>
+            <Button key={`tab-${one}`} plain variant={mode === one ? 'primary' : 'secondary'} onPress={() => act.setView(one)}>
               {mode === one ? (
                 <Text inverse bold>
                   {` ${tabLabel(one, label)} `}

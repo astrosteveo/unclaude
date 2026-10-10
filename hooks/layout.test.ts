@@ -249,7 +249,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     // (The list is framed, and side by side its columns too: each top border is a row of its own.)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows + 1 + (width >= 100 ? 1 : 0))
-    expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +v: +Releases +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -888,4 +888,33 @@ test('tables: a header over aligned columns in Plan, the Inbox, Releases and the
     if (width < 100) expect(unframed(paintPane(await ui.drawn(), width)).lines.some(line => /^\s*Name\s+Due\s+Progress/.test(line))).toBe(true)
     await ui.unmount()
   }
+})
+
+test('a board card lights whole under the pointer, every line in its column\'s colour; v steps the tabs from out of sight', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 180, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  await ui.press({ key: 'tab-board' })
+  const box = JSON.stringify(await ui.find({ key: 'card-box-T5' }))
+  // Every piece of the card takes the same hover colour, so the inverted card is one block.
+  const colours = new Set([...box.matchAll(/"hover":\{"color":"([^"]+)"/g)].map(one => one[1]))
+  expect(colours.size).toBe(1)
+  // Every line of a wide card is padded out to the column: the painted card is a rectangle.
+  const { lines } = paintPane(await ui.drawn(), 180)
+  const at = lines.findIndex(line => /\bT5 /.test(line))
+  const left = lines[at]!.indexOf('T5 ')
+  const width = (line: string) => [...line.slice(left)].findIndex((c, i, all) => all.slice(i).every(rest => rest === ' ')) 
+  expect(width(lines[at]!)).toBe(width(lines[at + 1]!))
+  // No tab shows the `v:` hotkey; v still steps to the next tab.
+  expect(lines[0]).not.toMatch(/v:/)
+  await ui.press({ key: 'tab-next' })
+  expect(JSON.stringify(await ui.find({ key: 'tab-releases' }))).toContain('"inverse":true')
+  await ui.unmount()
 })
