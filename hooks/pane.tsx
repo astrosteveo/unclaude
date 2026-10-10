@@ -289,6 +289,32 @@ export function drawPane(
 ): { node: RenderElement; scrollMax: number; viewScrollMax: number } {
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
+  /**
+   * A window `room` lines tall over `blocks`, from line `at`: blocks wholly inside it as they are, and of a
+   * block cut by the top or bottom edge (a wrapped description, an activity entry), the lines of it inside,
+   * drawn plain. Scrolling so moves a line at a time. Blocks are measured as drawn, `width` wide.
+   */
+  const windowOf = (blocks: { key: string; node: unknown }[], at: number, room: number, width: number) => {
+    const measured = blocks.map(one => ({ ...one, lines: Math.max(1, paint(one.node as never, width).length) }))
+    const total = measured.reduce((sum, one) => sum + one.lines, 0)
+    const nodes: unknown[] = []
+    let line = 0
+    for (const one of measured) {
+      const top = line
+      const bottom = line + one.lines
+      line = bottom
+      if (bottom <= at || top >= at + room) continue
+      if (top >= at && bottom <= at + room) nodes.push(one.node)
+      else
+        // Cut by an edge: the lines of it in the window, drawn as the painter lays them out.
+        paint(one.node as never, width)
+          .slice(Math.max(0, at - top), Math.min(one.lines, at + room - top))
+          .forEach((text, i) => nodes.push(<Text key={`${one.key}-cut-${i}`}>{text || ' '}</Text>))
+    }
+    const above = Math.min(at, total)
+    const below = Math.max(0, total - at - room)
+    return { nodes, total, above, below }
+  }
   const Select = 'Select' in els ? els.Select : undefined
   const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, triaging, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
@@ -1406,28 +1432,22 @@ export function drawPane(
   const wideFrom = Math.min(state.viewScrolledTo, wideMax)
   const fixed = (isCompact ? 0 : headerRows) + (isDocked ? topRows : 0) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
-  const total = sections.reduce((sum, row) => sum + row.rows, 0)
+  // The card's sections, measured as drawn, in a window a line at a time; the marks take a line each.
+  const total = sections.reduce((sum, row) => sum + Math.max(1, paint(row.node as never, inner).length), 0)
   const isScrolling = space < total
-  const scrollMax = isScrolling ? total - (space - 1) : 0
+  const scrollMax = isScrolling ? total - (space - 2) : 0
   const want = isScrolling ? Math.min(state.scrolledTo, scrollMax) : 0
-  const room = want > 0 ? space - 1 : space
-  // Scroll in whole rows of the list: skip rows until the scrolled-to line is reached.
-  let first = 0
-  for (let skipped = 0; first < sections.length && skipped + sections[first]!.rows <= want; first++) skipped += sections[first]!.rows
-  let used = 0
-  const shown = sections.slice(first).filter(row => (used += row.rows) <= room)
-  // A heading whose first row didn't fit waits for it below.
-  while (shown.length > 0 && shown[shown.length - 1]!.key.startsWith('head-') && first + shown.length < sections.length) shown.pop()
-  const above = sections.slice(0, first).reduce((sum, row) => sum + row.rows, 0)
-  const below = total - above - shown.reduce((sum, row) => sum + row.rows, 0)
+  const cardWindow = windowOf(sections, want, isScrolling ? space - (want > 0 ? 1 : 0) - (want < scrollMax ? 1 : 0) : Infinity, inner)
+  const above = cardWindow.above
+  const below = cardWindow.below
   const body = [
     above > 0 ? <Text key="more-above" dimColor>↑ {above} more {above === 1 ? 'line' : 'lines'} above · scroll up</Text> : null,
-    ...shown.map(row => row.node),
+    ...(cardWindow.nodes as never[]),
     below > 0 ? <Text key="more-below" dimColor>↓ {below} more {below === 1 ? 'line' : 'lines'} below · scroll down</Text> : null,
   ]
   // An inline pane is as tall as its tree: hold a scrolling card at one height so the frame doesn't jump.
   if (isScrolling) {
-    const drawn = shown.reduce((sum, row) => sum + row.rows, 0) + (above > 0 ? 1 : 0) + (below > 0 ? 1 : 0)
+    const drawn = Math.min(total - above - below, Infinity) + (above > 0 ? 1 : 0) + (below > 0 ? 1 : 0)
     if (drawn < space + 1) body.push(<Box key="pad" height={space + 1 - drawn} />)
   }
 
@@ -1657,16 +1677,15 @@ export function drawPane(
   const isViewScrolling = canScroll && !(mode === 'board' && isWide) && viewTotal > viewSpace
   const viewMax = isViewScrolling ? viewTotal - (viewSpace - 2) : mode === 'board' && isWide ? wideMax : 0
   const viewAt = isViewScrolling ? Math.min(state.viewScrolledTo, viewMax) : 0
-  let viewFirst = 0
-  for (let skipped = 0; viewFirst < viewRows.length && skipped + viewRows[viewFirst]!.rows <= viewAt; viewFirst++) skipped += viewRows[viewFirst]!.rows
-  let viewUsed = 0
-  const viewShown = viewRows.slice(viewFirst).filter(row => (viewUsed += row.rows) <= viewSpace - 2)
-  const viewAbove = viewRows.slice(0, viewFirst).reduce((sum, row) => sum + row.rows, 0)
-  const viewBelow = viewTotal - viewAbove - viewShown.reduce((sum, row) => sum + row.rows, 0)
+  // A line at a time, the rows cut by an edge showing what of them is in the window.
+  const viewWindow = windowOf(viewRows.map((row, i) => ({ key: `view-${i}`, node: row.node })), viewAt,
+    isViewScrolling ? viewSpace - (viewAt > 0 ? 1 : 0) - (viewAt < viewMax ? 1 : 0) : Infinity, width)
+  const viewAbove = viewWindow.above
+  const viewBelow = viewWindow.below
   const scrolledView = isViewScrolling ? (
     <Box key="view-window" flexDirection="column">
       {viewAbove > 0 && <Text key="view-above" dimColor>↑ {viewAbove} more {viewAbove === 1 ? 'line' : 'lines'} above · scroll up</Text>}
-      {viewShown.map(row => row.node as never)}
+      {viewWindow.nodes as never[]}
       {viewBelow > 0 && <Text key="view-below" dimColor>↓ {viewBelow} more {viewBelow === 1 ? 'line' : 'lines'} below · scroll down</Text>}
     </Box>
   ) : theView
