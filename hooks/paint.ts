@@ -17,10 +17,13 @@ export const cells = (text: string) => [...text].length
 /** `text` wrapped at word boundaries to `width`, a word longer than a line broken across lines. */
 export function wrap(text: string, width: number): string[] {
   const out: string[] = []
-  for (const para of text.split('\n')) {
-    let line = ''
+  for (const whole of text.split('\n')) {
+    // A line's indentation stays, as the terminal draws it.
+    const lead = /^ */.exec(whole)![0]
+    const para = whole.slice(lead.length)
+    let line = lead.length < width ? lead : ''
     for (const word of para.split(' ')) {
-      if (line === '') line = word
+      if (line.trim() === '') line += word
       else if (cells(line) + 1 + cells(word) <= width) line += ` ${word}`
       else {
         out.push(line)
@@ -70,6 +73,7 @@ function textOf(node: Node): string {
 
 /** The width a node takes when nothing limits it. */
 function natural(node: Node): number {
+  if (node && typeof node === 'object' && node.props?.display === 'none') return 0
   if (isInline(node) || (typeof node === 'object' && node && node.type !== 'Box')) return Math.max(0, ...textOf(node).split('\n').map(cells))
   const props = (node as { props?: Record<string, unknown> }).props ?? {}
   if (typeof props.width === 'number') return props.width
@@ -96,6 +100,8 @@ const keyOf = (node: Node) => (node && typeof node === 'object' ? String(node.pr
 /** Paints `node` into `width` columns. */
 export function paint(node: Node, width: number, problems: string[] = [], path = 'pane'): string[] {
   if (node === null || node === undefined || typeof node === 'boolean') return []
+  // A Box drawn `display: "none"` takes no room (a hover may show it, over the rest).
+  if (typeof node === 'object' && node.props?.display === 'none') return []
   if (isInline(node) || (typeof node === 'object' && node.type !== 'Box')) {
     const text = textOf(node)
     if (text === '') return []

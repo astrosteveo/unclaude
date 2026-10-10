@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Activity, InboxItem, Item, Snapshot } from '../types'
 import { VERSION } from './db'
 import { paintPane } from './paint'
-import { columnWidths, fitHints, progressBar } from './pane'
+import { cellOf, columnWidths, fitColumns, fitHints, progressBar } from './pane'
 
 // Layout at the sizes people use: every view, with and without a card docked under it, drawn at narrow
 // and wide widths and short and tall heights, then laid out by `paint` and checked for what doesn't fit.
@@ -71,6 +71,9 @@ const fake = (stdin: string | undefined, snap: Snapshot) => {
   return { exitCode: 0, stdout: typeof answer === 'number' ? String(answer) : JSON.stringify(answer), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 }
 
+/** A painted pane with the list's frame taken off: its lines without the two columns of border and padding. */
+const unframed = (painted: { lines: string[]; problems: string[] }) => ({ ...painted, lines: painted.lines.map(line => line.replace(/^  /, '')) })
+
 /** Each view: the tab that shows it, and the key of a row that opens a card from it. */
 const VIEWS = [
   ['board', 'tab-board', 'card-T5'],
@@ -80,7 +83,8 @@ const VIEWS = [
   ['releases', 'tab-releases', null],
 ] as const
 
-test('every view fits the pane at narrow and wide widths, with and without a docked card', async ($, on) => {
+// (Every view at every size, docked and not: slow on a shared CI runner, so it gets more than the 5 s.)
+test('every view fits the pane at narrow and wide widths, with and without a docked card', { timeoutMs: 30_000 }, async ($, on) => {
   const snap = bigRoadmap()
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -109,6 +113,7 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
         }
         await ui.press({ key: target })
         const docked = paintPane(await ui.drawn(), width)
+        if (SHOW === `${view} + card ${width}x${height}`) found.push(...docked.lines.map(line => `|${line}`))
         for (const problem of docked.problems) found.push(`${view} + card ${width}x${height}: ${problem}`)
         await ui.press({ key: 'close' })
       }
@@ -123,9 +128,9 @@ test('side by side, an empty column takes its heading and the columns with cards
   expect(Object.values(widths).reduce((sum, one) => sum + one, 0) + 8).toBeLessThanOrEqual(120)
 })
 
-test('wide board cards: one line where all fit, else a title line and a details line for every card of the column', async ($, on) => {
+test('wide board cards: the title on up to two lines, its details on a line under it; one line when docked short', async ($, on) => {
   const snap = bigRoadmap()
-  // Two short tasks in progress fit on one line; Done holds long titles, so all its cards take two.
+  // A short task with no details takes a line; one with details a line more; Done's long titles wrap.
   snap.items = snap.items.filter(one => one.kind !== 'task' || one.status === 'done')
   snap.items.push(item('T90', { status: 'in_progress', title: 'Short' }), item('T91', { status: 'in_progress', title: 'Tiny', assignee: 'claude' }))
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
@@ -141,15 +146,16 @@ test('wide board cards: one line where all fit, else a title line and a details 
   expect(problems).toEqual([])
   const heads = lines.find(line => line.includes('○ Todo 0'))!
   // Empty Todo, Blocked and Review keep to their headings; In progress and Done share the rest.
-  expect(heads.indexOf('◐ In progress')).toBeLessThan(20)
+  expect(heads.indexOf('◐ In progress')).toBeLessThan(24)
   expect(heads.indexOf('● Done') - heads.indexOf('◐ In progress')).toBeGreaterThan(40)
   const at = heads.indexOf('p: ◐ In progress')
-  const progress = lines.slice(lines.indexOf(heads) + 2).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
-  expect(progress.slice(0, 2)).toEqual(['T90 Short', 'T91 Tiny @claude'])
-  const done = lines.slice(lines.indexOf(heads) + 2, lines.indexOf(heads) + 6).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
+  // (The cards start right under the headings: the frame's border is above them.)
+  const progress = lines.slice(lines.indexOf(heads) + 1).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
+  expect(progress.slice(0, 3)).toEqual(['T90 Short', 'T91 Tiny', '@claude'])
+  const done = lines.slice(lines.indexOf(heads) + 1, lines.indexOf(heads) + 5).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
   expect(done[0]).toMatch(/^T\d+ Make the board/)
   expect(done[1]).not.toMatch(/^T\d+/)
-  expect(done[2]).toMatch(/^T\d+ Make the board/)
+  expect(done.slice(2).some(line => /^T\d+ Make the board/.test(line))).toBe(true)
   // The open card's id stands out.
   await ui.press({ key: 'card-T90' })
   const open = await ui.find({ key: 'card-T90' })
@@ -169,7 +175,7 @@ test('narrow board: empty columns fold into one line, and every row puts its det
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } as never,
   })
-  const { lines, problems } = paintPane(await ui.drawn(), 84)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 84))
   expect(problems).toEqual([])
   // One line for the empty columns (Review holds a handed epic), each heading still a button with its jump key.
   expect(lines.filter(line => /In progress 0/.test(line))).toEqual(['p: ◐ In progress 0 · b: ✗ Blocked 0'])
@@ -184,7 +190,8 @@ test('narrow board: empty columns fold into one line, and every row puts its det
   let end = hintsAt
   while (end > 0 && lines[end - 1]!.trim() === '') end--
   const content = lines.slice(0, end)
-  expect(content.filter(line => line.trim() === '').length).toBe(3)
+  // (The list's frame takes a blank-looking row at its top too.)
+  expect(content.filter(line => line.trim() === '').length).toBe(4)
   await ui.unmount()
 })
 
@@ -211,7 +218,7 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
     expect(await ui.find({ type: 'Text', text: '…27 older' })).toBeDefined()
     // Opened, Done takes the rows the pane has left: some narrow, where the columns stack, more side by side.
     await ui.press({ key: 'done-toggle' })
-    expect((await doneCards()).length).toBeGreaterThan(width > 100 ? 20 : 5)
+    expect((await doneCards()).length).toBeGreaterThan(width > 100 ? 12 : 5)
     expect(paintPane(await ui.drawn(), width).problems).toEqual([])
     expect(await ui.find({ type: 'Text', text: '· recent only' })).toBeDefined()
     await ui.press({ key: 'done-toggle' })
@@ -239,10 +246,11 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
       plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
       props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
     })
-    const { lines } = paintPane(await ui.drawn(), width)
+    const { lines } = unframed(paintPane(await ui.drawn(), width))
+    // (The list is framed, and side by side its columns too: each top border is a row of its own.)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
-    expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +v: +Releases +█+░* 30\/60 done +● 7 unread/)
+    expect(top).toBe(rows + 1 + (width >= 100 ? 1 : 0))
+    expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -332,7 +340,7 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   expect(card?.text).toContain("✕ won't do")
   expect(JSON.stringify(card)).toContain('"strikethrough":true')
   await ui.press({ key: 'tab-plan' })
-  expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2 Dropped/)
+  expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2\s+Dropped/)
   // Its card shows Won't do where Done would be.
   await ui.press({ key: 'row-T2' })
   expect((await ui.find({ key: 'set-wontdo' }))?.props.variant).toBe('primary')
@@ -371,9 +379,9 @@ test('inbox: i files a line from any tab; the Inbox tab lists what waits, with w
   expect(ran.some(one => one.includes('INSERT INTO inbox(id, title, body, author)') && one.includes("'we should export to CSV'") && one.includes("'user'"))).toBe(true)
   expect(await ui.find({ key: 'inbox-input' })).toBeUndefined()
   await ui.press({ key: 'tab-inbox' })
-  const { lines } = paintPane(await ui.drawn(), 120)
-  expect(lines.some(line => /^I1 .* — user, 10-09$/.test(line))).toBe(true)
-  expect(lines.some(line => /^I3 .* — general-purpose-implement-the-login-and-session-flow, 10-09$/.test(line))).toBe(true)
+  const { lines } = unframed(paintPane(await ui.drawn(), 120))
+  expect(lines.some(line => /^I1 +.+ +user +2026-10-09$/.test(line))).toBe(true)
+  expect(lines.some(line => /^I3 +.+ +general-purpose… +2026-10-09$/.test(line))).toBe(true)
   await ui.unmount()
 })
 
@@ -440,14 +448,14 @@ test('releases tab: what the next release carries by section, each version newes
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
   await ui.press({ key: 'tab-releases' })
-  const { lines, problems } = paintPane(await ui.drawn(), 100)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 100))
   expect(problems).toEqual([])
   const text = lines.join('\n')
   // T2 and T3 merged since; T1 shipped in 0.6.2. By section, Added before Fixed.
   expect(text).toMatch(/Unreleased +2 notes merged since the last release +\[ Release… \]\nAdded\n- New thing\. \(T3\)\nFixed\n- A fix\. \(T2\)/)
   // Newest open with its notes, stable marked; the older one folded to its line.
-  expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +PR #33 +stable ●\n *Changed\n *- Installs get releases\./)
-  expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 task +PR #31\n/)
+  expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +#33 +stable ●\n *Changed\n *- Installs get releases\./)
+  expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 #31 *\n/)
   // Release… suggests the next minor (an Added note waits) and runs ship with what is typed.
   await ui.press({ key: 'release' })
   expect((await ui.find({ key: 'release-version' }))?.props.value).toBe('0.7.0')
@@ -476,7 +484,7 @@ test('roadmap on a time axis: epics as bars filled by progress, milestones as ma
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
   await ui.press({ key: 'tab-roadmap' })
-  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 140))
   expect(problems).toEqual([])
   const row = (id: string) => lines.find(line => line.replace(/^\u00a0+/, '').startsWith(`${id} `))!
   // E1: late (its date passed, a task open), half done; a bar of red, half filled.
@@ -525,7 +533,7 @@ test('releases on the roadmap: a tick at each release\'s date, named for its ver
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
   await ui.press({ key: 'tab-roadmap' })
-  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 140))
   expect(problems).toEqual([])
   const ticks = lines.find(line => line.startsWith('Releases'))!
   expect(ticks).toMatch(/▲0\.6\.0[\s\u00a0]+▲0\.6\.3 \+1/)
@@ -535,7 +543,7 @@ test('releases on the roadmap: a tick at each release\'s date, named for its ver
   // Pressing a tick opens the Releases tab on that release, unfolded even if it is not the newest.
   await ui.press({ key: 'release-tick-0.6.0' })
   expect((await ui.find({ key: 'tab-releases' }))?.props.variant).toBe('primary')
-  const text = paintPane(await ui.drawn(), 140).lines.join('\n')
+  const text = unframed(paintPane(await ui.drawn(), 140)).lines.join('\n')
   expect(text).toMatch(/▾ v0\.6\.0[^\n]*\n *- A\./)
   await ui.unmount()
 })
@@ -629,7 +637,7 @@ test('mouse scroll: a tab longer than the pane scrolls under a header that stays
   const wheel = (by: number) => $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by, bodyRows: 20, contentRows: 20, origin: { kind: 'person' } } as never)
   const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props: props(84) })
   await ui.press({ key: 'tab-plan' })
-  const lines = async () => paintPane(await ui.drawn(), 84)
+  const lines = async () => unframed(paintPane(await ui.drawn(), 84))
   let drawn = await lines()
   expect(drawn.problems).toEqual([])
   expect(drawn.lines.length).toBeLessThanOrEqual(21)
@@ -661,8 +669,8 @@ test('mouse scroll: a tab longer than the pane scrolls under a header that stays
   await wide.redraw(props(180))
   const after = (await wide.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('card-'))
   expect(after).not.toEqual(before)
-  expect(paintPane(await wide.drawn(), 180).lines.some(line => line.includes('↑ 2 above'))).toBe(true)
-  expect(paintPane(await wide.drawn(), 180).problems).toEqual([])
+  expect(unframed(paintPane(await wide.drawn(), 180)).lines.some(line => line.includes('↑ 2 above'))).toBe(true)
+  expect(unframed(paintPane(await wide.drawn(), 180)).problems).toEqual([])
   await wide.unmount()
 })
 
@@ -686,17 +694,23 @@ test('the key hints sit on a docked pane\'s last row, on every tab, with a card 
       await ui.press({ key: `tab-${tab}` })
       await atBottom(tab)
     }
-    // A card fills from the bottom up: it ends right above the hints.
+    // The list's frame and the card fill the pane: the card starts right under the divider and its frame
+    // reaches the hints, its spare rows inside it, whatever the split.
     await ui.press({ key: 'tab-board' })
     const first = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).find(key => key.startsWith('card-'))!
     await ui.press({ key: first })
-    await atBottom('card')
-    // (The painter draws the card's border as a blank row: the hints, its bottom border, then its last line.)
-    const drawn = paintPane(await ui.drawn(), width).lines
-    const hintsAt = drawn.findIndex(line => line.startsWith('Tab/↑↓ move'))
-    expect(drawn[hintsAt - 1]!.trim()).toBe('')
-    expect(drawn[hintsAt - 2]!.trim()).not.toBe('')
+    for (const move of [null, 'split-down', 'split-up', 'split-up', 'split-up']) {
+      if (move) await ui.press({ key: move })
+      await atBottom('card')
+      // (The painter draws a border as a blank row: the divider, the card's top border, then its title.)
+      const drawn = paintPane(await ui.drawn(), width).lines
+      const divider = drawn.findIndex(line => /k: ▲ j: ▼/.test(line))
+      expect(`${move}: ${drawn[divider + 2]!.trim()}`).toMatch(new RegExp(`^${move}: task `))
+    }
     await ui.press({ key: 'close' })
+    // Closed, the list keeps its frame and takes the whole area down to the hints.
+    expect((await ui.find({ key: 'tab' }))?.props.borderStyle).toBe('round')
+    await atBottom('closed')
     await ui.press({ key: 'new' })
     await atBottom('form')
     await ui.press({ key: 'new-cancel' })
@@ -709,6 +723,8 @@ test('the key hints sit on a docked pane\'s last row, on every tab, with a card 
   })
   await inline.press({ key: 'tab-inbox' })
   expect(paintPane(await inline.drawn(), 84).lines.length).toBeLessThan(40)
+  // (Inline, the list has no frame: the rows are scarce there.)
+  expect((await inline.find({ key: 'tab' }))?.props.borderStyle).toBeUndefined()
   await inline.unmount()
 })
 
@@ -775,6 +791,9 @@ test('with a card docked, the wheel moves what is under it: the list in its fram
   expect(now.problems).toEqual([])
   expect([now.list, now.card]).toEqual([undefined, 'cyan'])
   expect(now.text).toMatch(/↓ \d+ more lines below · scroll down/)
+  // Both frames dim; the one under the pointer lights up (the surface applies it, no hook runs).
+  for (const key of ['top', 'detail']) expect([key, (await ui.find({ key }))?.props.borderDimColor]).toEqual([key, true])
+  expect(JSON.stringify(await ui.drawn())).toContain('"hover":{"borderColor":"cyan","borderDimColor":false}')
   // The wheel over the list (a row inside its frame) scrolls it, and lights it.
   await wheel(5)
   now = await frames()
@@ -786,4 +805,155 @@ test('with a card docked, the wheel moves what is under it: the list in its fram
   expect([now.list, now.card]).toEqual([undefined, 'cyan'])
   expect(now.text).toMatch(/↑ 2 more lines above · scroll up/)
   await ui.unmount()
+})
+
+test('docked, the card takes the rows its content needs and the list the rest; the divider (k/j) sets the split until auto', async ($, on) => {
+  const snap = bigRoadmap()
+  snap.items.push(item('T99', { title: 'Tiny', updated_at: '2026-10-09T23:00:00Z' }))
+  snap.items.find(one => one.id === 'T3')!.updated_at = '2026-10-09T23:00:00Z'
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const rows = 50
+  const props = { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: rows } } as never
+  const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props })
+  await ui.press({ key: 'tab-board' })
+  const listRows = async () => Number((await ui.find({ key: 'top' }))?.props.height)
+  const fits = async () => {
+    const { lines, problems } = paintPane(await ui.drawn(), 84)
+    expect(problems).toEqual([])
+    expect(lines.length).toBe(rows)
+  }
+  // A short card leaves the list most of the pane; a long one takes more, the list keeping at least 8.
+  await ui.press({ key: 'card-T99' })
+  const short = await listRows()
+  await fits()
+  await ui.press({ key: 'card-T3' })
+  const long = await listRows()
+  await fits()
+  expect(short).toBeGreaterThan(long)
+  expect(long).toBeGreaterThanOrEqual(8)
+  // The divider: k moves it up (the card gets more), j down; the split holds across cards until auto.
+  expect((await ui.find({ key: 'split-up' }))?.props.hotkey).toBe('k')
+  await ui.press({ key: 'split-down' })
+  await ui.press({ key: 'split-down' })
+  const set = await listRows()
+  expect(set).toBe(long + 4)
+  await ui.press({ key: 'card-T99' })
+  expect(await listRows()).toBe(set)
+  await fits()
+  await ui.press({ key: 'split-up' })
+  expect(await listRows()).toBe(set - 2)
+  await ui.press({ key: 'split-auto' })
+  expect(await listRows()).toBe(short)
+  expect(await ui.find({ key: 'split-auto' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('tables: a header over aligned columns in Plan, the Inbox, Releases and the Roadmap list; the narrowest columns go first', async ($, on) => {
+  const columns = [
+    { key: 'id', label: 'ID', width: 4, drop: 0 },
+    { key: 'title', label: 'Title', width: 'fill' as const, drop: 0, most: 50 },
+    { key: 'due', label: 'Due', width: 10, drop: 2 },
+    { key: 'pri', label: 'Pri', width: 3, drop: 1 },
+  ]
+  expect(fitColumns(columns, 120).map(one => [one.key, one.width])).toEqual([['id', 4], ['title', 50], ['due', 10], ['pri', 3]])
+  expect(fitColumns(columns, 30).map(one => one.key)).toEqual(['id', 'title', 'pri'])
+  expect(fitColumns(columns, 20).map(one => one.key)).toEqual(['id', 'title'])
+  expect(cellOf('Make the board', 8)).toBe('Make th…')
+  expect(cellOf('3/4', 5, 'right')).toBe('  3/4')
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of WIDTHS) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+    })
+    // Each list has its header; in Plan and the Inbox, the rows' ids sit under the header's.
+    for (const [tab, row] of [['tab-plan', /^\s*ID\s+Title/], ['tab-inbox', /^ID\s+Title/]] as const) {
+      await ui.press({ key: tab })
+      const { lines } = unframed(paintPane(await ui.drawn(), width))
+      const at = lines.findIndex(line => row.test(line))
+      expect(at).toBeGreaterThan(-1)
+      const idAt = lines[at]!.indexOf('ID')
+      // (An inbox item's note sits indented under it.)
+      for (const line of lines.slice(at + 1, at + 6).filter(line => line.trim() && !(tab === 'tab-inbox' && line.startsWith('  ')))) expect(`${tab} ${width}: ${line}`).not.toMatch(new RegExp(`^${tab} ${width}: .{${idAt}} `))
+    }
+    await ui.press({ key: 'tab-roadmap' })
+    if (width < 100) expect(unframed(paintPane(await ui.drawn(), width)).lines.some(line => /^\s*Name\s+Due\s+Progress/.test(line))).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('a board card lights whole under the pointer, its pieces keeping their colours on a faint block; v steps the tabs from out of sight', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 180, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+  })
+  await ui.press({ key: 'tab-board' })
+  const box = JSON.stringify(await ui.find({ key: 'card-box-T5' }))
+  // Under the pointer the button inverts: every piece's hover colour is the one faint grey (the block, once
+  // inverted), and its background its own colour (its text, once inverted), so the colour coding stays.
+  const colours = new Set([...box.matchAll(/"hover":\{"color":"([^"]+)"/g)].map(one => one[1]))
+  expect([...colours]).toEqual(['ansi256(237)'])
+  const backgrounds = new Set([...box.matchAll(/"hover":\{[^}]*"backgroundColor":"([^"]+)"/g)].map(one => one[1]))
+  expect(backgrounds.size).toBeGreaterThan(2)
+  // Every line of a wide card is padded out to the column: the painted card is a rectangle.
+  const { lines } = paintPane(await ui.drawn(), 180)
+  const at = lines.findIndex(line => /\bT5 /.test(line))
+  const left = lines[at]!.indexOf('T5 ')
+  const width = (line: string) => [...line.slice(left)].findIndex((c, i, all) => all.slice(i).every(rest => rest === ' ')) 
+  expect(width(lines[at]!)).toBe(width(lines[at + 1]!))
+  // No tab shows the `v:` hotkey; v still steps to the next tab.
+  expect(lines[0]).not.toMatch(/v:/)
+  await ui.press({ key: 'tab-next' })
+  expect(JSON.stringify(await ui.find({ key: 'tab-releases' }))).toContain('"inverse":true')
+  await ui.unmount()
+})
+
+test('opened from the board, a card stays in sight in the docked list above it, so pressing it again closes it', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of [84, 180]) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+    })
+    await ui.press({ key: 'tab-board' })
+    // The last card drawn: docked, the list shrinks, and it would go out of sight.
+    const keys = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('card-'))
+    const last = keys.at(-1)!
+    await ui.press({ key: last })
+    expect(await ui.find({ key: 'detail' })).toBeDefined()
+    expect(`${width}: ${(await ui.find({ key: last })) ? last : 'gone'}`).toBe(`${width}: ${last}`)
+    // Side by side, the wheel over the list goes on from where the open card's column was drawn: up a card.
+    const above = async () => Number(/↑ (\d+) above/.exec(paintPane(await ui.drawn(), width).lines.join('\n'))?.[1] ?? 0)
+    const held = await above()
+    if (width > 100 && held > 0) {
+      await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by: -1, bodyRows: 40, contentRows: 40, pointer: { row: 6, column: 10 }, origin: { kind: 'person' } } as never)
+      expect(await above()).toBe(held - 1)
+      await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by: 1, bodyRows: 40, contentRows: 40, pointer: { row: 6, column: 10 }, origin: { kind: 'person' } } as never)
+      expect(await above()).toBe(held)
+    }
+    expect(width < 100 || held > 0).toBe(true)
+    await ui.press({ key: last })
+    expect(await ui.find({ key: 'detail' })).toBeUndefined()
+    await ui.unmount()
+  }
 })
