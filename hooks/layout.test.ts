@@ -498,3 +498,36 @@ test('roadmap on a time axis: epics as bars filled by progress, milestones as ma
   expect(await ui.find({ key: 'detail' })).toBeDefined()
   await ui.unmount()
 })
+
+test('releases on the roadmap: a tick at each release\'s date, named for its version (one day, one tick); pressing it opens that release', async ($, on) => {
+  const items = [item('M1', { title: 'Launch', due: '2026-11-15', start: '2026-09-01' })]
+  const releases = [
+    { version: '0.6.0', tag: 'v0.6.0', at: '2026-09-20', pr: 27, notes: '- A.', tasks: [] },
+    { version: '0.6.2', tag: 'v0.6.2', at: '2026-10-09', pr: 31, notes: '- B.', tasks: [] },
+    { version: '0.6.3', tag: 'v0.6.3', at: '2026-10-09', pr: 33, notes: '- C.', tasks: [] },
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity: [], seen: {}, releases }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-12T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-timeline' })
+  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  expect(problems).toEqual([])
+  const ticks = lines.find(line => line.startsWith('Releases'))!
+  expect(ticks).toMatch(/▲0\.6\.0[\s\u00a0]+▲0\.6\.3 \+1/)
+  // 0.6.3's tick sits where the scale would put 10-09: before today's line on M1's row.
+  const m1 = lines.find(line => line.startsWith('M1 '))!
+  expect(ticks.indexOf('▲0.6.3')).toBeLessThan(m1.indexOf('│'))
+  // Pressing a tick opens the Releases tab on that release, unfolded even if it is not the newest.
+  await ui.press({ key: 'release-tick-0.6.0' })
+  expect((await ui.find({ key: 'tab-releases' }))?.props.variant).toBe('primary')
+  const text = paintPane(await ui.drawn(), 140).lines.join('\n')
+  expect(text).toMatch(/▾ v0\.6\.0[^\n]*\n *- A\./)
+  await ui.unmount()
+})

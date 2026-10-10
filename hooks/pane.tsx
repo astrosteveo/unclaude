@@ -210,6 +210,8 @@ export type PaneActions = {
   setFiling: (isOn: boolean) => void
   setReleasing: (isOn: boolean) => void
   setZoom: (zoom: number) => void
+  /** Opens the Releases tab on `version`, unfolded. */
+  showRelease: (version: string) => void
   /** Runs ship from the board: the release PR for `version`, or (`publish`, once it has merged) its tag and release. */
   release: (version: string, publish: boolean) => void
   /** Files `title` to the inbox. */
@@ -853,7 +855,11 @@ export function drawPane(
   const spans = new Map(timelineAll.map(({ item }) => [item.id, spanOf(snap, item)]))
   const dated = timelineAll.filter(({ item }) => spans.get(item.id)!.end !== undefined || item.kind === 'milestone' && item.due)
   const undated = timelineAll.filter(row => !dated.includes(row))
-  const days = dated.flatMap(({ item }) => { const one = spans.get(item.id)!; return [dayOf(one.start), ...(one.end ? [dayOf(one.end)] : [])] })
+  const days = [
+    ...dated.flatMap(({ item }) => { const one = spans.get(item.id)!; return [dayOf(one.start), ...(one.end ? [dayOf(one.end)] : [])] }),
+    // The releases too, so each has its place on the axis.
+    ...(dated.length ? shippedVersions.filter(one => one.at).map(one => dayOf(one.at)) : []),
+  ]
   // With nothing dated and no clock, the axis has nothing to span: today's date stands in, unseen.
   const fitFrom = days.length || todayDay !== undefined ? Math.min(...days, todayDay ?? Infinity) : 0
   const fitTo = days.length || todayDay !== undefined ? Math.max(...days, todayDay ?? -Infinity) : 0
@@ -925,7 +931,27 @@ export function drawPane(
     const text = `${'\u00a0\u00a0'.repeat(depth)}${item.id} ${item.title}`
     return text.length > labelWidth - 1 ? `${text.slice(0, labelWidth - 2)}…` : text.padEnd(labelWidth - 1)
   }
-  const axisRows = isDocked ? dated.slice(0, Math.max(1, topRows - 3)) : dated
+  const axisRows = isDocked ? dated.slice(0, Math.max(1, topRows - 4)) : dated
+  // Releases as ticks on the axis at their dates, labelled with their versions; several on one day (or too
+  // close to label apart) share a tick, named for the newest, with how many more.
+  const releaseTicks: { col: number; end: number; version: string; label: string }[] = []
+  for (const one of [...shippedVersions].reverse()) {
+    if (!one.at) continue
+    const col = colOf(dayOf(one.at))
+    if (!inChart(col)) continue
+    const prev = releaseTicks.at(-1)
+    if (prev && col <= prev.end) {
+      const more = Number(/\+(\d+)$/.exec(prev.label)?.[1] ?? 0) + 1
+      prev.version = one.version
+      prev.label = `${one.version} +${more}`
+      prev.end = prev.col + 1 + prev.label.length
+      continue
+    }
+    const label = one.version
+    releaseTicks.push({ col, end: col + 1 + label.length, version: one.version, label })
+  }
+  // A label that would run past the chart's edge is cut to its tick.
+  for (const tick of releaseTicks) if (tick.end > chart) (tick.label = ''), (tick.end = tick.col + 1)
   const axisView = (
     <Box flexDirection="column">
       {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
@@ -935,6 +961,18 @@ export function drawPane(
             <Text dimColor>{(zoomDays ? `zoom ${zoomDays}d` : 'zoom: all').padEnd(labelWidth - 4)}</Text>
           </Button>
           <Text dimColor>{scale.join('')}</Text>
+        </Box>
+      )}
+      {releaseTicks.length > 0 && (
+        <Box key="axis-releases" flexDirection="row">
+          <Text dimColor>{'Releases'.padEnd(labelWidth - 1).replace(/ /g, '\u00a0')}{'\u00a0'}</Text>
+          {releaseTicks.flatMap((tick, i) => [
+            // No-break spaces hold each tick at its date's column: plain spaces would collapse.
+            <Text key={`tick-gap-${i}`}>{'\u00a0'.repeat(Math.max(0, tick.col - (i ? releaseTicks[i - 1]!.end : 0)))}</Text>,
+            <Button key={`release-tick-${tick.version}`} plain onPress={() => act.showRelease(tick.version)}>
+              <Text color="green">▲{tick.label}</Text>
+            </Button>,
+          ])}
         </Box>
       )}
       {axisRows.map(({ item, depth }) => (

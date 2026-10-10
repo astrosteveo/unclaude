@@ -7,7 +7,7 @@ import * as db from './db'
 import { drawBand, drawPane, type PaneActions, type PaneState } from './pane'
 import {
   agentName, approvalNote, askAbout, readyIn, timeline, isMessage, cutRelease, isAfter, versionOf, webOf, withVersion, workerName, workerOf, workerPrompt, workersNote, WORKER_TYPE, WORKERS_MAX, checksOf, stackNote, stackText, statusOf, commentNote, lastChange, mergedNotes, sectionFor, sectionOf, withNotes, stackedOn, brief, handedScope, isAgent, letGo, openPrOf, branchFor, pullRequest, unitOf, CLAUDE, line, matches, checkLinks, checkPlan, PRIORITIES, TYPES, ignoreState, shouldOfferIgnore, withIgnore, checkBlockers, checkParent, detail, emptySnapshot, find, KINDS, nextUp, outline, progress, rows,
-  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere, placeOf, upOf, targetOf, checkTarget, changelogVersions, shippedIn,
+  parseGitLog, parsePrs, refsFor, refsText, SECTIONS, STATUSES, subtree, USER, waitingOn, ancestors, noRoadmapHere, placeOf, upOf, targetOf, checkTarget, changelogVersions, shippedIn, releasesOf,
 } from './model'
 
 const PANE = 'roadmap'
@@ -1767,6 +1767,14 @@ export const register: Register = on => {
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
       setZoom: level => void update($, zoom, () => level % 3),
+      showRelease: version => void (async () => {
+        // The newest version shows open by itself; any other opens by being flipped.
+        const newest = releasesOf(await read($, snapshot))[0]?.version
+        const key = `v${version}`
+        await update($, flipped, ids => (version === newest ? ids.filter(one => one !== key) : ids.includes(key) ? ids : [...ids, key]))
+        await update($, view, () => 'releases')
+        await focusOn($, `fold-${key}`)
+      })(),
       setReleasing: isOn => void update($, releasing, () => isOn).then(() => focusOn($, isOn ? 'release-version' : 'release')),
       release: (version, publish) => void releaseFromBoard($, version, publish),
       setFiling: isOn => void update($, filing, () => isOn).then(() => focusOn($, isOn ? 'inbox-input' : 'file')),
