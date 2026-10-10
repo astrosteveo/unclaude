@@ -890,7 +890,7 @@ test('tables: a header over aligned columns in Plan, the Inbox, Releases and the
   }
 })
 
-test('a board card lights whole under the pointer, every line in its column\'s colour; v steps the tabs from out of sight', async ($, on) => {
+test('a board card lights whole under the pointer, its pieces keeping their colours on a faint block; v steps the tabs from out of sight', async ($, on) => {
   const snap = bigRoadmap()
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
@@ -903,9 +903,12 @@ test('a board card lights whole under the pointer, every line in its column\'s c
   })
   await ui.press({ key: 'tab-board' })
   const box = JSON.stringify(await ui.find({ key: 'card-box-T5' }))
-  // Every piece of the card takes the same hover colour, so the inverted card is one block.
+  // Under the pointer the button inverts: every piece's hover colour is the one faint grey (the block, once
+  // inverted), and its background its own colour (its text, once inverted), so the colour coding stays.
   const colours = new Set([...box.matchAll(/"hover":\{"color":"([^"]+)"/g)].map(one => one[1]))
-  expect(colours.size).toBe(1)
+  expect([...colours]).toEqual(['ansi256(237)'])
+  const backgrounds = new Set([...box.matchAll(/"hover":\{[^}]*"backgroundColor":"([^"]+)"/g)].map(one => one[1]))
+  expect(backgrounds.size).toBeGreaterThan(2)
   // Every line of a wide card is padded out to the column: the painted card is a rectangle.
   const { lines } = paintPane(await ui.drawn(), 180)
   const at = lines.findIndex(line => /\bT5 /.test(line))
@@ -917,4 +920,29 @@ test('a board card lights whole under the pointer, every line in its column\'s c
   await ui.press({ key: 'tab-next' })
   expect(JSON.stringify(await ui.find({ key: 'tab-releases' }))).toContain('"inverse":true')
   await ui.unmount()
+})
+
+test('opened from the board, a card stays in sight in the docked list above it, so pressing it again closes it', async ($, on) => {
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of [84, 180]) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+    })
+    await ui.press({ key: 'tab-board' })
+    // The last card drawn: docked, the list shrinks, and it would go out of sight.
+    const keys = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('card-'))
+    const last = keys.at(-1)!
+    await ui.press({ key: last })
+    expect(await ui.find({ key: 'detail' })).toBeDefined()
+    expect(`${width}: ${(await ui.find({ key: last })) ? last : 'gone'}`).toBe(`${width}: ${last}`)
+    await ui.press({ key: last })
+    expect(await ui.find({ key: 'detail' })).toBeUndefined()
+    await ui.unmount()
+  }
 })

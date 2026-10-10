@@ -121,6 +121,9 @@ export const cellOf = (text: string, width: number, align?: 'right') =>
 const ACTIVE = 'cyan'
 // Docked, the frame the wheel and keys move is outlined in ACTIVE, dimmed; the one under the pointer lights
 // up in it, so the bright outline follows the mouse (and the divider's arrows light under it).
+// Under the pointer, a board card's faint background, a shade over the pane's (a 256-colour grey, as most
+// terminals draw it alike).
+const LIT_CARD = 'ansi256(237)'
 const LIT = { borderColor: ACTIVE, borderDimColor: false } as const
 const LIT_TEXT = { color: ACTIVE, dimColor: false, bold: true } as const
 // Docked: the list's fewest rows (its frame included), the divider's row, and how far one press moves it.
@@ -229,6 +232,8 @@ export type PaneState = {
   scrolledTo: number
   /** Where the tab showing is scrolled to, in rows from its top. */
   viewScrolledTo: number
+  /** Just opened, the docked list holds the open item's row in sight (until the wheel moves it). */
+  isRevealing?: boolean
   /** With a card docked under the list, which of the two the wheel last moved (the card when it opens). */
   region: 'list' | 'card'
   /** The list's rows with a card docked, as the person set them with the divider; null sizes by the card. */
@@ -501,8 +506,10 @@ export function drawPane(
     const tail = 'tail' in laid ? laid.tail : 0
     const head = item.id.length + 1
     const id = 'id' in laid && laid.id ? laid.id : item.id
-    // Under the pointer the button inverts: every piece in its column's colour, so the card lights as one block.
-    const lit = { color: COLOR[statusOf(items, item)], dimColor: false, bold: true }
+    // Under the pointer the button inverts, swapping each piece's colour and background: so on hover each takes
+    // its own colour as its background and a faint grey as its colour, and the inverted card reads as its
+    // pieces in their colours on one faint block.
+    const lit = (colour = 'text') => ({ color: LIT_CARD, backgroundColor: colour, dimColor: false })
     const isOpen = pick === item.id
     // A detail line leads with its first detail, its space dropped, under the title.
     let isFirst = isSplit
@@ -515,42 +522,42 @@ export function drawPane(
       // A keyed box of its own: the card's hover scope.
       <Box key={`card-box-${item.id}`}>
         <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
-          <Text hover={lit} dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
+          <Text hover={lit('inactive')} dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
             {id}
           </Text>
-          <Text hover={lit}> </Text>
+          <Text hover={lit()}> </Text>
           {/* Each line starts a Text of its own (a line break, then its indent): the inversion under the
               pointer takes a Text's first line only, so every line lights whole. */}
           {title.split('\n').map((line, n) => [
-            ...(n ? [<Text key={`br-${n}`} hover={lit}>{'\n'}</Text>, <Text key={`in-${n}`} hover={lit}>{line.slice(0, head)}</Text>] : []),
-            <Text key={`title-${n}`} hover={lit} bold={isOpen} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
+            ...(n ? [<Text key={`br-${n}`} hover={lit()}>{'\n'}</Text>, <Text key={`in-${n}`} hover={lit()}>{line.slice(0, head)}</Text>] : []),
+            <Text key={`title-${n}`} hover={lit(isDropped(item) ? 'inactive' : undefined)} bold={isOpen} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
               {n ? line.slice(head) : line}
             </Text>,
           ])}
           {isSplit ? [
-            <Text key="br-details" hover={lit}>{'\n'}</Text>,
-            <Text key="in-details" hover={lit}>{'\u00a0'.repeat(head)}</Text>,
-          ] : <Text hover={lit}>{' '.repeat(pad)}</Text>}
-          <Text hover={lit} color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
+            <Text key="br-details" hover={lit()}>{'\n'}</Text>,
+            <Text key="in-details" hover={lit()}>{'\u00a0'.repeat(head)}</Text>,
+          ] : <Text hover={lit()}>{' '.repeat(pad)}</Text>}
+          <Text hover={lit(PRIORITY_COLOR[item.priority])} color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
             {detail(tag)}
           </Text>
-          <Text hover={lit} dimColor>{detail(ticks)}</Text>
-          <Text hover={lit} color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{detail(prTag)}</Text>
-          <Text hover={lit} color="yellow" dimColor>
+          <Text hover={lit('inactive')} dimColor>{detail(ticks)}</Text>
+          <Text hover={lit(pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined)} color={pr ? CHECKS_COLOR[pr.checks] ?? 'green' : undefined}>{detail(prTag)}</Text>
+          <Text hover={lit('yellow')} color="yellow" dimColor>
             {detail(wait)}
           </Text>
-          <Text hover={lit} color="cyan">{detail(who)}</Text>
-          <Text hover={lit} color="red" dimColor>
+          <Text hover={lit('cyan')} color="cyan">{detail(who)}</Text>
+          <Text hover={lit('red')} color="red" dimColor>
             {detail(stale)}
           </Text>
-          <Text hover={lit} color="red">{detail(late)}</Text>
-          <Text hover={lit} color={ship.trim() === 'unreleased' ? 'yellow' : 'green'} dimColor>
+          <Text hover={lit('red')} color="red">{detail(late)}</Text>
+          <Text hover={lit(ship.trim() === 'unreleased' ? 'yellow' : 'green')} color={ship.trim() === 'unreleased' ? 'yellow' : 'green'} dimColor>
             {detail(ship)}
           </Text>
-          <Text hover={lit} color="magenta" bold>
+          <Text hover={lit('magenta')} color="magenta" bold>
             {detail(news)}
           </Text>
-          {tail > 0 && <Text hover={lit}>{'\u00a0'.repeat(tail)}</Text>}
+          {tail > 0 && <Text hover={lit()}>{'\u00a0'.repeat(tail)}</Text>}
         </Button>
       </Box>
     )
@@ -868,9 +875,15 @@ export function drawPane(
       )}
       {STATUSES.filter(status => !empties.includes(status)).map(status => {
         const column = columns[status]
-        const capped = column.slice(0, caps[status])
+        // Just opened and docked, the open card's column holds it in sight, Done past its recent ones too.
+        const at = isDocked && state.isRevealing && pick ? column.findIndex(task => task.id === pick) : -1
+        const capped = column.slice(0, Math.max(caps[status], at + 1))
         // Side by side and scrolling, each column shows the cards from the scrolled-to one that fit.
-        const from = isWide && canScroll ? Math.min(wideFrom, lastFrom(status, capped.length)) : 0
+        let from = isWide && canScroll ? Math.min(wideFrom, lastFrom(status, capped.length)) : 0
+        if (isWide && canScroll && at >= 0) {
+          if (at < from) from = at
+          while (from < at && at >= from + cardsFrom(status, from)) from++
+        }
         const shown = isWide && canScroll ? capped.slice(from, from + cardsFrom(status, from)) : capped
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
@@ -1886,7 +1899,22 @@ export function drawPane(
   const viewTotal = viewRows.reduce((sum, row) => sum + row.rows, 0)
   const isViewScrolling = canScroll && !(mode === 'board' && isWide) && viewTotal > viewSpace
   const viewMax = isViewScrolling ? viewTotal - (viewSpace - 2) : mode === 'board' && isWide ? wideMax : 0
-  const viewAt = isViewScrolling ? Math.min(state.viewScrolledTo, viewMax) : 0
+  // Just opened and docked, the open item's row is held in sight: the window moves as little as it must.
+  const isRow = (node: unknown): boolean => {
+    const key = String((node as { props?: { key?: unknown } } | null)?.props?.key ?? '')
+    return (pick !== null && /^(card|row|time|need)-/.test(key) && key.endsWith(`-${pick}`)) || kids(node as never).some(isRow)
+  }
+  const pickRow = isDocked && state.isRevealing && isViewScrolling ? viewRows.findIndex(row => isRow(row.node)) : -1
+  const viewAt = !isViewScrolling
+    ? 0
+    : pickRow < 0
+      ? Math.min(state.viewScrolledTo, viewMax)
+      : (() => {
+          const top = viewRows.slice(0, pickRow).reduce((sum, row) => sum + row.rows, 0)
+          const bottom = top + viewRows[pickRow]!.rows
+          const room = viewSpace - 2
+          return Math.max(0, Math.min(viewMax, Math.min(top - 1, Math.max(state.viewScrolledTo, bottom + 1 - room))))
+        })()
   // A line at a time, the rows cut by an edge showing what of them is in the window.
   const viewWindow = windowOf(viewRows.map((row, i) => ({ key: `view-${i}`, node: row.node })), viewAt,
     isViewScrolling ? viewSpace - (viewAt > 0 ? 1 : 0) - (viewAt < viewMax ? 1 : 0) : Infinity, width)
@@ -1975,6 +2003,7 @@ export function drawPane(
   return {
     scrollMax,
     viewScrollMax: viewMax,
+    viewScrollAt: viewAt,
     listEnd,
     node: (
       <Box flexDirection="column">
