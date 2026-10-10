@@ -5,14 +5,17 @@ export const DB = '.claude/roadmap.db'
 const NOW = `strftime('%Y-%m-%dT%H:%M:%SZ','now')`
 
 /**
- * The schema's history: MIGRATIONS[i] takes a database from version i to i + 1, and the version a
- * database is at lives in its own `PRAGMA user_version`. Append to this list; never edit an entry that
- * has shipped. A database made before versioning (the tables there, version 0) runs entry 0 harmlessly,
- * every statement of it being IF NOT EXISTS.
+ * Makes epics and tasks whose parent is a milestone target that milestone instead (used by v7, and by
+ * imports of exports made before v7).
  */
-/** Moves epics and tasks parented to a milestone onto it as their target (v7, and imports from before). */
 const RETARGET = `UPDATE items SET milestone=parent, parent=NULL WHERE kind IN ('epic', 'task') AND parent IN (SELECT id FROM items WHERE kind='milestone');`
 
+/**
+ * The schema's history: MIGRATIONS[i] takes a database from version i to i + 1. A database's current
+ * version is stored in its own `PRAGMA user_version`. Add new entries to the end of this list; never edit
+ * an entry that has been released. A database made before versioning (it has the tables but is at
+ * version 0) runs entry 0 without harm, because every statement in it uses IF NOT EXISTS.
+ */
 export const MIGRATIONS: string[] = [
   `CREATE TABLE IF NOT EXISTS items(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'todo',
@@ -28,24 +31,25 @@ CREATE TABLE IF NOT EXISTS checks(item_id TEXT NOT NULL, n INTEGER NOT NULL, tex
   done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (item_id, n));
 CREATE TABLE IF NOT EXISTS reads(reader TEXT NOT NULL, item_id TEXT NOT NULL, seen INTEGER NOT NULL,
   PRIMARY KEY (reader, item_id));`,
-  // v2: Jira-style fields, claim leases, labels, and links other than blocked-by. ALTER TABLE is not
-  // idempotent, so a session that loses the race to migrate fails here and finds the version current.
+  // v2: Jira-style fields, the time a claim was last renewed (lease_at), labels, and links other than
+  // blocked-by. ALTER TABLE can't be run twice, so when two sessions migrate at once, the second one
+  // fails here and then finds the database already at the current version.
   `ALTER TABLE items ADD COLUMN priority TEXT NOT NULL DEFAULT 'p2';
 ALTER TABLE items ADD COLUMN type TEXT NOT NULL DEFAULT 'feature';
 ALTER TABLE items ADD COLUMN lease_at TEXT;
 CREATE TABLE IF NOT EXISTS labels(item_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY (item_id, label));
 CREATE TABLE IF NOT EXISTS relations(a TEXT NOT NULL, b TEXT NOT NULL, type TEXT NOT NULL, PRIMARY KEY (a, b, type));`,
-  // v3: a milestone or epic handed to an agent is now reviewed once its tasks are done. Those already
-  // finished before that were never asked for review, so they keep reading done.
+  // v3: a milestone or epic handed to an agent now goes to review once its tasks are done. Those that
+  // were already finished before this change were never sent for review, so they are marked done.
   `UPDATE items SET status='done' WHERE kind!='task' AND id IN (
   WITH RECURSIVE under(root, id) AS (
     SELECT id, id FROM items WHERE kind!='task'
     UNION ALL SELECT under.root, items.id FROM items JOIN under ON items.parent=under.id)
   SELECT root FROM under JOIN items ON items.id=under.id WHERE items.kind='task'
   GROUP BY root HAVING SUM(items.status!='done')=0);`,
-  // v4: undo. Each logged change keeps the script that takes it back (undo) and the one that makes it
-  // again (redo); the entries one transaction writes share an op. A reverted entry names the undo that
-  // reverted it (undone); an undo names the entry it reverted (reverts).
+  // v4: undo. Each logged change stores the script that reverses it (undo) and the one that applies it
+  // again (redo). The entries written in one transaction share an op number. A reverted entry stores the
+  // id of the undo that reverted it (undone); an undo stores the id of the entry it reverted (reverts).
   `ALTER TABLE activity ADD COLUMN undo TEXT;
 ALTER TABLE activity ADD COLUMN redo TEXT;
 ALTER TABLE activity ADD COLUMN op INTEGER;
@@ -56,10 +60,11 @@ ALTER TABLE activity ADD COLUMN reverts INTEGER;`,
 ALTER TABLE items ADD COLUMN section TEXT;`,
   // v6: a task closed as won't do: done, but dropped rather than finished.
   `ALTER TABLE items ADD COLUMN resolution TEXT;`,
-  // v7: milestones are targets, not containers: what sat under a milestone targets it instead.
+  // v7: epics and tasks no longer sit inside a milestone; they target it. Anything that was under a
+  // milestone now targets it instead.
   `ALTER TABLE items ADD COLUMN milestone TEXT;
 ${RETARGET}`,
-  // v8: releases: each version shipped, and the tasks it carried with their notes as they went out.
+  // v8: releases: each version released, and the tasks it included, with their notes as released.
   `CREATE TABLE IF NOT EXISTS releases(version TEXT PRIMARY KEY, tag TEXT, at TEXT NOT NULL, pr INTEGER, notes TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS shipped(version TEXT NOT NULL, item_id TEXT NOT NULL, note TEXT NOT NULL, section TEXT,
   PRIMARY KEY (version, item_id));`,
@@ -70,24 +75,25 @@ CREATE TABLE IF NOT EXISTS shipped(version TEXT NOT NULL, item_id TEXT NOT NULL,
   `ALTER TABLE items ADD COLUMN start TEXT;`,
 ]
 
-/** The schema version this build of the mod reads and writes. */
+/** The schema version this build of the plugin reads and writes. */
 export const VERSION = MIGRATIONS.length
 
 /**
- * The op a write's log entries share: the id the first of them gets. A line of its own right after
- * BEGIN, so `atomic` can run several scripts as one op.
+ * Sets the op number that all of a write's log entries share: the id the first of them will get. It is
+ * kept on its own line right after BEGIN, so `atomic` can remove it and run several scripts as one op.
  */
 export const OP = 'CREATE TEMP TABLE IF NOT EXISTS op(n INTEGER); DELETE FROM op; INSERT INTO op SELECT COALESCE(MAX(id), 0) + 1 FROM activity;'
 
-/** How every write that logs begins: its transaction, and its op. */
+/** The start of every write that logs activity: it begins the transaction and sets the op number. */
 export const BEGIN = `BEGIN IMMEDIATE;\n${OP}`
 
-/** Answers the database's schema version. */
+/** Reads the database's schema version. */
 export const READ_VERSION = 'PRAGMA user_version;'
 
 /**
- * The script taking a database from version `from` to VERSION in one transaction (WAL set first: it
- * cannot change inside one). Two sessions racing here serialize on BEGIN IMMEDIATE; see `isCurrent`.
+ * The script that takes a database from version `from` to VERSION in one transaction. WAL mode is set
+ * first, because it can't be changed inside a transaction. If two sessions migrate at the same time,
+ * BEGIN IMMEDIATE makes the second one wait until the first has finished.
  */
 export const migrate = (from: number) => `PRAGMA journal_mode=WAL;
 BEGIN IMMEDIATE;
@@ -95,15 +101,15 @@ ${MIGRATIONS.slice(from).join('\n')}
 PRAGMA user_version=${VERSION};
 COMMIT;`
 
-/** Why a database cannot be used by this build, or undefined when it can (after migrating if older). */
+/** Why this build can't use a database, or undefined when it can (after migrating it, if it is older). */
 export function versionProblem(version: number): string | undefined {
-  if (!Number.isInteger(version) || version < 0) return `${DB} reports schema version "${version}", which is not a version`
+  if (!Number.isInteger(version) || version < 0) return `${DB} has schema version "${version}", which is not a valid version`
   if (version > VERSION)
-    return `${DB} was written by a newer roadmap mod (schema v${version}; this one reads up to v${VERSION}). Update the mod; nothing was changed.`
+    return `${DB} was written by a newer roadmap plugin (schema v${version}; this one reads up to v${VERSION}). Update the plugin; nothing was changed.`
   return undefined
 }
 
-/** A SQL literal. Newlines are spliced in with char(10) so no line of the script can read as a dot-command. */
+/** A SQL literal. Newlines are written as char(10), so no line of the script can be taken for a sqlite3 dot-command. */
 export function q(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(Math.trunc(value))
@@ -115,42 +121,45 @@ export function q(value: string | number | null | undefined): string {
 }
 
 /**
- * The sqlite3 command line a script runs under; the script goes on stdin. Safe mode refuses .shell,
- * .system and the like: undo runs SQL read back out of the database, which a cloned repository or an
- * imported export could have written, and a dot-command line there would otherwise run as a command.
+ * The sqlite3 command line that runs a script; the script is passed on stdin. Safe mode refuses .shell,
+ * .system and similar commands. Undo runs SQL read back out of the database, which a cloned repository
+ * or an imported export could have written, and without safe mode a dot-command line in it would run as
+ * a shell command.
  */
 export const ARGV = ['sqlite3', '-safe', '-batch', '-bail', '-noheader', '-list', '-cmd', '.timeout 5000', DB]
 
-/** The command line for the database at `path` (a batch's trial copy, say) in place of DB. */
+/** The command line for the database at `path` instead of DB (for example, the copy a batch is tried on). */
 export const argvFor = (path: string) => [...ARGV.slice(0, -1), path]
 
-/** What every write moves on: the newest timeline entry. Unchanged, nobody has written since it was read. */
+/** The id of the newest timeline entry. Every write increases it, so if it is unchanged, nobody has written since it was read. */
 export const STAMP = 'SELECT COALESCE(MAX(id), 0) FROM activity;'
 
 /**
- * A statement that fails, and so (under -bail) rolls back the transaction it is in, unless the database
- * still reads `stamp`: a batch's writes replay only on the database they were tried against.
+ * A statement that fails unless the newest timeline entry is still `stamp`. Under -bail, failing rolls
+ * back the transaction it is in. This makes sure a batch's writes are replayed only on the same database
+ * state they were tried against.
  */
 export const expectStamp = (stamp: string) =>
   guard(`(SELECT COALESCE(MAX(id), 0) FROM activity) = ${Number(stamp) || 0}`, 'the roadmap changed meanwhile; nothing was written. Try again.')
 
 /**
  * A statement that fails the script it is in (under -bail, rolling back its transaction) unless `cond`
- * holds, with `message` in sqlite3's error: an invalid JSON path is the one error SQL lets a script word.
+ * is true, and puts `message` in sqlite3's error. It uses an invalid JSON path because that is the only
+ * error whose text a SQL script can choose.
  */
 export const guard = (cond: string, message: string) =>
   `SELECT CASE WHEN NOT (${cond}) THEN json_extract('{}', ${q(`!${message}`)}) END;`
 
-/** The message of the guard that failed, read out of sqlite3's error; undefined when no guard failed. */
+/** The message of the guard that failed, taken from sqlite3's error; undefined when no guard failed. */
 export function guardReason(error: string): string | undefined {
   const found = /'!([\s\S]*)'\s*$/.exec(error.trim())
   return found ? found[1]!.replace(/''/g, "'") : undefined
 }
 
-/** A script's answer: what its last statement printed. */
+/** A script's result: the last line it printed. */
 export const answer = (stdout: string) => stdout.trim().split('\n').at(-1) ?? ''
 
-/** How a logged change is taken back and made again; `reverts` on an undo, the entry it reverted. */
+/** The scripts that undo and redo a logged change; on an undo entry, `reverts` is the id of the entry it reverted. */
 type Back = { undo?: string; redo?: string; reverts?: number }
 
 const activity = (id: string, author: string, type: string, body: string, back: Back = {}) =>
@@ -158,16 +167,16 @@ const activity = (id: string, author: string, type: string, body: string, back: 
 
 const changedSince = (id: string, what: string) => `${id}'s ${what} has changed since; change it directly`
 
-/** Sets an item's `field` from `from` to `to`, failing when it no longer reads `from`. */
+/** Sets an item's `field` from `from` to `to`, and fails if its value is no longer `from`. */
 const setField = (id: string, field: string, from: string | null, to: string | null) =>
   `${guard(`EXISTS (SELECT 1 FROM items WHERE id=${q(id)} AND ${field} IS ${q(from)})`, changedSince(id, field))}
 UPDATE items SET ${field}=${q(to)}, updated_at=${NOW} WHERE id=${q(id)};`
 
-/** A field change both ways. */
+/** The undo and redo scripts for a field change. */
 const fieldBack = (id: string, field: string, from: string | null, to: string | null): Back =>
   ({ undo: setField(id, field, to, from), redo: setField(id, field, from, to) })
 
-// Lists compared as one text, joined by a character no label or criterion holds.
+// Lists are compared as one string, joined by a character that no label or criterion contains.
 const SEP = '\u001e'
 const labelsAre = (id: string, list: string[]) =>
   `COALESCE((SELECT group_concat(label, char(30)) FROM (SELECT label FROM labels WHERE item_id=${q(id)} ORDER BY label)), '') = ${q([...list].sort().join(SEP))}`
@@ -190,8 +199,8 @@ const tick = (id: string, n: number, from: boolean, to: boolean) =>
 UPDATE checks SET done=${to ? 1 : 0} WHERE item_id=${q(id)} AND n=${n};`
 
 /**
- * How much of each item's timeline the snapshot carries: enough for a card and a brief. Its latest
- * handoff note always comes along; the whole of it is read for one item with `history`.
+ * How many of each item's timeline entries the snapshot includes: enough for a card and a brief. The
+ * latest handoff note is always included. `history` reads one item's whole timeline.
  */
 export const RECENT = 20
 
@@ -229,7 +238,7 @@ export const said = `SELECT json_group_object(item_id, body) FROM (SELECT item_i
 
 export function parseLoad(out: string): Snapshot {
   const data = JSON.parse(out) as Snapshot
-  // sqlite3 hands back `done` as 0/1, and json_group_array keeps no order of its own.
+  // sqlite3 returns `done` as 0 or 1, and json_group_array doesn't guarantee any order.
   const items = data.items.map(item => ({
     ...item,
     labels: item.labels ?? [],
@@ -255,8 +264,8 @@ export type NewItem = {
 }
 
 /**
- * Inserts an item under a fresh id (ids are never reused); the script answers that id, read inside the
- * transaction: after COMMIT another writer may already have moved the counter on.
+ * Inserts an item with a new id (ids are never reused). The script prints that id, read inside the
+ * transaction, because after COMMIT another writer may already have increased the counter.
  */
 export function insert(actor: string, item: NewItem): string {
   const prefix = PREFIX[item.kind]
@@ -276,7 +285,7 @@ COMMIT;`
 
 export type Changes = Partial<Pick<Item, 'title' | 'status' | 'parent' | 'milestone' | 'start' | 'description' | 'assignee' | 'due' | 'priority' | 'type' | 'note' | 'section' | 'resolution'>>
 
-/** The script writing the changes, logging one activity entry per field changed, and those entries; none when nothing changes. */
+/** The script that writes the changes and logs one activity entry per changed field, plus those entries' text; no script when nothing changes. */
 export function change(actor: string, item: Item, changes: Changes): { script: string; notes: string[] } {
   const sets: string[] = []
   const logs: string[] = []
@@ -289,7 +298,7 @@ export function change(actor: string, item: Item, changes: Changes): { script: s
     if (field === 'status') log('status', `status ${item.status} → ${value}`)
     else if (field === 'assignee')
       log('assign', value === null ? `unassigned ${item.assignee}` : value === actor ? 'claimed' : `assigned to ${value}`)
-    else if (field === 'parent') log('edit', value === null ? 'out of its epic' : `moved under ${value}`)
+    else if (field === 'parent') log('edit', value === null ? 'moved out of its epic' : `moved under ${value}`)
     else if (field === 'milestone') log('edit', value === null ? 'no longer targets a milestone' : `targets ${value}`)
     else if (field === 'description') log('edit', value ? 'description updated' : 'description cleared')
     else if (field === 'note') log('edit', value === null ? 'release note cleared' : value === NO_NOTE ? 'no release note needed' : `release note: ${value}`)
@@ -306,17 +315,19 @@ COMMIT;`,
   }
 }
 
-// When a lease taken or renewed now runs out, as the SQL compares it.
+// The cutoff for a claim: one last renewed before this time (30 minutes ago) has expired.
 const LEASE_CUTOFF = `strftime('%Y-%m-%dT%H:%M:%SZ','now','-30 minutes')`
 
 /**
- * Claims a task for `actor` in one transaction: it takes the task only when no one else holds it, the
- * holder's lease has run out (see LEASE_MS), or `force`; starts it, and starts a lease. Answers who
- * holds the task afterwards. `from` is who held it as last read, for the log of a takeover.
+ * Claims a task for `actor` in one transaction. It takes the task only when no one else holds it, the
+ * holder hasn't renewed the claim within LEASE_MS, or `force` is set. It starts the task and records the
+ * claim time. The script prints who holds the task afterwards. `from` is who held it when it was last
+ * read, used in the log entry for a takeover.
  */
 export function claim(actor: string, id: string, force: boolean, from?: string | null, was?: Status): string {
-  const note = from && from !== actor ? (force ? `took over from ${from}` : `took over stale claim from ${from}`) : 'claimed'
-  // Taken back: the holder and status it had. Known only when the caller says what the task was.
+  const note = from && from !== actor ? (force ? `took over from ${from}` : `took over inactive claim from ${from}`) : 'claimed'
+  // Undo restores the holder and status the task had. That is only possible when the caller passes the
+  // task's previous status (`was`).
   const now = was === 'todo' ? 'in_progress' : was
   const back: Back = was === undefined ? {} : {
     undo: `${guard(`EXISTS (SELECT 1 FROM items WHERE id=${q(id)} AND assignee IS ${q(actor)})`, changedSince(id, 'assignee'))}
@@ -337,7 +348,7 @@ COMMIT;
 SELECT assignee FROM items WHERE id=${q(id)};`
 }
 
-/** Renews the leases on everything `actor` is working on: a heartbeat, so it leaves no trace in the timeline. */
+/** Renews the claims on every task `actor` is working on. It runs often, so it writes nothing to the timeline. */
 export const renew = (actor: string) =>
   `UPDATE items SET lease_at=${NOW} WHERE assignee=${q(actor)} AND status='in_progress' AND kind='task';`
 
@@ -345,8 +356,8 @@ export const comment = (actor: string, id: string, body: string, type: 'comment'
   `${BEGIN}\n${activity(id, actor, type, body)}\nCOMMIT;`
 
 /**
- * Deletes items and everything on them. Their removals and undos stay in the timeline, so a removal can
- * be taken back, and the taking back undone, under the removed item's id.
+ * Deletes items and everything attached to them. Their remove and undo entries stay in the timeline,
+ * under the removed item's id, so a removal can be undone, and that undo can be undone too.
  */
 export function removeRows(ids: string[]): string {
   const list = ids.map(q).join(', ')
@@ -354,8 +365,8 @@ export function removeRows(ids: string[]): string {
 }
 
 /**
- * Removes items (a subtree, its root first). With `log`, the removal is logged on the root with what
- * restores it: `rows`, everything on those items as `dump` read it.
+ * Removes items (a subtree, its root first). With `log`, the removal is logged on the root along with
+ * what restores it: `rows`, everything attached to those items as `dump` read it.
  */
 export function remove(ids: string[], log?: { actor: string; body: string; rows: Rows }): string {
   const logged = log ? activity(ids[0]!, log.actor, 'remove', log.body, { undo: restore(log.rows), redo: removeRows(ids) }) : ''
@@ -390,13 +401,13 @@ const OWNED: Record<Exclude<Table, 'counters'>, (list: string) => string> = {
   labels: list => `item_id IN (${list})`,
   relations: list => `a IN (${list}) OR b IN (${list})`,
   reads: list => `item_id IN (${list})`,
-  // A release belongs to no item; what it shipped of an item goes with that item.
+  // A release belongs to no item, but its `shipped` row for an item belongs to that item.
   releases: () => 'FALSE',
   shipped: list => `item_id IN (${list})`,
   inbox: () => 'FALSE',
 }
 
-/** Reads every row on the items `ids` (all of the roadmap, counters too, when absent) as JSON: Rows. */
+/** Reads every row attached to the items `ids` (the whole roadmap, counters included, when `ids` is absent) as JSON Rows. */
 export function dump(ids?: string[]): string {
   const list = ids?.map(q).join(', ')
   const tables = (Object.keys(TABLES) as Table[]).filter(table => !ids || table !== 'counters')
@@ -409,15 +420,15 @@ export function dump(ids?: string[]): string {
 }
 
 /**
- * Statements writing `rows` back, leaving rows that are already there alone (counters move up to the
- * higher of the two). No BEGIN or COMMIT: they go inside a script of the caller's.
+ * Statements that write `rows` back, leaving rows that already exist alone (a counter is set to the
+ * higher of the two values). There is no BEGIN or COMMIT: the caller puts them inside its own script.
  */
 export function restore(rows: Rows): string {
   const out: string[] = []
   for (const table of Object.keys(TABLES) as Table[]) {
     const cols = TABLES[table] as readonly string[]
     for (const row of rows[table] ?? []) {
-      // Only the columns the row has: one from an older schema leaves the newer ones to their defaults.
+      // Only the columns the row has. A row from an older schema leaves the newer columns at their defaults.
       const has = cols.filter(col => col in row)
       const values = has.map(col => q(row[col] ?? null)).join(', ')
       out.push(table === 'counters'
@@ -428,14 +439,14 @@ export function restore(rows: Rows): string {
   return out.join('\n')
 }
 
-/** What a roadmap export holds: the schema version it was written at, when, and every row. */
+/** What a roadmap export contains: the schema version it was written at, when it was written, and every row. */
 export type Export = { roadmap: 'export'; schema: number; exported_at: string; tables: Rows }
 
 /** An export of `rows` (a whole `dump`), as the text written to a file. */
 export const exportOf = (rows: Rows, at: string): string =>
   `${JSON.stringify({ roadmap: 'export', schema: VERSION, exported_at: at, tables: rows } satisfies Export)}\n`
 
-/** The rows of an export's text, or throws saying why it can't be imported here. */
+/** The rows in an export's text, or throws an error explaining why it can't be imported here. */
 export function importOf(text: string): Rows {
   let data: Partial<Export>
   try {
@@ -445,12 +456,12 @@ export function importOf(text: string): Rows {
   }
   if (data?.roadmap !== 'export' || typeof data.tables !== 'object' || data.tables === null) throw new Error('not a roadmap export')
   if (!Number.isInteger(data.schema) || data.schema! > VERSION)
-    throw new Error(`the export is from a newer roadmap mod (schema v${data.schema}; this one reads up to v${VERSION}). Update the mod first`)
+    throw new Error(`the export is from a newer roadmap plugin (schema v${data.schema}; this one reads up to v${VERSION}). Update the plugin first`)
   for (const table of Object.keys(data.tables)) if (!(table in TABLES)) throw new Error(`not a roadmap export: unknown table ${table}`)
   return data.tables
 }
 
-/** How many items and log entries a roadmap holds; an import goes only into one holding neither. */
+/** How many items and log entries a roadmap has. An import only goes into a roadmap with none of either. */
 export const COUNT = `SELECT (SELECT count(*) FROM items) || ' ' || (SELECT count(*) FROM activity);`
 
 /** Writes an export's rows into an empty roadmap, in one transaction. */
@@ -465,15 +476,15 @@ export const entries = (ids: number[]) =>
     'op', op, 'undo', undo, 'redo', redo, 'undone', undone, 'reverts', reverts))
   FROM activity WHERE id IN (${ids.map(id => Math.trunc(id)).join(', ') || 'NULL'});`
 
-/** A comment taken back, and written again as it was, under its own id. */
+/** Deletes a comment (to undo it), and writes it back as it was under its own id (to redo it). */
 export const unsay = (one: Entry) => `DELETE FROM activity WHERE id=${Math.trunc(one.id)};`
 export const resay = (one: Entry) =>
   `INSERT OR IGNORE INTO activity(id, item_id, author, type, body, at, op) VALUES (${Math.trunc(one.id)}, ${q(one.item_id)}, ${q(one.author)}, ${q(one.type)}, ${q(one.body)}, ${q(one.at)}, ${q(one.op)});`
 
 /**
- * Reverts entries as `actor`, newest first, in one transaction that fails whole when anything changed
- * since (`stamp`) or any of them no longer can be. Each is logged as an undo, which can itself be undone:
- * its undo is the entry's redo, and the other way round.
+ * Reverts entries as `actor`, newest first, in one transaction. Nothing is written if anything changed
+ * since `stamp` or if any entry can no longer be reverted. Each revert is logged as an undo entry, which
+ * can itself be undone: its undo script is the entry's redo script, and the other way round.
  */
 export function revert(actor: string, list: { entry: Entry; undo: string; redo: string }[], stamp: string): string {
   const parts = [...list].sort((a, b) => b.entry.id - a.entry.id).map(({ entry, undo, redo }) => {
@@ -484,7 +495,7 @@ export function revert(actor: string, list: { entry: Entry; undo: string; redo: 
       undo,
       activity(entry.item_id, actor, 'undo', body, { undo: redo, redo: undo, reverts: entry.id }),
       `UPDATE activity SET undone=(SELECT MAX(id) FROM activity) WHERE id=${Math.trunc(entry.id)};`,
-      // Redone: what the undo took back stands again, and can be undone again.
+      // Redone: the change that the undo reversed is back in place, and can be undone again.
       entry.type === 'undo' && entry.reverts ? `UPDATE activity SET undone=NULL WHERE id=${Math.trunc(entry.reverts)};` : '',
     ].filter(Boolean).join('\n')
   })
@@ -492,15 +503,16 @@ export function revert(actor: string, list: { entry: Entry; undo: string; redo: 
 }
 
 /**
- * Scripts built here, run as one transaction: each one's own BEGIN and COMMIT lines dropped (text never
- * makes such a line: `q` splices its newlines in as char(10)). Empty ones are skipped.
+ * Joins scripts built in this file into one transaction, removing each one's own BEGIN, op and COMMIT
+ * lines. No text value can produce such a line, because `q` writes newlines as char(10). Empty scripts
+ * are skipped.
  */
 export function atomic(scripts: string[]): string {
   const bodies = scripts.filter(Boolean).map(one => one.split('\n').filter(line => line !== 'BEGIN IMMEDIATE;' && line !== OP && line !== 'COMMIT;').join('\n'))
   return bodies.length ? `${BEGIN}\n${bodies.join('\n')}\nCOMMIT;` : ''
 }
 
-/** Files `title` (and `body`) to the inbox under a fresh I-id; the script answers that id. */
+/** Adds `title` (and `body`) to the inbox with a new I id; the script prints that id. */
 export function fileInbox(author: string, title: string, body?: string | null): string {
   const id = `'I'||(SELECT n FROM counters WHERE prefix='I')`
   return `BEGIN IMMEDIATE;
@@ -511,13 +523,13 @@ SELECT ${id};
 COMMIT;`
 }
 
-/** Sorts an inbox item: triaged into the item `became`, or dropped with `reason`; only while it is open. */
+/** Sorts an open inbox item: triaged into the item `became`, or dropped with `reason`. */
 export const resolveInbox = (id: string, state: 'triaged' | 'dropped', became: string | null, reason: string | null) => `BEGIN IMMEDIATE;
 ${guard(`EXISTS (SELECT 1 FROM inbox WHERE id=${q(id)} AND state='open')`, `${id} was sorted meanwhile; nothing was changed`)}
 UPDATE inbox SET state=${q(state)}, became=${q(became)}, reason=${q(reason)} WHERE id=${q(id)};
 COMMIT;`
 
-/** Records a release and what it shipped, replacing any record of that version. */
+/** Records a release and the tasks it included, replacing any earlier record of that version. */
 export function recordRelease(r: Release): string {
   const rows = r.tasks.map(one => `INSERT INTO shipped(version, item_id, note, section) VALUES (${q(r.version)}, ${q(one.id)}, ${q(one.note)}, ${q(one.section)});`)
   return `BEGIN IMMEDIATE;
@@ -527,19 +539,19 @@ ${rows.join('\n')}
 COMMIT;`
 }
 
-/** Marks everything on an item as seen by `reader`, up to its newest activity. */
+/** Marks an item's activity as seen by `reader`, up to its newest entry. */
 export const markSeen = (reader: string, id: string) =>
   `INSERT INTO reads(reader, item_id, seen) VALUES (${q(reader)}, ${q(id)},
   (SELECT COALESCE(MAX(id), 0) FROM activity WHERE item_id=${q(id)}))
   ON CONFLICT(reader, item_id) DO UPDATE SET seen=excluded.seen;`
 
-/** Marks everything on every item as seen by `reader`, up to each one's newest activity. */
+/** Marks every item's activity as seen by `reader`, up to each item's newest entry. */
 export const markAllSeen = (reader: string) =>
   `INSERT INTO reads(reader, item_id, seen) SELECT ${q(reader)}, item_id, MAX(id) FROM activity
   WHERE item_id IN (SELECT id FROM items) GROUP BY item_id
   ON CONFLICT(reader, item_id) DO UPDATE SET seen=excluded.seen;`
 
-/** The script setting what `item` waits on to exactly `next`, logging each link made or dropped; none when unchanged. */
+/** The script that sets the tasks blocking `item` to exactly `next`, logging each link added or removed; no script when nothing changes. */
 export function setBlockers(actor: string, item: Item, next: string[]): { script: string; notes: string[] } {
   const added = next.filter(id => !item.blocked_by.includes(id))
   const dropped = item.blocked_by.filter(id => !next.includes(id))
@@ -566,7 +578,7 @@ export const NO_NOTE = '-'
 /** A label as stored: lowercase, words joined by hyphens, no leading `#`. */
 export const label = (text: string) => text.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '-')
 
-/** The script setting an item's labels to exactly `next`, logging the new set; none when unchanged. */
+/** The script that sets an item's labels to exactly `next`, logging the new set; no script when nothing changes. */
 export function setLabels(actor: string, item: Item, next: string[]): { script: string; notes: string[] } {
   const wanted = [...new Set(next.map(label).filter(Boolean))].sort()
   if (wanted.join('\n') === [...item.labels].sort().join('\n')) return { script: '', notes: [] }
@@ -584,8 +596,9 @@ COMMIT;`,
 const RELATION_NOTE = { relates: ['relates to', 'no longer relates to'], duplicates: ['duplicate of', 'no longer a duplicate of'] }
 
 /**
- * The script setting the links of one `type` that `item` makes to exactly `next`, logging each made or
- * dropped; none when unchanged. Marking a task a duplicate also closes it: the work lives on elsewhere.
+ * The script that sets `item`'s links of one `type` to exactly `next`, logging each link added or
+ * removed; no script when nothing changes. Marking a task as a duplicate also closes it, because the
+ * work is done in the original.
  */
 export function setRelations(actor: string, item: Item, type: Relation['type'], next: string[]): { script: string; notes: string[] } {
   const now = item.relations.filter(one => one.type === type).map(one => one.id)
@@ -615,8 +628,8 @@ COMMIT;`,
 }
 
 /**
- * The script replacing an item's checklist with `texts`, in order. An entry whose text was already on the
- * list keeps its tick, so rewording one item or adding another never unchecks the rest.
+ * The script that replaces an item's checklist with `texts`, in order. An entry whose text was already on
+ * the list keeps its tick, so rewording one entry or adding another never unchecks the rest.
  */
 export function setChecklist(actor: string, item: Item, texts: string[]): { script: string; notes: string[] } {
   const next = setChecklistPreview(item, texts)
@@ -633,13 +646,13 @@ COMMIT;`,
   }
 }
 
-/** The checklist `setChecklist` would leave, ticks carried over, without writing it. */
+/** The checklist `setChecklist` would write, with ticks kept, without writing it. */
 export function setChecklistPreview(item: Item, texts: string[]): Check[] {
   const wasDone = new Set(item.checklist.filter(c => c.done).map(c => c.text))
   return texts.map((text, i) => ({ n: i + 1, text, done: wasDone.has(text) }))
 }
 
-/** The script ticking (or unticking) checklist entries `ns`; entries already so are left alone. */
+/** The script that ticks (or unticks) checklist entries `ns`; entries already in that state are left alone. */
 export function check(actor: string, item: Item, ns: number[], done: boolean): { script: string; notes: string[] } {
   const changing = item.checklist.filter(c => ns.includes(c.n) && c.done !== done)
   const notes = changing.map(c => `${done ? 'checked' : 'unchecked'} ${c.n}. ${c.text}`)

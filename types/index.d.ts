@@ -1,10 +1,10 @@
 export type Kind = 'milestone' | 'epic' | 'task'
 export type Status = 'todo' | 'in_progress' | 'blocked' | 'review' | 'done'
-/** How urgent: p0 drops everything, p2 is the default, p3 can wait. */
+/** How urgent an item is: p0 means drop everything, p2 is the default, p3 is the least urgent. */
 export type Priority = 'p0' | 'p1' | 'p2' | 'p3'
-/** What sort of work an item is, as Jira's issue type. */
+/** What kind of work an item is, like Jira's issue type. */
 export type IssueType = 'feature' | 'bug' | 'chore'
-/** A CHANGELOG section a task's release note goes under. */
+/** The CHANGELOG section a task's release note goes under. */
 export type Section = 'Added' | 'Changed' | 'Fixed'
 /** A link other than blocked-by: this item relates to, or duplicates, item `id`. */
 export type Relation = { type: 'relates' | 'duplicates'; id: string }
@@ -20,26 +20,26 @@ export type Item = {
   milestone: string | null
   description: string | null
   assignee: string | null
-  /** When a milestone or epic is meant to start (YYYY-MM-DD); without one, the roadmap derives it. */
+  /** When a milestone or epic is meant to start (YYYY-MM-DD); when it is empty, the plugin works out a start date. */
   start: string | null
   due: string | null
   priority: Priority
   type: IssueType
-  /** The task's line for the CHANGELOG, as the person using the project reads it; `-` for none needed. */
+  /** The task's line for the CHANGELOG, written for the people who use the project; `-` when none is needed. */
   note: string | null
   /** The CHANGELOG section the note goes under. */
   section: Section | null
-  /** How a closed task was closed, when not by doing it: `wontdo`, dropped (with its reason on the timeline). */
+  /** How a closed task was closed, when the work wasn't done: `wontdo`, dropped (with the reason on its timeline). */
   resolution: 'wontdo' | null
-  /** When the holder last showed signs of life; a claim gone quiet too long can be taken over. */
+  /** When the holder last renewed the claim; a claim not renewed for 30 minutes can be taken over. */
   lease_at: string | null
   /** Free-form tags, sorted. */
   labels: string[]
-  /** Links this item makes to others (stored on this side). */
+  /** Links from this item to others (stored on this item). */
   relations: Relation[]
-  /** Ids of the tasks this one waits on (`links`); empty for none. */
+  /** Ids of the tasks that block this one (stored in `links`); empty for none. */
   blocked_by: string[]
-  /** Acceptance criteria, in order; a task with any unchecked is not done. */
+  /** Acceptance criteria, in order; a task can't be done while any of them is unchecked. */
   checklist: Check[]
   created_at: string
   updated_at: string
@@ -47,8 +47,8 @@ export type Item = {
 
 /**
  * What to look for (`find`, and the board's filter); every field given must match. `assignee` "none"
- * means unassigned; `labels` matches an item carrying any of them; `text` searches title, description
- * and what was written on the item.
+ * means unassigned; `labels` matches an item that has any of them; `text` searches the title, the
+ * description, and the comments and handoff notes on the item.
  */
 export type Query = {
   kind?: Kind
@@ -58,14 +58,14 @@ export type Query = {
   type?: IssueType[]
   labels?: string[]
   under?: string
-  /** A milestone id: the epics and tasks that target it (a task its own, else its epic's), and it. */
+  /** A milestone id: matches the milestone and the epics and tasks that target it (a task's own target, else its epic's). */
   milestone?: string
   text?: string
 }
 
-/** One item of a `plan` call: a new item and, nested under it, its own new items. */
+/** One item in a `plan` call: a new item, and the new items nested under it. */
 export type PlanNode = {
-  /** A name other nodes' blocked_by can use before the item has an id; defaults to its place, `#1`, `#2`… */
+  /** A name other nodes' blocked_by can use before the item has an id; defaults to its position, `#1`, `#2`… */
   ref?: string
   kind: Kind
   title: string
@@ -85,7 +85,7 @@ export type PlanNode = {
   children?: PlanNode[]
 }
 
-/** A plan node checked and placed: under an existing item (`parentId`) or a new one (`parentRef`). */
+/** A plan node that has been checked and placed: under an existing item (`parentId`) or a new one (`parentRef`). */
 export type PlannedItem = {
   ref: string
   node: PlanNode
@@ -95,7 +95,7 @@ export type PlannedItem = {
   blockerIds: string[]
 }
 
-/** One acceptance criterion: `n` is its 1-based place in the list. */
+/** One acceptance criterion: `n` is its 1-based position in the list. */
 export type Check = { n: number; text: string; done: boolean }
 
 /** One entry of an item's timeline: a comment, or a change someone made. */
@@ -104,53 +104,54 @@ export type Activity = {
   item_id: string
   author: string
   /**
-   * `handoff`: the note an agent leaves when it lets a task go, for whoever picks it up. `remove`: an
-   * item removed, logged under its id; `undo`: a change taken back (or, undone itself, made again).
+   * `handoff`: the note an agent leaves when it releases a task, for whoever picks it up next. `remove`:
+   * an item was removed, logged under its id. `undo`: a change was undone (or, if this undo was itself
+   * undone, made again).
    */
   type: 'create' | 'status' | 'assign' | 'edit' | 'comment' | 'handoff' | 'remove' | 'undo'
   body: string
   at: string
-  /** The write it was logged in: entries of one op were one change, and are undone together. */
+  /** The write it was logged in: entries with the same op were one change, and are undone together. */
   op?: number | null
-  /** The undo entry that took it back, while it stays taken back. */
+  /** The id of the undo entry that reverted it, for as long as it stays reverted. */
   undone?: number | null
-  /** Whether it can be taken back. */
+  /** Whether it can be undone. */
   undoable?: boolean
 }
 
-/** The roadmap as read: items, recent activity, and the newest activity id the user has seen per item. */
+/** The roadmap as read from the database: items, recent activity, and the newest activity id the user has seen on each item. */
 export type Snapshot = { items: Item[]; activity: Activity[]; seen: Record<string, number>; releases?: Release[]; inbox?: InboxItem[] }
 
 /**
- * Something filed to sort later (an idea, a bug, a "we should…"), kept apart from planned work: open
- * until triaged into a task or epic, or folded into existing work (`became` names it), or dropped (`reason`).
+ * Something filed to sort later (an idea, a bug, a "we should…"), kept apart from planned work. It stays
+ * open until it is triaged into a task or epic or added to existing work (`became` is that item's id), or
+ * dropped (with the reason in `reason`).
  */
 export type InboxItem = { id: string; title: string; body: string | null; author: string; at: string; state: 'open' | 'triaged' | 'dropped'; became: string | null; reason: string | null }
 
-/** A version that shipped: when, from which tag and release PR, its notes, and the tasks it carried. */
+/** A released version: when, from which tag and release PR, its notes, and the tasks it included. */
 export type Release = { version: string; tag: string | null; at: string; pr: number | null; notes: string; tasks: { id: string; note: string; section: Section | null }[] }
 
 export type View = 'inbox' | 'plan' | 'roadmap' | 'board' | 'releases'
 
-/** The new-item form's choices so far; the title is typed last and submits it. */
+/** The new-item form's choices so far; the title is typed last, and entering it submits the form. */
 export type Draft = {
   kind: Kind; priority: Priority; type: IssueType; parent: string
-  /** The inbox item it is made from, when triaging one; its title starts as the item's. */
+  /** The inbox item it is made from, when triaging one; the title starts as that item's title. */
   from?: string; title?: string
 }
 
 /** A commit whose message names roadmap ids. */
 export type Commit = { hash: string; author: string; date: string; subject: string; ids: string[] }
 
-/** A pull request whose title or branch names roadmap ids. */
-/** A pull request whose title or branch names roadmap ids; `checks` sums up its CI. */
+/** A pull request whose title or branch names roadmap ids; `checks` is the overall result of its CI. */
 export type Pr = { number: number; title: string; state: string; url: string; ids: string[]; checks: Checks; /** Its head branch. */ branch: string; /** The branch it merges into. */ base: string }
 
-/** A pull request's checks at a glance: none reported, still running, all passed, or one failed. */
+/** A pull request's checks in one word: none reported, still running, all passed, or at least one failed. */
 export type Checks = 'none' | 'pending' | 'pass' | 'fail'
 
-/** What the repository says about the roadmap: commits and pull requests that name items. */
-export type Refs = { commits: Commit[]; prs: Pr[]; /** The version the stable branch serves, when known. */ stable?: string }
+/** The commits and pull requests in the repository that name roadmap items. */
+export type Refs = { commits: Commit[]; prs: Pr[]; /** The version on the stable branch, when known. */ stable?: string }
 
 declare module 'claude-code' {
   interface PluginState {
