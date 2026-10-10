@@ -678,17 +678,22 @@ export function drawPane(
     Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length])) as Record<Status, number>,
     width, COLUMN_GAP)
   const roomOf = (status: Status) => (isWide ? widths[status] : width - 2)
-  // Side by side, a column whose cards don't all fit on one line gives every card two, so they line up.
+  // Side by side, a narrow column whose cards don't all fit on one line gives every card two, so they line
+  // up; a column wide enough to read a title in keeps cards to one line, the title cut.
+  const SPLIT_BELOW = 44
   const isSplit = Object.fromEntries(STATUSES.map(status =>
-    [status, isWide && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
+    [status, isWide && roomOf(status) < SPLIT_BELOW && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
   // Docked, the board fits the rows above the card; side by side, each heading has its rule under it.
   // Done shows the recent (the last week's, at least a few) unless opened; the rest are a press away.
   const recentDone = columns.done.filter(task => now - Date.parse(task.updated_at) < RECENT_DAYS * 86_400_000).length
   const doneClosed = Math.min(columns.done.length, Math.max(DONE_MIN, Math.min(recentDone, DONE_MAX)))
   const doneShown = isDoneOpen ? columns.done.length : doneClosed
+  // A wide column's cards line their details up in slots, as the stacked board's do.
+  const wideSlots = Object.fromEntries(STATUSES.map(status =>
+    [status, isWide && roomOf(status) >= SPLIT_BELOW ? slotsOf(columns[status].slice(0, status === 'done' ? doneShown : 15)) : undefined])) as Record<Status, Slots | undefined>
   const heights = Object.fromEntries(STATUSES.map(status =>
     [status, columns[status].slice(0, status === 'done' ? doneShown : undefined)
-      .map(task => cardLayout(task, roomOf(status), !isWide, isSplit[status]).rows)])) as Record<Status, number[]>
+      .map(task => cardLayout(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status]).rows)])) as Record<Status, number[]>
   // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
   const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
@@ -731,7 +736,7 @@ export function drawPane(
               </Box>
             ) : heading(status)}
             {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
-            {shown.map(task => card(task, roomOf(status), !isWide, isSplit[status], stackSlots))}
+            {shown.map(task => card(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status] ?? stackSlots))}
             {column.length > shown.length && (
               <Text dimColor>
                 …{column.length - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
@@ -914,8 +919,20 @@ export function drawPane(
   const ZOOMS = [0, 120, 45] as const
   const dayOf = (date: string) => Math.floor(Date.parse(`${date}T00:00:00Z`) / DAY)
   const todayDay = now > 0 ? Math.floor(now / DAY) : undefined
-  const spans = new Map(timelineAll.map(({ item }) => [item.id, spanOf(snap, item)]))
-  const dated = timelineAll.filter(({ item }) => spans.get(item.id)!.end !== undefined || item.kind === 'milestone' && item.due)
+  // An epic without a due date still has a place: to when it finished (its last task's change), or, still
+  // going, to today with an open end (▸). A milestone without one shows when any of its epics does.
+  const todayDate = now > 0 ? dateOf(now) : undefined
+  const spans = new Map(timelineAll.map(({ item }) => {
+    const span = spanOf(snap, item)
+    if (span.end || item.kind !== 'epic') return [item.id, { ...span, isOpenEnded: false }]
+    const isDone = statusOf(items, item) === 'done'
+    const finished = tasksIn(items, item).map(one => one.updated_at.slice(0, 10)).sort().at(-1)
+    const end = isDone ? finished : todayDate
+    return [item.id, { ...span, end: end && end < span.start ? span.start : end, isOpenEnded: !isDone && Boolean(end) }]
+  }))
+  const isPlaced = (item: Item) => spans.get(item.id)!.end !== undefined || (item.kind === 'milestone' && Boolean(item.due))
+  const dated = timelineAll.filter(({ item }) => isPlaced(item) ||
+    (item.kind === 'milestone' && timelineAll.some(({ item: one }) => upOf(one) === item.id && isPlaced(one))))
   const undated = timelineAll.filter(row => !dated.includes(row))
   const days = [
     ...dated.flatMap(({ item }) => { const one = spans.get(item.id)!; return [dayOf(one.start), ...(one.end ? [dayOf(one.end)] : [])] }),
@@ -972,6 +989,8 @@ export function drawPane(
     const filled = p.total ? Math.round(((b - a + 1) * p.done) / p.total) : 0
     for (let col = a; col <= b; col++)
       cells[col] = col - a < filled ? { ch: '█', color: late ? 'red' : 'green' } : { ch: '░', color: late ? 'red' : undefined, isDim: !late }
+    // Still going with no date to end on: its bar runs to today and stays open.
+    if (span.isOpenEnded && inChart(b + 1)) cells[b + 1] = { ch: '▸', isDim: true }
     return cells
   }
   /** Cells drawn as runs of one style each. */
