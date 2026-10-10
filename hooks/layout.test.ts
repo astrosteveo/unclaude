@@ -941,6 +941,16 @@ test('opened from the board, a card stays in sight in the docked list above it, 
     await ui.press({ key: last })
     expect(await ui.find({ key: 'detail' })).toBeDefined()
     expect(`${width}: ${(await ui.find({ key: last })) ? last : 'gone'}`).toBe(`${width}: ${last}`)
+    // Side by side, the wheel over the list goes on from where the open card's column was drawn: up a card.
+    const above = async () => Number(/↑ (\d+) above/.exec(paintPane(await ui.drawn(), width).lines.join('\n'))?.[1] ?? 0)
+    const held = await above()
+    if (width > 100 && held > 0) {
+      await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by: -1, bodyRows: 40, contentRows: 40, pointer: { row: 6, column: 10 }, origin: { kind: 'person' } } as never)
+      expect(await above()).toBe(held - 1)
+      await $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by: 1, bodyRows: 40, contentRows: 40, pointer: { row: 6, column: 10 }, origin: { kind: 'person' } } as never)
+      expect(await above()).toBe(held)
+    }
+    expect(width < 100 || held > 0).toBe(true)
     await ui.press({ key: last })
     expect(await ui.find({ key: 'detail' })).toBeUndefined()
     await ui.unmount()

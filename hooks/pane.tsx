@@ -865,6 +865,8 @@ export function drawPane(
       <Text dimColor>{isDoneOpen ? '· recent only' : '· show all'}</Text>
     </Button>
   )
+  // Side by side, where the open card's column was drawn from to hold it in sight: the wheel goes on from there.
+  let revealedFrom: number | null = null
   // Drawn once the room it has is known (see viewSpace).
   const drawBoard = () => (
     <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? COLUMN_GAP : isDocked ? 0 : 1}>
@@ -883,6 +885,7 @@ export function drawPane(
         if (isWide && canScroll && at >= 0) {
           if (at < from) from = at
           while (from < at && at >= from + cardsFrom(status, from)) from++
+          revealedFrom = from
         }
         const shown = isWide && canScroll ? capped.slice(from, from + cardsFrom(status, from)) : capped
         return (
@@ -2003,7 +2006,7 @@ export function drawPane(
   return {
     scrollMax,
     viewScrollMax: viewMax,
-    viewScrollAt: viewAt,
+    viewScrollAt: mode === 'board' && isWide ? (revealedFrom ?? wideFrom) : viewAt,
     listEnd,
     node: (
       <Box flexDirection="column">
