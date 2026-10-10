@@ -384,7 +384,11 @@ export function drawPane(
   // (Only a card for an item that is there: one removed meanwhile docks nothing.)
   const isDocked = Boolean(pick && find(items, pick)) && !isCompact && !draft && bodyRows !== undefined && bodyRows >= DOCK_MIN_ROWS
   // Docked, the list is framed like the card under it (two cards stacked): its border and padding take four columns.
-  const width = isDocked ? paneWidth - 4 : paneWidth
+  // Docked in the terminal, the list is framed as a card, whether one is open under it or not (it then
+  // takes the whole area); its border and padding take four columns, and two rows.
+  const isFramed = isDocked || (e.surface === 'terminal' && (e.props as { placement?: string }).placement === 'dock' &&
+    bodyRows !== undefined && !draft && !(pick && find(items, pick)))
+  const width = isFramed ? paneWidth - 4 : paneWidth
   // Five columns side by side need room for a readable title in each; narrower, they stack.
   const isWide = width >= 100
   // A tab longer than its room scrolls (the wheel moves it): under the header, or docked, in its frame over a card.
@@ -1570,7 +1574,7 @@ export function drawPane(
     ? Infinity
     : isDocked
       ? topRows - 2
-      : Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
+      : Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1 - (isFramed ? 1 : 0))
   // Side by side, scrolling moves every column a card at a time: as many as fit under the headings.
   // (Under each heading, inside the frame's two borders, with a line for each mark.)
   const wideRoom = viewSpace - 5
@@ -1924,7 +1928,8 @@ export function drawPane(
                 {panel}
               </Box>
             ) : (
-              <Box key="tab" flexDirection="column">
+              <Box key="tab" flexDirection="column"
+                {...(isFramed ? { borderStyle: 'round', borderDimColor: true, paddingX: 1, hover: LIT } : {})}>
                 {scrolledView}
                 {pad > 0 && <Box key="tab-pad" height={pad} />}
               </Box>

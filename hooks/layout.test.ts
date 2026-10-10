@@ -71,6 +71,9 @@ const fake = (stdin: string | undefined, snap: Snapshot) => {
   return { exitCode: 0, stdout: typeof answer === 'number' ? String(answer) : JSON.stringify(answer), stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 }
 
+/** A painted pane with the list's frame taken off: its lines without the two columns of border and padding. */
+const unframed = (painted: { lines: string[]; problems: string[] }) => ({ ...painted, lines: painted.lines.map(line => line.replace(/^  /, '')) })
+
 /** Each view: the tab that shows it, and the key of a row that opens a card from it. */
 const VIEWS = [
   ['board', 'tab-board', 'card-T5'],
@@ -171,7 +174,7 @@ test('narrow board: empty columns fold into one line, and every row puts its det
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } as never,
   })
-  const { lines, problems } = paintPane(await ui.drawn(), 84)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 84))
   expect(problems).toEqual([])
   // One line for the empty columns (Review holds a handed epic), each heading still a button with its jump key.
   expect(lines.filter(line => /In progress 0/.test(line))).toEqual(['p: ◐ In progress 0 · b: ✗ Blocked 0'])
@@ -186,7 +189,8 @@ test('narrow board: empty columns fold into one line, and every row puts its det
   let end = hintsAt
   while (end > 0 && lines[end - 1]!.trim() === '') end--
   const content = lines.slice(0, end)
-  expect(content.filter(line => line.trim() === '').length).toBe(3)
+  // (The list's frame takes a blank-looking row at its top too.)
+  expect(content.filter(line => line.trim() === '').length).toBe(4)
   await ui.unmount()
 })
 
@@ -241,10 +245,10 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
       plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
       props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
     })
-    const { lines } = paintPane(await ui.drawn(), width)
-    // (Side by side the columns are framed: their top border is a row of its own.)
+    const { lines } = unframed(paintPane(await ui.drawn(), width))
+    // (The list is framed, and side by side its columns too: each top border is a row of its own.)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
-    expect(top).toBe(rows + (width >= 100 ? 1 : 0))
+    expect(top).toBe(rows + 1 + (width >= 100 ? 1 : 0))
     expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +v: +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
@@ -374,7 +378,7 @@ test('inbox: i files a line from any tab; the Inbox tab lists what waits, with w
   expect(ran.some(one => one.includes('INSERT INTO inbox(id, title, body, author)') && one.includes("'we should export to CSV'") && one.includes("'user'"))).toBe(true)
   expect(await ui.find({ key: 'inbox-input' })).toBeUndefined()
   await ui.press({ key: 'tab-inbox' })
-  const { lines } = paintPane(await ui.drawn(), 120)
+  const { lines } = unframed(paintPane(await ui.drawn(), 120))
   expect(lines.some(line => /^I1 +.+ +user +2026-10-09$/.test(line))).toBe(true)
   expect(lines.some(line => /^I3 +.+ +general-purpose… +2026-10-09$/.test(line))).toBe(true)
   await ui.unmount()
@@ -443,7 +447,7 @@ test('releases tab: what the next release carries by section, each version newes
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
   await ui.press({ key: 'tab-releases' })
-  const { lines, problems } = paintPane(await ui.drawn(), 100)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 100))
   expect(problems).toEqual([])
   const text = lines.join('\n')
   // T2 and T3 merged since; T1 shipped in 0.6.2. By section, Added before Fixed.
@@ -479,7 +483,7 @@ test('roadmap on a time axis: epics as bars filled by progress, milestones as ma
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
   await ui.press({ key: 'tab-roadmap' })
-  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 140))
   expect(problems).toEqual([])
   const row = (id: string) => lines.find(line => line.replace(/^\u00a0+/, '').startsWith(`${id} `))!
   // E1: late (its date passed, a task open), half done; a bar of red, half filled.
@@ -528,7 +532,7 @@ test('releases on the roadmap: a tick at each release\'s date, named for its ver
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
   await ui.press({ key: 'tab-roadmap' })
-  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  const { lines, problems } = unframed(paintPane(await ui.drawn(), 140))
   expect(problems).toEqual([])
   const ticks = lines.find(line => line.startsWith('Releases'))!
   expect(ticks).toMatch(/▲0\.6\.0[\s\u00a0]+▲0\.6\.3 \+1/)
@@ -538,7 +542,7 @@ test('releases on the roadmap: a tick at each release\'s date, named for its ver
   // Pressing a tick opens the Releases tab on that release, unfolded even if it is not the newest.
   await ui.press({ key: 'release-tick-0.6.0' })
   expect((await ui.find({ key: 'tab-releases' }))?.props.variant).toBe('primary')
-  const text = paintPane(await ui.drawn(), 140).lines.join('\n')
+  const text = unframed(paintPane(await ui.drawn(), 140)).lines.join('\n')
   expect(text).toMatch(/▾ v0\.6\.0[^\n]*\n *- A\./)
   await ui.unmount()
 })
@@ -632,7 +636,7 @@ test('mouse scroll: a tab longer than the pane scrolls under a header that stays
   const wheel = (by: number) => $.ui.scroll({ component: 'Pane', requestId: 'roadmap', offset: 0, by, bodyRows: 20, contentRows: 20, origin: { kind: 'person' } } as never)
   const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props: props(84) })
   await ui.press({ key: 'tab-plan' })
-  const lines = async () => paintPane(await ui.drawn(), 84)
+  const lines = async () => unframed(paintPane(await ui.drawn(), 84))
   let drawn = await lines()
   expect(drawn.problems).toEqual([])
   expect(drawn.lines.length).toBeLessThanOrEqual(21)
@@ -664,8 +668,8 @@ test('mouse scroll: a tab longer than the pane scrolls under a header that stays
   await wide.redraw(props(180))
   const after = (await wide.findAll({ type: 'Button' })).map(one => String(one.key)).filter(key => key.startsWith('card-'))
   expect(after).not.toEqual(before)
-  expect(paintPane(await wide.drawn(), 180).lines.some(line => line.includes('↑ 2 above'))).toBe(true)
-  expect(paintPane(await wide.drawn(), 180).problems).toEqual([])
+  expect(unframed(paintPane(await wide.drawn(), 180)).lines.some(line => line.includes('↑ 2 above'))).toBe(true)
+  expect(unframed(paintPane(await wide.drawn(), 180)).problems).toEqual([])
   await wide.unmount()
 })
 
@@ -703,6 +707,9 @@ test('the key hints sit on a docked pane\'s last row, on every tab, with a card 
       expect(`${move}: ${drawn[divider + 2]!.trim()}`).toMatch(new RegExp(`^${move}: task `))
     }
     await ui.press({ key: 'close' })
+    // Closed, the list keeps its frame and takes the whole area down to the hints.
+    expect((await ui.find({ key: 'tab' }))?.props.borderStyle).toBe('round')
+    await atBottom('closed')
     await ui.press({ key: 'new' })
     await atBottom('form')
     await ui.press({ key: 'new-cancel' })
@@ -715,6 +722,8 @@ test('the key hints sit on a docked pane\'s last row, on every tab, with a card 
   })
   await inline.press({ key: 'tab-inbox' })
   expect(paintPane(await inline.drawn(), 84).lines.length).toBeLessThan(40)
+  // (Inline, the list has no frame: the rows are scarce there.)
+  expect((await inline.find({ key: 'tab' }))?.props.borderStyle).toBeUndefined()
   await inline.unmount()
 })
 
@@ -868,7 +877,7 @@ test('tables: a header over aligned columns in Plan, the Inbox, Releases and the
     // Each list has its header; in Plan and the Inbox, the rows' ids sit under the header's.
     for (const [tab, row] of [['tab-plan', /^\s*ID\s+Title/], ['tab-inbox', /^ID\s+Title/]] as const) {
       await ui.press({ key: tab })
-      const { lines } = paintPane(await ui.drawn(), width)
+      const { lines } = unframed(paintPane(await ui.drawn(), width))
       const at = lines.findIndex(line => row.test(line))
       expect(at).toBeGreaterThan(-1)
       const idAt = lines[at]!.indexOf('ID')
@@ -876,7 +885,7 @@ test('tables: a header over aligned columns in Plan, the Inbox, Releases and the
       for (const line of lines.slice(at + 1, at + 6).filter(line => line.trim() && !(tab === 'tab-inbox' && line.startsWith('  ')))) expect(`${tab} ${width}: ${line}`).not.toMatch(new RegExp(`^${tab} ${width}: .{${idAt}} `))
     }
     await ui.press({ key: 'tab-roadmap' })
-    if (width < 100) expect(paintPane(await ui.drawn(), width).lines.some(line => /^\s*Name\s+Due\s+Progress/.test(line))).toBe(true)
+    if (width < 100) expect(unframed(paintPane(await ui.drawn(), width)).lines.some(line => /^\s*Name\s+Due\s+Progress/.test(line))).toBe(true)
     await ui.unmount()
   }
 })
