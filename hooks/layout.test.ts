@@ -781,6 +781,9 @@ test('with a card docked, the wheel moves what is under it: the list in its fram
   expect(now.problems).toEqual([])
   expect([now.list, now.card]).toEqual([undefined, 'cyan'])
   expect(now.text).toMatch(/↓ \d+ more lines below · scroll down/)
+  // Both frames dim; the one under the pointer lights up (the surface applies it, no hook runs).
+  for (const key of ['top', 'detail']) expect([key, (await ui.find({ key }))?.props.borderDimColor]).toEqual([key, true])
+  expect(JSON.stringify(await ui.drawn())).toContain('"hover":{"borderColor":"cyan","borderDimColor":false}')
   // The wheel over the list (a row inside its frame) scrolls it, and lights it.
   await wheel(5)
   now = await frames()

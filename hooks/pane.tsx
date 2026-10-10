@@ -119,6 +119,10 @@ export const cellOf = (text: string, width: number, align?: 'right') =>
 
 // The outline of the frame in use, when a card is docked under the list.
 const ACTIVE = 'cyan'
+// Docked, the frame the wheel and keys move is outlined in ACTIVE, dimmed; the one under the pointer lights
+// up in it, so the bright outline follows the mouse (and the divider's arrows light under it).
+const LIT = { borderColor: ACTIVE, borderDimColor: false } as const
+const LIT_TEXT = { color: ACTIVE, dimColor: false, bold: true } as const
 // Docked: the list's fewest rows (its frame included), the divider's row, and how far one press moves it.
 const LIST_MIN = 8
 const DIVIDER_ROWS = 1
@@ -845,7 +849,7 @@ export function drawPane(
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
             // Side by side and scrolling, every column's frame reaches the foot of the list.
             height={isWide && canScroll && viewSpace !== Infinity ? viewSpace : undefined}
-            {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1 } : {})}>
+            {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1, hover: { borderDimColor: false } } : {})}>
             {status === 'done' && doneToggle ? (
               <Box key="col-done-top" flexDirection="row" columnGap={1}>
                 {heading(status)}
@@ -1613,7 +1617,7 @@ export function drawPane(
   // The card; docked, `grow` blank rows at its foot keep the two frames filling the pane, whatever the split.
   const panelWith = (grow: number) => item && status && (
     <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}
-      borderColor={!isDocked || region === 'card' ? ACTIVE : undefined} borderDimColor={isDocked && region !== 'card'}>
+      borderColor={!isDocked || region === 'card' ? ACTIVE : undefined} borderDimColor={isDocked} hover={LIT}>
       <Box key="title-row" flexDirection="row" justifyContent="space-between">
         <Text>
           <Text dimColor>
@@ -1894,20 +1898,20 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows} borderStyle="round" paddingX={1}
-                borderColor={region === 'list' ? ACTIVE : undefined} borderDimColor={region !== 'list'}>
+                borderColor={region === 'list' ? ACTIVE : undefined} borderDimColor hover={LIT}>
                 {scrolledView}
               </Box>
               {/* The divider: ▲ gives the card more room, ▼ the list; auto goes back to sizing by the card. */}
               <Box key="divider" flexDirection="row" columnGap={1} justifyContent="center">
                 <Button key="split-up" plain hotkey="k" onPress={() => act.setSplit(Math.max(LIST_MIN, topRows - SPLIT_STEP))}>
-                  <Text dimColor>▲</Text>
+                  <Text dimColor hover={LIT_TEXT}>▲</Text>
                 </Button>
                 <Button key="split-down" plain hotkey="j" onPress={() => act.setSplit(topRows + SPLIT_STEP)}>
-                  <Text dimColor>▼</Text>
+                  <Text dimColor hover={LIT_TEXT}>▼</Text>
                 </Button>
                 {split !== null && (
                   <Button key="split-auto" plain onPress={() => act.setSplit(null)}>
-                    <Text dimColor>auto</Text>
+                    <Text dimColor hover={LIT_TEXT}>auto</Text>
                   </Button>
                 )}
               </Box>
