@@ -93,6 +93,8 @@ const EMPTY = { parent: null, milestone: null } as Item
  * runs short (the highest `drop` first; 0 never). `align: 'right'` for counts; `most`: the widest a fill column needs.
  */
 export type TableColumn = { key: string; label: string; width: number | 'fill'; drop: number; align?: 'right'; most?: number }
+// A wide board card's title wraps to this many lines at most.
+const TITLE_LINES = 2
 // The fewest columns a table's fill column keeps.
 const FILL_MIN = 16
 
@@ -390,12 +392,6 @@ export function drawPane(
     return count ? ` ● ${count}` : ''
   }
 
-  /**
-   * How a card is laid out in `room` columns: on one line when it all fits, the details right-aligned in
-   * the stacked board; else, in a board column, the title on one line and the details under it (every card
-   * of a column so, `isSplit`, when any needs it, so they line up); else, in the stacked board, one line
-   * with the title cut. Only the title and a long name are ever cut.
-   */
   // What a card says beside its title, each piece led by a space.
   // Merged work the next release would ship, for the cards that say so.
   const unreleasedIds = new Set(unreleased(snap, known).map(one => one.id))
@@ -439,13 +435,14 @@ export function drawPane(
 
   /**
    * How a card is laid out in `room` columns. Stacked, given `slots`, on one line: the title, then each
-   * piece in its slot so the rows line up. Else on one line when it all fits; else, in a board column, the
-   * title on one line and the details under it (every card of a column so, `isSplit`, when any needs it, so
-   * they line up); else one line with the title cut. Only the title and a long name are ever cut.
+   * piece in its slot so the rows line up; else on one line, the title cut when it all doesn't fit. In a
+   * board column side by side, a card of its own: the title on up to TITLE_LINES lines, then its details
+   * on a line under it. Only the title and a long name are ever cut.
    */
-  const cardLayout = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
+  const cardLayout = (item: Item, room: number, isStacked: boolean, slots?: Slots) => {
     const { tag, ticks, pr, prTag, wait, who: fullWho, stale, late, ship, news } = piecesOf(item)
-    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + late.length + ship.length + news.length
+    // (⌛ takes two cells.)
+    const others = tag.length + ticks.length + prTag.length + wait.length + stale.length + (stale ? 1 : 0) + late.length + ship.length + news.length
     const head = item.id.length + 1
     const cutWho = (whoRoom: number) => (fullWho.length <= whoRoom ? fullWho : whoRoom >= 5 ? `${fullWho.slice(0, whoRoom - 1)}…` : '')
     const cutTitle = (titleRoom: number) => (item.title.length <= titleRoom ? item.title : `${item.title.slice(0, Math.max(1, titleRoom - 1))}…`)
@@ -460,26 +457,39 @@ export function drawPane(
         stale: fit(stale, 'stale'), late: fit(late, 'late'), ship: fit(ship, 'ship'), news: fit(news, 'news'), title, pad: room - lead - title.length - slotted, rows: 1,
       }
     }
-    if (!isSplit && head + item.title.length + others + fullWho.length <= room) {
+    if (!isStacked) {
+      // The title wrapped at words under itself, past the id; the last line it gets cut short.
+      const lines = wrap(item.title, Math.max(4, room - head)).slice(0, TITLE_LINES + 1)
+      const kept = lines.slice(0, TITLE_LINES)
+      if (lines.length > TITLE_LINES) kept[TITLE_LINES - 1] = cellOf(`${kept[TITLE_LINES - 1]} ${lines[TITLE_LINES]}`, room - head).trimEnd()
+      // The details sit under the title, past the id too.
+      const who = cutWho(Math.max(0, room - head - others + 1))
+      const details = others + who.length - 1
+      return {
+        ...bits, title: kept.join(`\n${'\u00a0'.repeat(head)}`), who, pad: 0, isSplit: details > 0,
+        rows: kept.length + (details > 0 ? Math.ceil(details / Math.max(1, room - head)) : 0),
+      }
+    }
+    // Too narrow for a title beside its details, a line keeps the title alone.
+    if (room - head - others < 6 && head + item.title.length + others + fullWho.length > room)
+      return { tag: '', ticks: '', pr: undefined, prTag: '', wait: '', stale: '', late: '', ship: '', news: '', title: cutTitle(room - head), who: '', pad: 0, rows: 1 }
+    if (head + item.title.length + others + fullWho.length <= room) {
       const pad = isStacked ? room - head - item.title.length - others - fullWho.length : 0
       return { ...bits, title: item.title, who: fullWho, pad, rows: 1 }
     }
-    if (isStacked) {
-      // A readable title comes first: a long name is cut short to make room for it.
-      const who = cutWho(Math.max(0, Math.min(18, room - head - others - 24)))
-      const title = cutTitle(room - head - others - who.length)
-      return { ...bits, title, who, pad: Math.max(0, room - head - title.length - others - who.length), rows: 1 }
-    }
-    // A board column: the title, then its details on a line of their own under it.
-    return { ...bits, title: cutTitle(room - head), who: cutWho(room - others + 1), pad: 0, rows: 2 }
+    // A readable title comes first: a long name is cut short to make room for it.
+    const who = cutWho(Math.max(0, Math.min(18, room - head - others - 24)))
+    const title = cutTitle(room - head - others - who.length)
+    return { ...bits, title, who, pad: Math.max(0, room - head - title.length - others - who.length), rows: 1 }
   }
-  const card = (item: Item, room: number, isStacked: boolean, isSplit = false, slots?: Slots) => {
-    const laid = cardLayout(item, room, isStacked, isSplit, slots)
-    const { title, tag, ticks, pr, prTag, wait, who, stale, late, ship, news, pad, rows } = laid
+  const card = (item: Item, room: number, isStacked: boolean, slots?: Slots) => {
+    const laid = cardLayout(item, room, isStacked, slots)
+    const { title, tag, ticks, pr, prTag, wait, who, stale, late, ship, news, pad } = laid
+    const isSplit = 'isSplit' in laid && laid.isSplit
     const id = 'id' in laid && laid.id ? laid.id : item.id
     const isOpen = pick === item.id
     // A detail line leads with its first detail, its space dropped, under the title.
-    let isFirst = rows === 2
+    let isFirst = isSplit
     const detail = (text: string) => {
       if (!text || !isFirst) return text
       isFirst = false
@@ -493,7 +503,7 @@ export function drawPane(
         <Text bold={isOpen} dimColor={isDropped(item)} strikethrough={isDropped(item)}>
           {title}
         </Text>
-        {rows === 2 ? '\n' : ' '.repeat(pad)}
+        {isSplit ? `\n${'\u00a0'.repeat(item.id.length + 1)}` : ' '.repeat(pad)}
         <Text color={PRIORITY_COLOR[item.priority]} bold={item.priority === 'p0'}>
           {detail(tag)}
         </Text>
@@ -782,24 +792,18 @@ export function drawPane(
     width, COLUMN_GAP)
   // Side by side, each column is framed: its border and padding take FRAME of its width.
   const roomOf = (status: Status) => (isWide ? widths[status] - FRAME : width - 2)
-  // Side by side, a narrow column whose cards don't all fit on one line gives every card two, so they line
-  // up; a column wide enough to read a title in keeps cards to one line, the title cut.
-  const SPLIT_BELOW = 44
-  const isSplit = Object.fromEntries(STATUSES.map(status =>
-    [status, isWide && roomOf(status) < SPLIT_BELOW && columns[status].some(task => cardLayout(task, roomOf(status), false).rows === 2)])) as Record<Status, boolean>
   // Docked, the board fits the rows above the card; side by side, each heading has its rule under it.
   // Done shows the recent (the last week's, at least a few) unless opened; the rest are a press away.
   const recentDone = columns.done.filter(task => now - Date.parse(task.updated_at) < RECENT_DAYS * 86_400_000).length
   const doneClosed = Math.min(columns.done.length, Math.max(DONE_MIN, Math.min(recentDone, DONE_MAX)))
   const doneShown = isDoneOpen ? columns.done.length : doneClosed
-  // A wide column's cards line their details up in slots, as the stacked board's do.
-  const wideSlots = Object.fromEntries(STATUSES.map(status =>
-    [status, isWide && roomOf(status) >= SPLIT_BELOW ? slotsOf(columns[status].slice(0, status === 'done' ? doneShown : 15)) : undefined])) as Record<Status, Slots | undefined>
-  const heights = Object.fromEntries(STATUSES.map(status =>
+  // Each card's rows; side by side and short of rows, on one line each (`isOneLine`).
+  const heightsOf = (isOneLine: boolean) => Object.fromEntries(STATUSES.map(status =>
     [status, columns[status].slice(0, status === 'done' ? doneShown : undefined)
-      .map(task => cardLayout(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status]).rows)
+      .map(task => cardLayout(task, roomOf(status), !isWide || isOneLine).rows)
       // Done cut to its recent cards still has its "…N older" row to fit: a card too tall to place stands for it.
       .concat(status === 'done' && columns.done.length > doneShown ? [Infinity] : [])])) as Record<Status, number[]>
+  const heights = heightsOf(false)
   // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
   const budget = !isDocked && isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
@@ -835,8 +839,8 @@ export function drawPane(
         const column = columns[status]
         const capped = column.slice(0, caps[status])
         // Side by side and scrolling, each column shows the cards from the scrolled-to one that fit.
-        const from = isWide && canScroll ? Math.min(wideFrom, Math.max(0, capped.length - wideCap(status))) : 0
-        const shown = isWide && canScroll ? capped.slice(from, from + wideCap(status)) : capped
+        const from = isWide && canScroll ? Math.min(wideFrom, lastFrom(status, capped.length)) : 0
+        const shown = isWide && canScroll ? capped.slice(from, from + cardsFrom(status, from)) : capped
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
             {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1 } : {})}>
@@ -847,7 +851,7 @@ export function drawPane(
               </Box>
             ) : heading(status)}
             {from > 0 && <Text key={`col-${status}-above`} dimColor>↑ {from} above</Text>}
-            {shown.map(task => card(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status] ?? stackSlots))}
+            {shown.map(task => card(task, roomOf(status), !isWide || isOneLine, stackSlots))}
             {column.length > from + shown.length && (
               <Text dimColor>
                 …{column.length - from - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
@@ -1563,9 +1567,24 @@ export function drawPane(
       : Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
   // Side by side, scrolling moves every column a card at a time: as many as fit under the headings.
   // (Under each heading, inside the frame's two borders, with a line for each mark.)
-  const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 5) / (isSplit[status] ? 2 : 1)))
+  const wideRoom = viewSpace - 5
+  // Too short for two cards of three rows, a side-by-side column puts each card on a line.
+  const isOneLine = isWide && wideRoom < 6
+  const wideHeights = isOneLine ? heightsOf(true) : heights
+  // The cards of a column from the `from`th that fit (one at least), and the first `from` that shows its last.
+  const cardsFrom = (status: Status, from: number) => {
+    let n = 0
+    for (let used = 0; from + n < wideHeights[status].length && wideHeights[status][from + n]! !== Infinity && (n === 0 || used + wideHeights[status][from + n]! <= wideRoom); n++)
+      used += wideHeights[status][from + n]!
+    return Math.max(1, n)
+  }
+  const lastFrom = (status: Status, count: number) => {
+    let from = count
+    for (let used = 0; from > 0 && (from === count || used + (wideHeights[status][from - 1] ?? 1) <= wideRoom); from--) used += wideHeights[status][from - 1] ?? 1
+    return Math.max(0, Math.min(from, count - 1))
+  }
   const wideMax = isWide && canScroll
-    ? Math.max(0, ...STATUSES.map(status => Math.min(columns[status].length, caps[status]) - wideCap(status)))
+    ? Math.max(0, ...STATUSES.map(status => lastFrom(status, Math.min(columns[status].length, caps[status]))))
     : 0
   const wideFrom = Math.min(state.viewScrolledTo, wideMax)
   const fixed = (isCompact ? 0 : headerRows) + (isDocked ? overList - headerRows + topRows + DIVIDER_ROWS : 0) + cardChrome + footerRows + 1

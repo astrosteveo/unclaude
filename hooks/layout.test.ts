@@ -109,6 +109,7 @@ test('every view fits the pane at narrow and wide widths, with and without a doc
         }
         await ui.press({ key: target })
         const docked = paintPane(await ui.drawn(), width)
+        if (SHOW === `${view} + card ${width}x${height}`) found.push(...docked.lines.map(line => `|${line}`))
         for (const problem of docked.problems) found.push(`${view} + card ${width}x${height}: ${problem}`)
         await ui.press({ key: 'close' })
       }
@@ -123,9 +124,9 @@ test('side by side, an empty column takes its heading and the columns with cards
   expect(Object.values(widths).reduce((sum, one) => sum + one, 0) + 8).toBeLessThanOrEqual(120)
 })
 
-test('wide board cards: one line where all fit, else a title line and a details line for every card of the column', async ($, on) => {
+test('wide board cards: the title on up to two lines, its details on a line under it; one line when docked short', async ($, on) => {
   const snap = bigRoadmap()
-  // Two short tasks in progress fit on one line; Done holds long titles, so all its cards take two.
+  // A short task with no details takes a line; one with details a line more; Done's long titles wrap.
   snap.items = snap.items.filter(one => one.kind !== 'task' || one.status === 'done')
   snap.items.push(item('T90', { status: 'in_progress', title: 'Short' }), item('T91', { status: 'in_progress', title: 'Tiny', assignee: 'claude' }))
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
@@ -146,11 +147,11 @@ test('wide board cards: one line where all fit, else a title line and a details 
   const at = heads.indexOf('p: ◐ In progress')
   // (The cards start right under the headings: the frame's border is above them.)
   const progress = lines.slice(lines.indexOf(heads) + 1).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
-  expect(progress.slice(0, 2)).toEqual(['T90 Short', 'T91 Tiny @claude'])
+  expect(progress.slice(0, 3)).toEqual(['T90 Short', 'T91 Tiny', '@claude'])
   const done = lines.slice(lines.indexOf(heads) + 1, lines.indexOf(heads) + 5).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
   expect(done[0]).toMatch(/^T\d+ Make the board/)
   expect(done[1]).not.toMatch(/^T\d+/)
-  expect(done[2]).toMatch(/^T\d+ Make the board/)
+  expect(done.slice(2).some(line => /^T\d+ Make the board/.test(line))).toBe(true)
   // The open card's id stands out.
   await ui.press({ key: 'card-T90' })
   const open = await ui.find({ key: 'card-T90' })
@@ -212,7 +213,7 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
     expect(await ui.find({ type: 'Text', text: '…27 older' })).toBeDefined()
     // Opened, Done takes the rows the pane has left: some narrow, where the columns stack, more side by side.
     await ui.press({ key: 'done-toggle' })
-    expect((await doneCards()).length).toBeGreaterThan(width > 100 ? 20 : 5)
+    expect((await doneCards()).length).toBeGreaterThan(width > 100 ? 12 : 5)
     expect(paintPane(await ui.drawn(), width).problems).toEqual([])
     expect(await ui.find({ type: 'Text', text: '· recent only' })).toBeDefined()
     await ui.press({ key: 'done-toggle' })
