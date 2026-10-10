@@ -234,7 +234,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     const { lines } = paintPane(await ui.drawn(), width)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Board +v: +Plan +Timeline +Inbox 3 +Releases +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Board +v: +Plan +Timeline +Inbox \d+ +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -355,7 +355,7 @@ test('inbox: i files a line from any tab; the Inbox tab lists what waits, with w
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
-  expect((await ui.find({ key: 'tab-inbox' }))?.text).toContain('Inbox 3')
+  expect((await ui.find({ key: 'tab-inbox' }))?.text).toMatch(/Inbox \d+/)
   expect((await ui.find({ key: 'file' }))?.props.hotkey).toBe('i')
   await ui.press({ key: 'file' })
   ran.length = 0
@@ -565,5 +565,47 @@ test('triage in the Inbox: → Task opens the form with the title filled in and 
   ran.length = 0
   await ui.input({ key: 'triage-input', text: 'not worth it' })
   expect(ran.some(one => one.includes("UPDATE inbox SET state='dropped', became=NULL, reason='not worth it' WHERE id='I3'"))).toBe(true)
+  await ui.unmount()
+})
+
+test('needs you: work in review, unread comments, stale claims and late work head the Inbox, each once, opening its card; they agree with the board', async ($, on) => {
+  const items = [
+    item('E1', { title: 'Handed', assignee: 'claude' }),
+    item('T1', { parent: 'E1', status: 'done' }),
+    item('T2', { status: 'review', title: 'Reviewed' }),
+    item('T3', { status: 'in_progress', assignee: 'explore:x', lease_at: '2026-10-09T08:00:00Z', title: 'Quiet' }),
+    item('T4', { due: '2026-10-01', title: 'Overdue' }),
+    item('T5', { title: 'Talked about' }),
+  ]
+  const activity = [
+    { id: 1, item_id: 'T5', author: 'claude', type: 'comment', body: 'a question', at: '2026-10-09T10:00:00Z' },
+    { id: 2, item_id: 'T2', author: 'claude', type: 'comment', body: 'ready', at: '2026-10-09T10:00:00Z' },
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity, seen: {}, inbox: [] }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  // The Board's Review column holds T2 and the handed E1; the header counts 2 unread.
+  const reviewColumn = (await ui.find({ key: 'col-review-head' }))?.text
+  expect(reviewColumn).toContain('Review 2')
+  expect(paintPane(await ui.drawn(), 100).lines[0]).toContain('● 2 unread')
+  expect((await ui.find({ key: 'tab-inbox' }))?.text).toContain('Inbox 5')
+  await ui.press({ key: 'tab-inbox' })
+  const needs = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('need-')).map(one => `${String(one.key).slice(5)}: ${one.text}`)
+  expect(needs).toEqual([
+    'E1: review  E1 Handed',
+    'T2: review · 1 unread  T2 Reviewed',
+    'T3: stale claim  T3 Quiet',
+    'T4: late  T4 Overdue',
+    'T5: 1 unread  T5 Talked about',
+  ])
+  await ui.press({ key: 'need-T4' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
   await ui.unmount()
 })

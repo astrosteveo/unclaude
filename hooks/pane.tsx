@@ -455,8 +455,21 @@ export function drawPane(
   const bar = progressBar(doneCount, taskCount, PROGRESS_BAR)
   // What waits in the inbox to be sorted.
   const waiting = (snap.inbox ?? []).filter(one => one.state === 'open')
+  // What waits on the person's decision, each item once with every reason: work in review (as the Board's
+  // Review column has it), comments they haven't read, claims gone quiet, and work past its date.
+  const needs = items
+    .map(item => {
+      const why: string[] = []
+      if ((item.kind === 'task' && item.status === 'review') || (item.kind !== 'task' && isAgent(item.assignee) && statusOf(items, item) === 'review')) why.push('review')
+      const notRead = unread(snap, item.id, USER).length
+      if (notRead) why.push(`${notRead} unread`)
+      if (isStale(item, now)) why.push('stale claim')
+      if (isLate(items, item, now)) why.push('late')
+      return { item, why }
+    })
+    .filter(one => one.why.length > 0)
   // A tab names what waits in it: the inbox its open items.
-  const tabLabel = (view: View, label: string) => (view === 'inbox' && waiting.length ? `${label} ${waiting.length}` : label)
+  const tabLabel = (view: View, label: string) => (view === 'inbox' && waiting.length + needs.length ? `${label} ${waiting.length + needs.length}` : label)
   const header = (
     <Box flexDirection="row" columnGap={3} flexWrap="wrap">
       <Box key="views" flexDirection="row" columnGap={2}>
@@ -520,6 +533,22 @@ export function drawPane(
   )
   const inboxView = (
     <Box flexDirection="column">
+      {needs.length > 0 && (
+        <Box key="needs" flexDirection="column" marginBottom={1}>
+          <Text bold>Needs you  <Text dimColor>{needs.length}</Text></Text>
+          {needs.map(({ item, why }) => {
+            const reasons = why.join(' · ')
+            const room = Math.max(8, width - item.id.length - 1 - reasons.length - 2)
+            return (
+              <Button key={`need-${item.id}`} plain onPress={choose(item.id)}>
+                <Text color={why.includes('late') ? 'red' : why.includes('review') ? 'blue' : 'magenta'}>{reasons}</Text>{'  '}
+                <Text dimColor>{item.id}</Text> {item.title.length > room ? `${item.title.slice(0, room - 1)}…` : item.title}
+              </Button>
+            )
+          })}
+        </Box>
+      )}
+      {needs.length > 0 && waiting.length > 0 && <Text bold>To sort  <Text dimColor>{waiting.length}</Text></Text>}
       {waiting.length === 0 && <Text dimColor>The inbox is empty. Press i to file something to sort later.</Text>}
       {waiting.map(one => {
         const by = ` — ${one.author}, ${one.at.slice(5, 10)}`
