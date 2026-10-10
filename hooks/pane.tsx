@@ -11,7 +11,8 @@ export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yello
 // Urgent priorities stand out on a card; the rest of the marks read dim.
 export const PRIORITY_COLOR: Record<Priority, string | undefined> = { p0: 'red', p1: 'yellow', p2: undefined, p3: 'gray' }
 // The views, in the order `v` steps through them.
-const VIEWS: [View, string][] = [['board', 'Board'], ['plan', 'Plan'], ['timeline', 'Timeline'], ['inbox', 'Inbox'], ['releases', 'Releases']]
+// The tabs in the order a piece of work lives through them: filed, planned, scheduled, done, shipped.
+const VIEWS: [View, string][] = [['inbox', 'Inbox'], ['plan', 'Plan'], ['roadmap', 'Roadmap'], ['board', 'Board'], ['releases', 'Releases']]
 // A pull request's checks, as marked next to it.
 const CHECKS: Record<Checks, string> = { none: '', pending: '… checks running', pass: '✓ checks', fail: '✗ checks failing' }
 const CHECKS_COLOR: Record<Checks, string | undefined> = { none: undefined, pending: 'yellow', pass: 'green', fail: 'red' }
@@ -549,7 +550,7 @@ export function drawPane(
         </Box>
       )}
       {needs.length > 0 && waiting.length > 0 && <Text bold>To sort  <Text dimColor>{waiting.length}</Text></Text>}
-      {waiting.length === 0 && <Text dimColor>The inbox is empty. Press i to file something to sort later.</Text>}
+      {waiting.length === 0 && <Text dimColor>Nothing filed to sort. Press i to file something for later.</Text>}
       {waiting.map(one => {
         const by = ` — ${one.author}, ${one.at.slice(5, 10)}`
         const room = Math.max(8, width - one.id.length - 1 - by.length)
@@ -1356,7 +1357,7 @@ export function drawPane(
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
     ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', mode === 'timeline' && isAxis ? 'w zoom' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', mode === 'roadmap' && isAxis ? 'w zoom' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
   ).filter(Boolean)
   const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
   const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
@@ -1618,12 +1619,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'timeline' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
+                {mode === 'board' ? board : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'timeline' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
+            panel ?? (mode === 'board' ? board : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
           )
         )}
         {items.length > 0 && !trouble && (

@@ -75,7 +75,7 @@ const fake = (stdin: string | undefined, snap: Snapshot) => {
 const VIEWS = [
   ['board', 'tab-board', 'card-T5'],
   ['plan', 'tab-plan', 'row-T5'],
-  ['timeline', 'tab-timeline', 'time-E2'],
+  ['roadmap', 'tab-roadmap', 'time-E2'],
   ['inbox', 'tab-inbox', null],
   ['releases', 'tab-releases', null],
 ] as const
@@ -215,9 +215,9 @@ test('Done shows the last week\'s work, a few at least; the rest open from its h
 test('the header: views as tabs, a progress bar, actions apart; one row wide, two at 84; hints whole, least useful dropped', async ($, on) => {
   expect(progressBar(3, 4, 8)).toEqual({ done: '██████', left: '░░' })
   expect(progressBar(0, 0, 8)).toEqual({ done: '', left: '░░░░░░░░' })
-  const hints = ['Enter opens', 'Tab/↑↓ move', 'v plan', 't p b r d jump to a column', 'n new', 'i file to the inbox', 'f filter']
+  const hints = ['Enter opens', 'Tab/↑↓ move', 'v releases', 't p b r d jump to a column', 'n new', 'i file to the inbox', 'f filter']
   expect(fitHints(hints, 200, 1)).toEqual(hints)
-  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v plan'])
+  expect(fitHints(hints, 40, 1)).toEqual(['Enter opens', 'Tab/↑↓ move', 'v releases'])
   expect(fitHints(hints, 40, 2)).toEqual(hints.slice(0, 5))
 
   const snap = bigRoadmap()
@@ -234,7 +234,7 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
     const { lines } = paintPane(await ui.drawn(), width)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
     expect(top).toBe(rows)
-    expect(lines[0]).toMatch(/Board +v: +Plan +Timeline +Inbox \d+ +Releases +█+░* 30\/60 done +● 7 unread/)
+    expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +v: +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
     expect(JSON.stringify(await ui.find({ key: 'tab-board' }))).toContain('"inverse":true')
@@ -287,7 +287,7 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   expect(await rowsOf('row-')).toContain('T1')
   await ui.press({ key: 'close' })
 
-  await ui.press({ key: 'tab-timeline' })
+  await ui.press({ key: 'tab-roadmap' })
   expect(await rowsOf('time-')).toEqual(['M2', 'E2', 'M3', 'E3', 'M1'])
   // Only milestones fold here, where epics have no rows under them.
   expect(await ui.find({ key: 'fold-E2', type: 'Button' })).toBeUndefined()
@@ -467,7 +467,7 @@ test('roadmap on a time axis: epics as bars filled by progress, milestones as ma
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
-  await ui.press({ key: 'tab-timeline' })
+  await ui.press({ key: 'tab-roadmap' })
   const { lines, problems } = paintPane(await ui.drawn(), 140)
   expect(problems).toEqual([])
   const row = (id: string) => lines.find(line => line.replace(/^\u00a0+/, '').startsWith(`${id} `))!
@@ -516,7 +516,7 @@ test('releases on the roadmap: a tick at each release\'s date, named for its ver
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
   })
-  await ui.press({ key: 'tab-timeline' })
+  await ui.press({ key: 'tab-roadmap' })
   const { lines, problems } = paintPane(await ui.drawn(), 140)
   expect(problems).toEqual([])
   const ticks = lines.find(line => line.startsWith('Releases'))!

@@ -130,7 +130,7 @@ export type InboxItem = { id: string; title: string; body: string | null; author
 /** A version that shipped: when, from which tag and release PR, its notes, and the tasks it carried. */
 export type Release = { version: string; tag: string | null; at: string; pr: number | null; notes: string; tasks: { id: string; note: string; section: Section | null }[] }
 
-export type View = 'board' | 'plan' | 'timeline' | 'inbox' | 'releases'
+export type View = 'inbox' | 'plan' | 'roadmap' | 'board' | 'releases'
 
 /** The new-item form's choices so far; the title is typed last and submits it. */
 export type Draft = {

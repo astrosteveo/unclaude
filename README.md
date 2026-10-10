@@ -23,11 +23,9 @@ Pick a scope when asked (user scope makes it available in every project). `#stab
 
 Ask Claude to plan something, for example *"plan the v2 release as milestones, epics and tasks, with a checklist on each task"*, and then:
 
-- **`/roadmap`** opens the board (see [The board](#the-board) below). Columns are Todo, In progress, Blocked, Review and Done; the Plan tab shows milestones, the epics and tasks that target them, and what's unplanned.
-- **Keys:** `t` `p` `b` `r` `d` jump to a column, Enter opens a card, `1`–`5` set its status, `e` edits it, `x` closes it, `n` adds an item, `f` filters, `i` files something to the inbox, and `v` steps through the tabs. Hand to Claude, Assign me and Unassign have no keys on purpose: Tab to them and press Enter (Hand to Claude then asks you to confirm).
-- **Timeline** (fourth tab) lists milestones by due date, each followed by its epics, with the dates, progress bars and counts lined up in columns and how each stands: *in 11 days*, or *4 days late, 1 open* in red. Tasks past their due date (their own or one above them) are marked `⚠late` on the board, and Claude's brief lists what is overdue.
-- **Plan** shows the hierarchy. Work is epic > task > checklist, and a **milestone is a target**: epics and tasks point at one (a task takes its epic's unless it has its own), so an epic can span milestones and a task can be pulled into another. Milestones come first, each with the epics and tasks that target it, then **Unplanned**: epics and tasks no milestone holds. There, a todo task nobody holds has a priority picker, a `→ Claude` button and a ☐ to pick it for running several at once. Finished loose tasks fold into one line at the foot.
-- **Inbox:** `i` (or `/roadmap inbox <text>`) files anything to sort later: an idea, a bug, a "we should…". Claude files what it notices but wasn't asked to do. The Inbox tab lists what waits, with who filed it.
+- **`/roadmap`** opens the pane: five tabs, one for each stage a piece of work goes through (see [The five tabs](#the-five-tabs) below). It opens on the Board.
+- **Keys:** `v` steps through the tabs; `t` `p` `b` `r` `d` jump to a Board column; Enter opens a card, `1`–`5` set its status, `e` edits it, `x` closes it; `n` adds an item, `i` files something to the inbox, `f` filters, `z` undoes, `w` zooms the Roadmap. Hand to Claude, Assign me and Unassign have no keys on purpose: Tab to them and press Enter (Hand to Claude then asks you to confirm).
+- **The hierarchy:** work is epic > task > checklist. A **milestone is a target**, not a container: epics and tasks point at one (a task takes its epic's unless it has its own), so an epic can span milestones and a task can be pulled into an earlier or later one. A **release** is what `ship` records: the version, and the tasks it carried.
 - **New items:** `n` opens a form (kind, priority, type, where it goes, then the title; Enter creates it). On an open epic or milestone, `n` adds under it.
 - **Edit** a card with `e`: Tab into its title, description (one line; ask Claude for longer text), due date, labels, priority, type and parent, and press Enter on a field to save it. On a task, edit mode also lists the checklist (reword an entry, or empty it to drop it), an Add criterion field, and Blocked by (task ids, comma-separated). `e` again leaves edit mode.
 - **Filter** with `f`: type words to search, or narrow with `@claude` (`@none` for unassigned), `#label`, `p0`–`p3`, `bug`/`feature`/`chore`, a status (`todo`, `wip`, `blocked`, `review`, `done`) `under:E3` or `m:M2` (what targets a milestone). The filter applies to the board and the plan; Clear removes it.
@@ -41,48 +39,76 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 - **Run tasks at once:** tick rows in Plan's Unplanned group (☐) and press *Run N at once…*, or press *Run its tasks at once…* on an epic or milestone. Each task gets its own git worktree (`.claude/worktrees/<branch>`), on its own branch named for the task, made from the main line, and its own agent, started by Claude. Agents claim their tasks, commit, open their PRs and set them done with release notes, side by side. A task waiting on another starts by itself once that one is done (approved). Up to four run at once; the rest wait their turn.
 - **The band** above the prompt shows what an agent is working on (with several at once, each one's task and checklist). Press it to open that task.
 
-### The board
+### The five tabs
 
-The board lays itself out for the width of its pane.
-
-In a **narrow pane** (under 100 columns) the columns stack. Empty columns fold into one line at the top, and each card's details (priority and type, checklist, assignee, unread comments) line up down the list, so the titles read first:
+**Inbox** — capture, and what waits on you. *Needs you* comes first: work in review, comments you haven't read, claims gone quiet and late work, each a press from its card. Under it, what was filed to sort: `i`, `/roadmap inbox <text>`, or Claude filing what it notices but wasn't asked to do. Each item becomes a task or an epic (the new-item form opens with its title), joins existing work (*Into…*: `T12`, or `T12 checklist` for an entry), or is dropped with a reason. Ask Claude to triage the inbox and it proposes a sort for you to agree before it does it.
 
 ```
- Board   Tree  v:  Backlog   Timeline   ███████░ 83/86 done  ● 2 unread
-[ Mark all read ] [ Filter ] [ Undo ] [ New ]
-b: ✗ Blocked 0 · r: ◉ Review 0
+ Inbox 4  v:  Plan   Roadmap   Board   Releases   ███████░ 96/110 done  ● 2 unread
+Needs you  2
+review  E21 Search
+1 unread  T118 Sort the board by due date
+To sort  2
+I7 Export the roadmap to CSV — user, 10-10
+[ → Task ] [ → Epic ] [ Into… ] [ Drop… ]
+I8 Board flickers on resize — claude, 10-10
+  Seen at 84 columns, while a card is docked.
+[ → Task ] [ → Epic ] [ Into… ] [ Drop… ]
+```
 
-t: ○ Todo 2
-T96 README: the board at narrow and wide widths, folding…    ☑1/3
-T27 Official 1.0.0 release: tag and publish on GitHub        ☑0/5 @user
+**Plan** — the hierarchy, open work first. Milestones by date with their progress, each with the epics and tasks that target it; then **Unplanned**, what no milestone holds. There, a todo task nobody holds has a priority picker, `→ Claude`, and a ☐ to pick several to run at once. Finished milestones and epics fold to one line (`▸` opens one: Tab to it and press Enter, or click it), and finished loose tasks fold into one line at the foot. A filter unfolds everything; whatever holds the open card stays unfolded. Done tasks say where they went: `v0.6.3`, or `unreleased`.
+
+```
+▾ ◐ M5 Project lifecycle: inbox to release  13/14  @claude
+  ▾ ◐ E19 Roadmap: a time axis for milestones, epics and releases  2/3
+      ◐ T110 Releases on the roadmap  @claude
+      ● T108 Start dates for milestones and epics, given or derived  @claude
+▸ ● M4 v0.5 Agent-ready tracker  15/15  @claude
+Unplanned  1 for anyone to take
+  ☐ p2 ○ T120 Keyboard shortcut for Mark all read  [ → Claude ]
+▸ ● E16 Lean agent loop: fewer round trips and tokens per task  6/6  @claude
+▸ 29 finished tasks in no epic
+```
+
+**Roadmap** — when. In a wide pane, a time axis: each epic a bar from its start (given, or its first claim) to its due date (or its milestone's), filled as far as its tasks are done; each milestone a ◆ on its date; releases as ▲ ticks; a line for today; late work in red. `w` zooms in around today. In a narrow pane, the same as a list: dates, progress and how each stands (*in 11 days*, *4 days late, 1 open*) in columns. Tasks past their due date are marked `⚠late` on the board, and Claude's brief lists what is overdue.
+
+```
+w: zoom: all                 09-28      10-05      10-12       10-19      10-26      11-02      11-09
+Releases                     ▲0.6.0                ▲0.6.3 +2
+M5 Project lifecycle…                              │                                         ◆
+  E19 Roadmap: a time axis              ███████████│████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  E20 Inbox: capture anyth…                  ██████│███████████████████████░░░░░░░░░░░░░░░░░
+No dates yet: E22
+```
+
+**Board** — in flight, by status. In a **narrow pane** (under 100 columns) the columns stack: empty ones fold into one line, and each card's details (priority and type, checklist, assignee, unread comments) line up down the list. In a **wide pane** it's a Kanban board: an empty column shrinks to its heading, the others share the width, and a card takes one line, or its title and then its details (every card in that column, so the column lines up). **Done** shows what was finished in the last week (three to eight tasks); *· show all* lists the rest. An open card sits under the board, with its id highlighted.
+
+```
+t: ○ Todo 0 · b: ✗ Blocked 0 · r: ◉ Review 0
 
 p: ◐ In progress 1
-T95 Heavier epic in the token bench                 chore    ☑0/3 @claude
+T114 Tabs in lifecycle order: Inbox · Plan · Roadmap · Board · Rel… ☑0/3 @claude
 
-d: ● Done 83 · show all
-T88 Tree and timeline open on what's still going on          ☑4/4 @claude
-T87 Header and key hints that fit: views as tabs, a…         ☑4/4 @claude ● 1
-…80 older
-Enter opens · Tab/↑↓ move · v tree · t p b r d jump to a column · n new · f filter
+d: ● Done 110 · show all
+T113 Needs you: reviews, unread comments, stale and late work at t… ☑3/3 @claude ● 1
+T112 Triage: an item becomes a task or epic, joins existing work, … ☑4/4 @claude
+…102 older
 ```
 
-In a **wide pane** it's a Kanban board. An empty column shrinks to its heading, the others share the width, and a card takes one line, or its title and then its details when the column is narrow. In a column where any card needs two lines, every card gets two, so the column lines up:
+**Releases** — what shipped. *Unreleased* lists the notes the next release would carry, by section, with *Release…*: it suggests the next version (a patch when everything waiting is a fix) and runs `ship`, which opens the release PR. Once you've merged it, *Tag and publish* tags it, publishes the GitHub release and moves `stable`. Below, every version with its date, tasks and release PR, the newest open and the rest folded, the one installs get marked `stable ●`.
 
 ```
- Board   Tree  v:  Backlog   Timeline   ███████░ 83/86 done  ● 2 unread   [ Mark all read ] [ Filter ] [ New ]
-t: ○ Todo 2                  p: ◐ In progress 1           b: ✗ Blocked 0  r: ◉ Review 0  d: ● Done 83 · show all
-───────────────────────────  ───────────────────────────  ──────────────  ─────────────  ───────────────────────────
-T96 README: the board at n…  T95 Heavier epic in the t…                                  T88 Tree and timeline open…
-☑1/3                         chore ☑0/3 @claude                                          ☑4/4 @claude
-T27 Official 1.0.0 release…                                                              T87 Header and key hints t…
-☑0/5 @user                                                                               ☑4/4 @claude ● 1
-                                                                                         …80 older
+Unreleased 2 notes merged since the last release [ Release… ]
+Added
+- An Inbox: file anything to sort later, with i on the board, /roadmap inbox <text>… (T111)
+- A task can be closed as won't do, with a reason: kept with its history, but not c… (T100)
+▾ v0.6.3  2026-10-09  1 task  PR #33  stable ●
+  Changed
+  - Installing the mod gets the last release, not whatever has merged since.
+▸ v0.6.2  2026-10-09  1 task  PR #31
 ```
 
-- **Done** shows what was finished in the last week (at least three tasks, at most eight). *· show all* beside its heading lists the rest, as many as the pane has room for; *· recent only* goes back.
-- **The header:** the views read as tabs, the one showing highlighted, beside a progress bar of tasks done and the unread count; the actions sit in a group of their own. It's one row on a wide pane and two on a narrow one. The key hints at the bottom fit the width, the most useful first.
-- **An open card** sits under the board (the board keeps the top part of the pane), with its id highlighted on the board.
-- **Plan and Timeline** lead with open work. Finished milestones and epics are folded to one line: the `▸` before one opens it (Tab to it and press Enter, or click it), and `▾` folds it again, open ones too. A filter unfolds everything, so every match shows, and whatever holds the open card stays unfolded.
+The header reads as tabs (the one showing highlighted, a count on Inbox) beside a progress bar and the unread count, with the actions grouped apart: one row on a wide pane, two on a narrow one. The key hints at the bottom fit the width, the most useful first.
 
 What Claude does with it:
 
@@ -94,9 +120,10 @@ What Claude does with it:
 - Plans a whole breakdown in one call (`plan`): milestones, epics and tasks nested as a tree, with checklists, labels and dependencies between the new tasks. The tree is checked in full before anything is written.
 - Searches with `find`: by status, assignee (`none` for unassigned), priority, type, labels, a subtree (`under`) or words in titles, descriptions and comments.
 - Uses `next` to pick up the next task that's ready to start, highest priority first.
+- Files what it notices but wasn't asked to do to the inbox (`file`), and sorts the inbox when you ask (`triage`): it proposes what each item becomes, and acts once you agree.
 - Works on one branch per unit you hand over, named after it (`e9-agent-coordination`, or `t47-no-stray-hand-offs` for a task on its own). When the unit goes to Review, Claude is told to push the branch and open its pull request, titled with the unit's id, with a body listing its tasks and checklists (the `pr` action gives the branch, title and body).
 - Gives each task a release note when it sets it done: one line for the CHANGELOG (`note`), and its section (Added, Changed or Fixed; by default Fixed for a bug, Changed for a chore, Added otherwise), or `-` when the work needs no line. A done without one is refused until it has one. When you set a task done on the board, its card asks for the note too (or None needed, or Later). The notes go in the pull request's body, and the `changelog` action writes the notes of merged work into `CHANGELOG.md` under `[Unreleased]`, each in its section, skipping any already there.
-- Ships a release when you ask for one (`ship` with a version): it bumps `.claude-plugin/plugin.json` and `package.json` (those the project has), writes the release notes of merged work that aren't in the CHANGELOG yet under `[Unreleased]` (so running `changelog` first is optional), turns `[Unreleased]` into that version with today's date and links, and opens a PR on a `release-v<version>` branch. Once that PR has merged and you say so, `ship` again tags the merge, publishes the GitHub release from the version's notes, and moves the `stable` branch (what installs get) to it. Then it deletes the release branch, here and on origin. It refuses a version that isn't higher, and a first `1.0` unless you've asked for one.
+- Ships a release when you ask for one (`ship` with a version): it bumps `.claude-plugin/plugin.json` and `package.json` (those the project has), writes the release notes of merged work that aren't in the CHANGELOG yet under `[Unreleased]` (so running `changelog` first is optional), turns `[Unreleased]` into that version with today's date and links, and opens a PR on a `release-v<version>` branch. Once that PR has merged and you say so, `ship` again tags the merge, publishes the GitHub release from the version's notes, moves the `stable` branch (what installs get) to it, and records the release with the tasks it carried (shown on their cards as *shipped in vX*). Then it deletes the release branch, here and on origin. It refuses a version that isn't higher, and a first `1.0` unless you've asked for one.
 - Puts task ids in commit messages (`T12: ...`) and epic or milestone ids in PR titles and branches (`E9: ...`, `e9-agent-coordination`). Commits and PRs show up on the items they name.
 
 ## How it's stored

@@ -1253,7 +1253,7 @@ async function closeDetail($: EngineInterface, id: string) {
   await update($, editing, () => false)
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   const mode = await read($, view)
-  await focusOn($, mode === 'board' ? `card-${id}` : mode === 'timeline' ? `time-${id}` : `row-${id}`)
+  await focusOn($, mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`)
 }
 
 /** Opens an item in the detail panel, marking what is on it as read. */
