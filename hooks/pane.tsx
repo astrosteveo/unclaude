@@ -2,6 +2,7 @@ import type { Elements, EventOf, RenderChildren, RenderElement } from 'claude-co
 
 import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } from '../types'
 import * as db from './db'
+import { kids, paint } from './paint'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
   subtree, waitingOn, upOf, tasksIn, spanOf, targetOf, releaseOf, unreleased, shipNote, releasesOf, nextVersion, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
@@ -186,6 +187,8 @@ export type PaneState = {
   dropping: string | null
   /** How far the open card is scrolled, as asked. */
   scrolledTo: number
+  /** Where the tab showing is scrolled to, in rows from its top. */
+  viewScrolledTo: number
   /** The clock, for stale claims; 0 when it can't be read. */
   now: number
 }
@@ -283,7 +286,7 @@ export function wrap(text: string, width: number): string[] {
  */
 export function drawPane(
   els: Elements[keyof Elements], e: EventOf['ui.render'], state: PaneState, act: PaneActions,
-): { node: RenderElement; scrollMax: number } {
+): { node: RenderElement; scrollMax: number; viewScrollMax: number } {
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
@@ -309,6 +312,8 @@ export function drawPane(
   const bodyRows = (e.props as { scroll?: { bodyRows?: number } }).scroll?.bodyRows
   // An open card docks under the board when the pane has room for both; the board keeps the top part.
   const isDocked = Boolean(pick) && !isCompact && !draft && bodyRows !== undefined && bodyRows >= DOCK_MIN_ROWS
+  // A tab longer than the pane scrolls under the header (the wheel moves it), unless a card or form is up.
+  const canScroll = e.surface === 'terminal' && bodyRows !== undefined && !pick && !draft && !isCompact
   const topRows = isDocked ? Math.max(6, Math.floor(bodyRows! * DOCK_SHARE)) : Infinity
   // Pressing the open card again closes it.
   const choose = (id: string | null) => () => (id !== null && id === pick ? act.closeDetail(id) : act.open(id))
@@ -699,7 +704,7 @@ export function drawPane(
   const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
   const caps = budget !== Infinity
     ? columnCaps(heights, isWide ? budget - 1 : budget, isWide)
-    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : 15])) as Record<Status, number>)
+    : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : canScroll ? Infinity : 15])) as Record<Status, number>)
   // Stacked, the empty columns fold into one line, and every card's pieces sit in slots shared by the board.
   const empties = isWide ? [] : STATUSES.filter(status => columns[status].length === 0)
   const stackSlots = isWide ? undefined : slotsOf(STATUSES.flatMap(status => columns[status].slice(0, caps[status])))
@@ -717,7 +722,8 @@ export function drawPane(
       <Text dimColor>{isDoneOpen ? '· recent only' : '· show all'}</Text>
     </Button>
   )
-  const board = (
+  // Drawn once the room it has is known (see viewSpace).
+  const drawBoard = () => (
     <Box flexDirection={isWide ? 'row' : 'column'} gap={isWide ? COLUMN_GAP : isDocked ? 0 : 1}>
       {empties.length > 0 && (
         <Box key="col-empty" flexDirection="row" columnGap={1} flexWrap="wrap">
@@ -726,7 +732,10 @@ export function drawPane(
       )}
       {STATUSES.filter(status => !empties.includes(status)).map(status => {
         const column = columns[status]
-        const shown = column.slice(0, caps[status])
+        const capped = column.slice(0, caps[status])
+        // Side by side and scrolling, each column shows the cards from the scrolled-to one that fit.
+        const from = isWide && canScroll ? Math.min(wideFrom, Math.max(0, capped.length - wideCap(status))) : 0
+        const shown = isWide && canScroll ? capped.slice(from, from + wideCap(status)) : capped
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}>
             {status === 'done' && doneToggle ? (
@@ -736,10 +745,11 @@ export function drawPane(
               </Box>
             ) : heading(status)}
             {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
+            {from > 0 && <Text key={`col-${status}-above`} dimColor>↑ {from} above</Text>}
             {shown.map(task => card(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status] ?? stackSlots))}
-            {column.length > shown.length && (
+            {column.length > from + shown.length && (
               <Text dimColor>
-                …{column.length - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
+                …{column.length - from - shown.length} {status === 'done' && !isDoneOpen ? 'older' : 'more'}
               </Text>
             )}
           </Box>
@@ -1382,6 +1392,16 @@ export function drawPane(
   ).filter(Boolean)
   const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
   const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
+  // The rows a tab has under the header and above the hints, when it can scroll.
+  const viewSpace = canScroll
+    ? Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
+    : Infinity
+  // Side by side, scrolling moves every column a card at a time: as many as fit under the headings.
+  const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 4) / (isSplit[status] ? 2 : 1)))
+  const wideMax = isWide && canScroll
+    ? Math.max(0, ...STATUSES.map(status => Math.min(columns[status].length, caps[status]) - wideCap(status)))
+    : 0
+  const wideFrom = Math.min(state.viewScrolledTo, wideMax)
   const fixed = (isCompact ? 0 : headerRows) + (isDocked ? topRows : 0) + 2 + titleRows + barRows + prRows + (isCompact ? 0 : tall(info)) + footerRows + 1
   const space = e.surface === 'terminal' && bodyRows ? Math.max(3, bodyRows - fixed) : Infinity
   const total = sections.reduce((sum, row) => sum + row.rows, 0)
@@ -1618,8 +1638,40 @@ export function drawPane(
     </Box>
   )
 
+  // The tab showing, windowed under the header when it runs longer than the pane: its rows (a stacked board's
+  // columns line by line, blank rows between them), measured as drawn, from where it is scrolled to.
+  const theView = mode === 'board' ? drawBoard() : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree
+  const viewRows: { node: unknown; rows: number }[] = []
+  if (!(mode === 'board' && isWide)) {
+    const top = kids(theView as never)
+    top.forEach((child, i) => {
+      if (mode === 'board' && i > 0) viewRows.push({ node: <Text key={`gap-${i}`}> </Text>, rows: 1 })
+      const key = String((child as { props?: { key?: unknown } } | null)?.props?.key ?? (child as { key?: unknown } | null)?.key ?? '')
+      const parts = mode === 'board' && key.startsWith('col-') && key !== 'col-empty' ? kids(child as never) : [child]
+      for (const part of parts) if (part !== null && part !== undefined && part !== false && part !== '') viewRows.push({ node: part, rows: Math.max(1, paint(part as never, width).length) })
+    })
+  }
+  const viewTotal = viewRows.reduce((sum, row) => sum + row.rows, 0)
+  const isViewScrolling = canScroll && !(mode === 'board' && isWide) && viewTotal > viewSpace
+  const viewMax = isViewScrolling ? viewTotal - (viewSpace - 2) : mode === 'board' && isWide ? wideMax : 0
+  const viewAt = isViewScrolling ? Math.min(state.viewScrolledTo, viewMax) : 0
+  let viewFirst = 0
+  for (let skipped = 0; viewFirst < viewRows.length && skipped + viewRows[viewFirst]!.rows <= viewAt; viewFirst++) skipped += viewRows[viewFirst]!.rows
+  let viewUsed = 0
+  const viewShown = viewRows.slice(viewFirst).filter(row => (viewUsed += row.rows) <= viewSpace - 2)
+  const viewAbove = viewRows.slice(0, viewFirst).reduce((sum, row) => sum + row.rows, 0)
+  const viewBelow = viewTotal - viewAbove - viewShown.reduce((sum, row) => sum + row.rows, 0)
+  const scrolledView = isViewScrolling ? (
+    <Box key="view-window" flexDirection="column">
+      {viewAbove > 0 && <Text key="view-above" dimColor>↑ {viewAbove} more {viewAbove === 1 ? 'line' : 'lines'} above · scroll up</Text>}
+      {viewShown.map(row => row.node as never)}
+      {viewBelow > 0 && <Text key="view-below" dimColor>↓ {viewBelow} more {viewBelow === 1 ? 'line' : 'lines'} below · scroll down</Text>}
+    </Box>
+  ) : theView
+
   return {
     scrollMax,
+    viewScrollMax: viewMax,
     node: (
       <Box flexDirection="column">
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
@@ -1640,12 +1692,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
+                {mode === 'board' ? drawBoard() : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
+            panel ?? scrolledView
           )
         )}
         {items.length > 0 && !trouble && (

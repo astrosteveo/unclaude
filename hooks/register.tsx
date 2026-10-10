@@ -32,6 +32,10 @@ const filing = atom({ plugin: 'roadmap', key: 'filing' } as const, false)
 const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
 // The roadmap's zoom: 0 shows all the dated work; each step closer around today.
 const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
+// Where each tab is scrolled to, in rows (a wide board's columns, in cards).
+const viewScrolled = atom({ plugin: 'roadmap', key: 'viewScrolled' } as const, {} as Record<string, number>)
+// How far the tab showing can scroll, as last drawn.
+let viewScrollMax = 0
 // The inbox item whose row asks where it goes (Into…) or why it's dropped (Drop…).
 const triaging = atom({ plugin: 'roadmap', key: 'triaging' } as const, null as { id: string; mode: 'into' | 'drop' } | null)
 // The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
@@ -1756,8 +1760,14 @@ export const register: Register = on => {
 
   // While a card is open its title and bar hold still and only the sections under them scroll.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    if ((await read($, selected)) === null) return next(e)
-    await update($, scrolled, at => Math.max(0, Math.min(scrollMax, at + e.by)))
+    // An open card scrolls under its title and bar; otherwise the tab showing scrolls under the header.
+    if ((await read($, selected)) !== null) {
+      await update($, scrolled, at => Math.max(0, Math.min(scrollMax, at + e.by)))
+      return {}
+    }
+    if (viewScrollMax <= 0) return next(e)
+    const mode = await read($, view)
+    await update($, viewScrolled, at => ({ ...at, [mode]: Math.max(0, Math.min(viewScrollMax, (at[mode] ?? 0) + e.by)) }))
     return {}
   })
 
@@ -1790,6 +1800,7 @@ export const register: Register = on => {
       noting: await read($, noting),
       dropping: await read($, dropping),
       scrolledTo: await read($, scrolled),
+      viewScrolledTo: (await read($, viewScrolled))[await read($, view)] ?? 0,
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
     }
@@ -1846,6 +1857,7 @@ export const register: Register = on => {
     }
     const drawn = drawPane($.ui.resolve(e), e, state, actions)
     scrollMax = drawn.scrollMax
+    viewScrollMax = drawn.viewScrollMax
     return drawn.node
   })
 }

@@ -684,7 +684,7 @@ test('inline, an open card folds the info line into its title and borrows the ta
   for (const placement of ['inline', 'dock'] as const) {
     const ui = await $.ui.mount({
       plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
-      props: { title: 'Roadmap', isFocused: true, bodyColumns: 80, placement, scroll: { offset: 0, bodyRows: 13 } } as never,
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: 80, placement, scroll: { offset: 0, bodyRows: placement === 'inline' ? 13 : 24 } } as never,
     })
     await ui.press({ key: 'card-T2' })
     const isInline = placement === 'inline'

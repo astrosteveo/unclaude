@@ -37,7 +37,13 @@ export function wrap(text: string, width: number): string[] {
 }
 
 const num = (value: unknown) => (typeof value === 'number' ? value : 0)
-const kids = (node: Node): Child[] => (node && typeof node === 'object' ? (node.children ?? []) : [])
+/** A node's children, flattened: as the drawn tree has them, or as an element under construction holds them. */
+export const kids = (node: Node): Child[] => {
+  if (!node || typeof node !== 'object') return []
+  const raw = (node.children ?? (node.props as { children?: unknown } | undefined)?.children ?? []) as unknown
+  const flat = (one: unknown): Child[] => (Array.isArray(one) ? one.flatMap(flat) : [one as Child])
+  return flat(raw)
+}
 const isInline = (node: Node) =>
   node === null || node === undefined || typeof node !== 'object' || node.type === 'Text' || node.type === 'Link' ||
   (node.type === 'Button' && Boolean(node.props?.plain) && kids(node).length > 0)
