@@ -447,3 +447,54 @@ test('releases tab: what the next release carries by section, each version newes
   expect(toasts.at(-1)).toMatch(/^roadmap: no manifest with a version here/)
   await ui.unmount()
 })
+
+test('roadmap on a time axis: epics as bars filled by progress, milestones as markers, a today line, late in red, undated listed; w zooms', async ($, on) => {
+  const items = [
+    item('M1', { title: 'Launch', due: '2026-11-15', created_at: '2026-09-01T00:00:00Z' }),
+    item('E1', { milestone: 'M1', title: 'Billing', start: '2026-09-15', due: '2026-10-05' }),
+    item('T1', { parent: 'E1', status: 'done' }), item('T2', { parent: 'E1', status: 'in_progress', assignee: 'claude' }),
+    item('E2', { milestone: 'M1', title: 'Auth', start: '2026-10-10' }),
+    item('T3', { parent: 'E2' }),
+    item('M2', { title: 'Later' }),
+  ]
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, { items, activity: [], seen: {} }) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('clock.now', () => ({ value: Date.parse('2026-10-09T12:00:00Z') }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock', scroll: { offset: 0, bodyRows: 40 } } as never,
+  })
+  await ui.press({ key: 'tab-timeline' })
+  const { lines, problems } = paintPane(await ui.drawn(), 140)
+  expect(problems).toEqual([])
+  const row = (id: string) => lines.find(line => line.replace(/^\u00a0+/, '').startsWith(`${id} `))!
+  // E1: late (its date passed, a task open), half done; a bar of red, half filled.
+  const e1 = await ui.find({ key: 'time-E1' })
+  expect(JSON.stringify(e1)).toContain('"color":"red"')
+  expect(row('E1')).toMatch(/█+░+/)
+  // M1 is a marker on its date; E2 runs to it (its milestone's date), nothing done yet.
+  expect(row('M1')).toContain('◆')
+  expect(row('E2')).toMatch(/░+/)
+  expect(row('E2').lastIndexOf('░')).toBe(row('M1').indexOf('◆'))
+  // Today is a line through every row, at the same column.
+  const today = row('M1').indexOf('│')
+  expect(today).toBeGreaterThan(0)
+  expect(row('E2').charAt(today) === '│' || row('E2').charAt(today) === '░').toBe(true)
+  // Weeks mark the scale over two months (months over longer); M2 has no dates and is listed under the axis.
+  expect(lines.some(line => /09-28 +10-05 +10-12/.test(line))).toBe(true)
+  expect(lines.some(line => line === 'No dates yet: M2')).toBe(true)
+  // w zooms in around today, and again, then back to all of it.
+  expect((await ui.find({ key: 'zoom' }))?.props.hotkey).toBe('w')
+  await ui.press({ key: 'zoom' })
+  expect((await ui.find({ key: 'zoom' }))?.text).toContain('zoom 120d')
+  await ui.press({ key: 'zoom' })
+  await ui.press({ key: 'zoom' })
+  expect((await ui.find({ key: 'zoom' }))?.text).toContain('zoom: all')
+  // A bar opens its card.
+  await ui.press({ key: 'time-E1' })
+  expect(await ui.find({ key: 'detail' })).toBeDefined()
+  await ui.unmount()
+})

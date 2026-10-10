@@ -4,7 +4,7 @@ import type { Checks, Draft, Item, Pr, Priority, Refs, Snapshot, Status, View } 
 import * as db from './db'
 import {
   backlog, dateOf, daysBetween, find, GLYPH, isLate, lastChange, stackFrom, stackText, SECTIONS, sectionFor, openPrOf, stackedOn, homesFor, isAgent, KINDS, TYPES, PRIORITIES, isMessage, isStale, LABEL, linksOf, marks, matches, parseQuery, path, progress, refsFor, STATUSES, statusOf, timeline, unread, USER,
-  subtree, waitingOn, upOf, tasksIn, targetOf, releaseOf, unreleased, shipNote, releasesOf, nextVersion, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
+  subtree, waitingOn, upOf, tasksIn, spanOf, targetOf, releaseOf, unreleased, shipNote, releasesOf, nextVersion, isDropped, WONTDO_GLYPH, treeRows as treeRowsOf, timelineRows, childrenOf,
 } from './model'
 
 export const COLOR: Record<Status, string> = { todo: 'gray', in_progress: 'yellow', blocked: 'red', review: 'blue', done: 'green' }
@@ -153,6 +153,8 @@ export type PaneState = {
   isFiling: boolean
   /** Whether the Releases tab asks for the version to release. */
   isReleasing: boolean
+  /** The roadmap's zoom: 0 shows all the dated work; each step closer around today. */
+  zoom: number
   /** Whether the board's Done column shows all done work, not just the recent. */
   isDoneOpen: boolean
   /** Milestones and epics folded otherwise than by default: a finished one opened, an open one folded. */
@@ -207,6 +209,7 @@ export type PaneActions = {
   setFiltering: (isOn: boolean) => void
   setFiling: (isOn: boolean) => void
   setReleasing: (isOn: boolean) => void
+  setZoom: (zoom: number) => void
   /** Runs ship from the board: the release PR for `version`, or (`publish`, once it has merged) its tag and release. */
   release: (version: string, publish: boolean) => void
   /** Files `title` to the inbox. */
@@ -278,7 +281,7 @@ export function drawPane(
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   const Select = 'Select' in els ? els.Select : undefined
-  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
+  const { snap, mode, pick, trouble, known, isIgnoreOffered, isRequesting, now, filter, isFiltering, isFiling, isReleasing, zoom, isDoneOpen, flipped, draft, isEditing, handing, merging, noting, dropping, commentTurns, stacking, stackRun, picked, parallelAsk } = state
   // Handing over starts Claude working, so it takes a yes: no key or stray Enter does it in one go.
   const confirmHand = (one: Item) => (
     <Box key={`hand-confirm-${one.id}`} flexDirection="row" columnGap={1}>
@@ -838,6 +841,119 @@ export function drawPane(
     Math.max(0, ...timelineAll.map(({ item, depth }) => depth * 2 + 2 + 2 + item.id.length + 1 + item.title.length)),
     Math.max(20, width - right - 2 - (whenWidth ? whenWidth + 2 : 0)),
   )
+  // The roadmap on a time axis, in a pane wide enough for one: a label column, then each milestone as a
+  // marker on its date and each epic as a bar from its start to its end, filled as far as its tasks are
+  // done; a line for today; late work in red. Work without dates is listed under it. A narrow pane keeps
+  // the list (timelineView) below.
+  const isAxis = width >= 100
+  const DAY = 86_400_000
+  const ZOOMS = [0, 120, 45] as const
+  const dayOf = (date: string) => Math.floor(Date.parse(`${date}T00:00:00Z`) / DAY)
+  const todayDay = now > 0 ? Math.floor(now / DAY) : undefined
+  const spans = new Map(timelineAll.map(({ item }) => [item.id, spanOf(snap, item)]))
+  const dated = timelineAll.filter(({ item }) => spans.get(item.id)!.end !== undefined || item.kind === 'milestone' && item.due)
+  const undated = timelineAll.filter(row => !dated.includes(row))
+  const days = dated.flatMap(({ item }) => { const one = spans.get(item.id)!; return [dayOf(one.start), ...(one.end ? [dayOf(one.end)] : [])] })
+  // With nothing dated and no clock, the axis has nothing to span: today's date stands in, unseen.
+  const fitFrom = days.length || todayDay !== undefined ? Math.min(...days, todayDay ?? Infinity) : 0
+  const fitTo = days.length || todayDay !== undefined ? Math.max(...days, todayDay ?? -Infinity) : 0
+  const zoomDays = ZOOMS[zoom % ZOOMS.length]!
+  // Zoomed in, the window centres on today; at fit it spans all the dated work (and today), a little padded.
+  const [from, to] = zoomDays && todayDay !== undefined
+    ? [todayDay - Math.floor(zoomDays / 3), todayDay + zoomDays - Math.floor(zoomDays / 3)]
+    : [fitFrom - 2, Math.max(fitTo + 2, fitFrom + 14)]
+  const labelWidth = Math.min(34, Math.max(18, Math.floor(width * 0.3)))
+  const chart = Math.max(10, width - labelWidth - 1)
+  const colOf = (day: number) => Math.round(((day - from) / Math.max(1, to - from)) * (chart - 1))
+  const inChart = (col: number) => col >= 0 && col < chart
+  // Ticks: weeks when they're far enough apart to label, else months.
+  const isWeekly = chart / Math.max(1, (to - from) / 7) >= 7
+  const ticks: { col: number; label: string }[] = []
+  // At most ten years of days are walked, whatever dates were typed.
+  for (let d = from; d <= Math.min(to, from + 3660); d++) {
+    const date = new Date(d * DAY)
+    const isTick = isWeekly ? date.getUTCDay() === 1 : date.getUTCDate() === 1
+    if (isTick) ticks.push({ col: colOf(d), label: isWeekly ? date.toISOString().slice(5, 10) : date.toLocaleString('en', { month: 'short', timeZone: 'UTC' }) })
+  }
+  const scale = Array<string>(chart).fill(' ')
+  let last = -2
+  for (const tick of ticks) {
+    if (tick.col <= last + 1 || tick.col + tick.label.length > chart) continue
+    for (const [i, ch] of [...tick.label].entries()) scale[tick.col + i] = ch
+    last = tick.col + tick.label.length
+  }
+  const todayCol = todayDay === undefined ? -1 : colOf(todayDay)
+  type Cell = { ch: string; color?: string; isDim?: boolean }
+  /** A row of the chart: the today line, then a milestone's marker or an epic's bar over it. */
+  const chartCells = (item: Item): Cell[] => {
+    const cells: Cell[] = Array.from({ length: chart }, (_, col) => (col === todayCol ? { ch: '│', color: 'yellow', isDim: true } : { ch: ' ' }))
+    const span = spans.get(item.id)!
+    const st = statusOf(items, item)
+    const late = isLate(items, item, now)
+    if (item.kind === 'milestone') {
+      if (!item.due) return cells
+      const col = colOf(dayOf(item.due))
+      if (inChart(col)) cells[col] = { ch: '◆', color: late ? 'red' : st === 'done' ? 'green' : 'blue' }
+      return cells
+    }
+    if (!span.end) return cells
+    // A start after the end (work begun past its date) draws from the end: the bar is at least its last day.
+    const a = Math.max(0, colOf(Math.min(dayOf(span.start), dayOf(span.end))))
+    const b = Math.min(chart - 1, colOf(dayOf(span.end)))
+    const p = progress(items, item)
+    const filled = p.total ? Math.round(((b - a + 1) * p.done) / p.total) : 0
+    for (let col = a; col <= b; col++)
+      cells[col] = col - a < filled ? { ch: '█', color: late ? 'red' : 'green' } : { ch: '░', color: late ? 'red' : undefined, isDim: !late }
+    return cells
+  }
+  /** Cells drawn as runs of one style each. */
+  const runs = (cells: Cell[], key: string) => {
+    const out: { text: string; cell: Cell }[] = []
+    for (const cell of cells) {
+      const prev = out.at(-1)
+      if (prev && prev.cell.color === cell.color && prev.cell.isDim === cell.isDim) prev.text += cell.ch
+      else out.push({ text: cell.ch, cell })
+    }
+    return out.map((run, i) => (
+      <Text key={`${key}-${i}`} color={run.cell.color} dimColor={run.cell.isDim}>
+        {run.text}
+      </Text>
+    ))
+  }
+  const axisLabel = (item: Item, depth: number) => {
+    // Indented with no-break spaces: a line's leading spaces are trimmed, and the bars must line up.
+    const text = `${'\u00a0\u00a0'.repeat(depth)}${item.id} ${item.title}`
+    return text.length > labelWidth - 1 ? `${text.slice(0, labelWidth - 2)}…` : text.padEnd(labelWidth - 1)
+  }
+  const axisRows = isDocked ? dated.slice(0, Math.max(1, topRows - 3)) : dated
+  const axisView = (
+    <Box flexDirection="column">
+      {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
+      {dated.length > 0 && (
+        <Box key="axis-head" flexDirection="row" columnGap={1}>
+          <Button key="zoom" plain hotkey="w" onPress={() => act.setZoom(zoom + 1)}>
+            <Text dimColor>{(zoomDays ? `zoom ${zoomDays}d` : 'zoom: all').padEnd(labelWidth - 4)}</Text>
+          </Button>
+          <Text dimColor>{scale.join('')}</Text>
+        </Box>
+      )}
+      {axisRows.map(({ item, depth }) => (
+        <Button key={`time-${item.id}`} plain onPress={choose(item.id)}>
+          <Text bold={item.kind === 'milestone'} color={item.kind === 'milestone' ? undefined : undefined} dimColor={statusOf(items, item) === 'done'}>
+            {axisLabel(item, depth)}
+          </Text>{' '}
+          {runs(chartCells(item), `cells-${item.id}`)}
+        </Button>
+      ))}
+      {axisRows.length < dated.length && <Text key="axis-more" dimColor>…{dated.length - axisRows.length} more (close the card to see them all)</Text>}
+      {undated.length > 0 && !isDocked && (
+        <Box key="undated" flexDirection="column">
+          <Text dimColor>No dates yet: {undated.map(({ item }) => item.id).join(', ')}</Text>
+        </Box>
+      )}
+    </Box>
+  )
+
   const timelineView = (
     <Box flexDirection="column">
       {timelineAll.length === 0 && <Text dimColor>No milestones or epics yet.</Text>}
@@ -1143,7 +1259,7 @@ export function drawPane(
     ? ['Tab/↑↓ move between fields', 'Enter on Title creates it']
     : item
     ? ['Tab/↑↓ move', 'x close', isEditing ? 'e done editing' : 'e edit', isReview ? 'a approve · c request changes' : '', item.kind === 'task' ? `1–${STATUSES.length} status` : '']
-    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
+    : [isIgnoreOffered ? 'g gitignore the db' : '', 'Enter opens', 'Tab/↑↓ move', `v ${nextView}`, mode === 'board' ? 't p b r d jump to a column' : '', mode === 'timeline' && isAxis ? 'w zoom' : '', 'n new', 'i file to the inbox', 'f filter', canUndo ? 'z undo' : '']
   ).filter(Boolean)
   const footerHints = fitHints(hints, width, width >= 100 ? 1 : 2)
   const footerRows = flowRows(footerHints.map((one, i) => one.length + (i < footerHints.length - 1 ? 2 : 0)), width)
@@ -1405,12 +1521,12 @@ export function drawPane(
           isDocked && panel ? (
             <Box key="docked" flexDirection="column">
               <Box key="top" flexDirection="column" height={topRows}>
-                {mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
+                {mode === 'board' ? board : mode === 'timeline' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
               </Box>
               {panel}
             </Box>
           ) : (
-            panel ?? (mode === 'board' ? board : mode === 'timeline' ? timelineView : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
+            panel ?? (mode === 'board' ? board : mode === 'timeline' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree)
           )
         )}
         {items.length > 0 && !trouble && (

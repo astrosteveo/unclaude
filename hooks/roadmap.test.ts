@@ -2421,9 +2421,9 @@ test('timeline: milestones and epics by due date with their progress; late work 
   await $.command.run({ command: 'roadmap', args: '' } as never)
   const ui = await $.ui.mount({
     plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
-    props: { title: 'Roadmap', isFocused: true, bodyColumns: 140, placement: 'dock' } as never,
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 96, placement: 'dock' } as never,
   })
-  // On the board, a task past its (inherited) date is marked late.
+  // On the board, a task past its (inherited) date is marked late. (A narrow pane: the roadmap is a list.)
   expect((await ui.find({ key: 'card-T2' }))?.text).toContain('⚠late')
   expect((await ui.find({ key: 'card-T3' }))?.text).not.toContain('late')
   await ui.press({ key: 'tab-timeline' })

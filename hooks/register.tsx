@@ -30,6 +30,8 @@ const filtering = atom({ plugin: 'roadmap', key: 'filtering' } as const, false)
 const filing = atom({ plugin: 'roadmap', key: 'filing' } as const, false)
 // Whether the Releases tab asks for the version to release.
 const releasing = atom({ plugin: 'roadmap', key: 'releasing' } as const, false)
+// The roadmap's zoom: 0 shows all the dated work; each step closer around today.
+const zoom = atom({ plugin: 'roadmap', key: 'zoom' } as const, 0)
 // The milestones and epics folded otherwise than by default (a finished one folded, an open one not).
 const flipped = atom({ plugin: 'roadmap', key: 'flipped' } as const, [] as string[])
 // Whether the board's Done column shows all done work rather than the recent.
@@ -1726,6 +1728,7 @@ export const register: Register = on => {
       isFiltering: await read($, filtering),
       isFiling: await read($, filing),
       isReleasing: await read($, releasing),
+      zoom: await read($, zoom),
       isDoneOpen: await read($, doneOpen),
       flipped: await read($, flipped),
       draft: await read($, draft),
@@ -1763,6 +1766,7 @@ export const register: Register = on => {
       // The ring stays on the Edit button, so e leaves edit mode again; Tab walks into the fields.
       setEditing: isOn => void update($, editing, () => isOn).then(() => focusOn($, 'edit')),
       setDoneOpen: isOn => void update($, doneOpen, () => isOn),
+      setZoom: level => void update($, zoom, () => level % 3),
       setReleasing: isOn => void update($, releasing, () => isOn).then(() => focusOn($, isOn ? 'release-version' : 'release')),
       release: (version, publish) => void releaseFromBoard($, version, publish),
       setFiling: isOn => void update($, filing, () => isOn).then(() => focusOn($, isOn ? 'inbox-input' : 'file')),
