@@ -337,7 +337,7 @@ export function wrap(text: string, width: number): string[] {
  */
 export function drawPane(
   els: Elements[keyof Elements], e: EventOf['ui.render'], state: PaneState, act: PaneActions,
-): { node: RenderElement; scrollMax: number; viewScrollMax: number; listEnd: number } {
+): { node: RenderElement; scrollMax: number; viewScrollMax: number; viewScrollAt: number; listEnd: number } {
   const { Box, Text, Button, Link } = els
   const Input = 'Input' in els ? els.Input : undefined
   /**
