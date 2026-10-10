@@ -336,7 +336,8 @@ export function drawPane(
     return {
       pr,
       tag: tags.length || isDropped(item) ? ` ${[...(isDropped(item) ? [`${WONTDO_GLYPH} won't do`] : []), ...tags].join(' ')}` : '',
-      ticks: part ? ` ${part.done}/${part.total} tasks` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
+      // A milestone's or epic's tasks done (a bare count), a task's checklist ticked (☑).
+      ticks: part ? ` ${part.done}/${part.total}` : list.length ? ` ☑${list.filter(c => c.done).length}/${list.length}` : '',
       prTag: pr ? ` PR #${pr.number}${CHECK_MARK[pr.checks]}` : '',
       wait: waits.length ? ` ⧗${waits.join(',')}` : '',
       who: item.assignee ? ` @${item.assignee}` : '',
@@ -538,7 +539,8 @@ export function drawPane(
         <Box key="needs" flexDirection="column" marginBottom={1}>
           <Text bold>Needs you  <Text dimColor>{needs.length}</Text></Text>
           {needs.map(({ item, why }) => {
-            const reasons = why.join(' · ')
+            // The reasons in a column of their own, so the titles line up.
+            const reasons = why.join(' · ').padEnd(Math.min(24, Math.max(...needs.map(one => one.why.join(' · ').length))))
             const room = Math.max(8, width - item.id.length - 1 - reasons.length - 2)
             return (
               <Button key={`need-${item.id}`} plain onPress={choose(item.id)}>

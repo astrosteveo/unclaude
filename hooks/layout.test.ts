@@ -597,7 +597,7 @@ test('needs you: work in review, unread comments, stale claims and late work hea
   expect(paintPane(await ui.drawn(), 100).lines[0]).toContain('● 2 unread')
   expect((await ui.find({ key: 'tab-inbox' }))?.text).toContain('Inbox 5')
   await ui.press({ key: 'tab-inbox' })
-  const needs = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('need-')).map(one => `${String(one.key).slice(5)}: ${one.text}`)
+  const needs = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('need-')).map(one => `${String(one.key).slice(5)}: ${String(one.text).replace(/ {2,}/g, '  ')}`)
   expect(needs).toEqual([
     'E1: review  E1 Handed',
     'T2: review · 1 unread  T2 Reviewed',

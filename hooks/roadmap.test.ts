@@ -1288,7 +1288,7 @@ test("an epic up for review waits in the board's Review column, whose card appro
     props: { title: 'Roadmap', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 200 } } as never,
   })
   expect(await ui.find({ key: 'card-E1' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /2\/2 tasks/ })).toBeDefined()
+  expect((await ui.find({ key: 'card-E1' }))?.text).toMatch(/\b2\/2 PR #9/)
   expect(await ui.find({ key: 'card-E2' })).toBeUndefined()
   expect(await ui.find({ key: 'card-E3' })).toBeUndefined()
   await ui.press({ key: 'card-E1' })
