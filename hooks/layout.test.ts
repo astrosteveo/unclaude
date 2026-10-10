@@ -179,7 +179,12 @@ test('narrow board: empty columns fold into one line, and every row puts its det
   expect(ticks.length).toBeGreaterThan(5)
   expect(new Set(ticks).size).toBe(1)
   // One blank row between each of the four blocks (the folded line, Todo, Review, Done), none for the empty ones.
-  expect(lines.filter(line => line.trim() === '').length).toBe(3)
+  // (Counted down to the board's last row: under it the pane is padded down to the key hints.)
+  const hintsAt = lines.findIndex(line => line.startsWith('Enter opens'))
+  let end = hintsAt
+  while (end > 0 && lines[end - 1]!.trim() === '') end--
+  const content = lines.slice(0, end)
+  expect(content.filter(line => line.trim() === '').length).toBe(3)
   await ui.unmount()
 })
 
@@ -659,4 +664,50 @@ test('mouse scroll: a tab longer than the pane scrolls under a header that stays
   expect(paintPane(await wide.drawn(), 180).lines.some(line => line.includes('↑ 2 above'))).toBe(true)
   expect(paintPane(await wide.drawn(), 180).problems).toEqual([])
   await wide.unmount()
+})
+
+test('the key hints sit on a docked pane\'s last row, on every tab, with a card open or the form up; an inline pane stays as tall as its content', async ($, on) => {
+  const snap = { ...bigRoadmap(), inbox: [] }
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const [width, rows] of [[84, 60], [160, 45]] as const) {
+    const props = { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: rows } } as never
+    const ui = await $.ui.mount({ plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap', props })
+    const atBottom = async (what: string) => {
+      const { lines, problems } = paintPane(await ui.drawn(), width)
+      expect(problems).toEqual([])
+      expect(`${what}: ${lines.length} rows`).toBe(`${what}: ${rows} rows`)
+      expect(`${what}: ${lines.at(-1)}`).toMatch(new RegExp(`^${what}: .*(z undo|f filter|x close|creates it)`))
+    }
+    for (const tab of ['inbox', 'plan', 'roadmap', 'board', 'releases']) {
+      await ui.press({ key: `tab-${tab}` })
+      await atBottom(tab)
+    }
+    // A card fills from the bottom up: it ends right above the hints.
+    await ui.press({ key: 'tab-board' })
+    const first = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).find(key => key.startsWith('card-'))!
+    await ui.press({ key: first })
+    await atBottom('card')
+    // (The painter draws the card's border as a blank row: the hints, its bottom border, then its last line.)
+    const drawn = paintPane(await ui.drawn(), width).lines
+    const hintsAt = drawn.findIndex(line => line.startsWith('Tab/↑↓ move'))
+    expect(drawn[hintsAt - 1]!.trim()).toBe('')
+    expect(drawn[hintsAt - 2]!.trim()).not.toBe('')
+    await ui.press({ key: 'close' })
+    await ui.press({ key: 'new' })
+    await atBottom('form')
+    await ui.press({ key: 'new-cancel' })
+    await ui.unmount()
+  }
+  // Inline, the pane is as tall as what it shows: no padding.
+  const inline = await $.ui.mount({
+    plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+    props: { title: 'Roadmap', isFocused: true, bodyColumns: 84, placement: 'inline', scroll: { offset: 0, bodyRows: 60 } } as never,
+  })
+  await inline.press({ key: 'tab-inbox' })
+  expect(paintPane(await inline.drawn(), 84).lines.length).toBeLessThan(40)
+  await inline.unmount()
 })

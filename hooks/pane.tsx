@@ -698,7 +698,9 @@ export function drawPane(
     [status, isWide && roomOf(status) >= SPLIT_BELOW ? slotsOf(columns[status].slice(0, status === 'done' ? doneShown : 15)) : undefined])) as Record<Status, Slots | undefined>
   const heights = Object.fromEntries(STATUSES.map(status =>
     [status, columns[status].slice(0, status === 'done' ? doneShown : undefined)
-      .map(task => cardLayout(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status]).rows)])) as Record<Status, number[]>
+      .map(task => cardLayout(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status]).rows)
+      // Done cut to its recent cards still has its "…N older" row to fit: a card too tall to place stands for it.
+      .concat(status === 'done' && columns.done.length > doneShown ? [Infinity] : [])])) as Record<Status, number[]>
   // Docked, the board fits the rows above the card; Done opened fills what the pane has. Side by side,
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
   const budget = isDocked ? topRows : isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
@@ -1669,11 +1671,10 @@ export function drawPane(
     </Box>
   ) : theView
 
-  return {
-    scrollMax,
-    viewScrollMax: viewMax,
-    node: (
-      <Box flexDirection="column">
+  // What sits above the key hints. `pad` blank rows push the rest down to them: above an open card, so it
+  // fills from the bottom up, else under the tab.
+  const overHints = (pad: number) => (
+    <Box key="above-hints" flexDirection="column">
         {/* The tabs do nothing while a card covers the board, so inline they give their row to the card. */}
         {!(isCompact && (panel || form)) && header}
         {(!panel || isDocked) && !form && filterRow}
@@ -1683,7 +1684,10 @@ export function drawPane(
         {trouble ? (
           <Text color="red">{trouble}</Text>
         ) : form ? (
-          form
+          <Box key="form-at" flexDirection="column">
+            {form}
+            {pad > 0 && <Box key="form-pad" height={pad} />}
+          </Box>
         ) : items.length === 0 ? (
           <Text dimColor>No roadmap yet. Ask Claude to plan milestones, epics and tasks, or press n to add one.</Text>
         ) : (
@@ -1694,12 +1698,37 @@ export function drawPane(
               <Box key="top" flexDirection="column" height={topRows}>
                 {mode === 'board' ? drawBoard() : mode === 'roadmap' ? (isAxis ? axisView : timelineView) : mode === 'inbox' ? inboxView : mode === 'releases' ? releasesView : tree}
               </Box>
+              {pad > 0 && <Box key="card-pad" height={pad} />}
               {panel}
             </Box>
           ) : (
-            panel ?? scrolledView
+            panel ? (
+              <Box key="card-alone" flexDirection="column">
+                {pad > 0 && <Box key="card-pad" height={pad} />}
+                {panel}
+              </Box>
+            ) : (
+              <Box key="tab" flexDirection="column">
+                {scrolledView}
+                {pad > 0 && <Box key="tab-pad" height={pad} />}
+              </Box>
+            )
           )
         )}
+    </Box>
+  )
+  // Docked, the key hints sit on the pane's last rows, whatever is showing: what is above them is padded down.
+  const isDock = (e.props as { placement?: string }).placement === 'dock'
+  const hintsPad = isDock && e.surface === 'terminal' && bodyRows !== undefined && items.length > 0 && !trouble
+    ? Math.max(0, bodyRows - paint(overHints(0) as never, width).length - footerRows)
+    : 0
+
+  return {
+    scrollMax,
+    viewScrollMax: viewMax,
+    node: (
+      <Box flexDirection="column">
+        {overHints(hintsPad)}
         {items.length > 0 && !trouble && (
           <Box key="hints" flexDirection="row" columnGap={1} flexWrap="wrap">
             {footerHints.map((one, i) => (
