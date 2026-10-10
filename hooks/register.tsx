@@ -38,8 +38,12 @@ const viewScrolled = atom({ plugin: 'roadmap', key: 'viewScrolled' } as const, {
 const region = atom({ plugin: 'roadmap', key: 'region' } as const, 'card' as 'list' | 'card')
 // The list's rows over a docked card, as set with the divider; null sizes them by the card.
 const split = atom({ plugin: 'roadmap', key: 'split' } as const, null as number | null)
+// Just opened, the docked list keeps the open item's row in sight, until the wheel moves the list.
+const revealing = atom({ plugin: 'roadmap', key: 'revealing' } as const, false)
 // Where the docked list's frame ends, in body rows, as last drawn.
 let listEnd = 0
+// Where the tab showing is scrolled to, as last drawn (kept in sight of the open item, it may differ from the atom).
+let viewScrollAt = 0
 // How far the tab showing can scroll, as last drawn.
 let viewScrollMax = 0
 // The inbox item whose row asks where it goes (Into…) or why it's dropped (Drop…).
@@ -1254,6 +1258,9 @@ async function askClaude($: EngineInterface, item: Item) {
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
+// How long a closed card's list is given to redraw before the ring is put back on its row.
+const REFOCUS_MS = 60
+
 // The inline height an open card asks for: more than most cards need; the layout caps it.
 const CARD_ROWS = 40
 
@@ -1263,7 +1270,12 @@ async function closeDetail($: EngineInterface, id: string) {
   await update($, editing, () => false)
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   const mode = await read($, view)
-  await focusOn($, mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`)
+  const key = mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`
+  await focusOn($, key)
+  // The ring lands on the row in the drawing still docked; the list redrawn whole, the surface keeps it by its
+  // place, which is another row now (a docked list is scrolled to hold the open one in sight). Once more, then.
+  await new Promise(done => setTimeout(done, REFOCUS_MS))
+  await focusOn($, key)
 }
 
 /** Opens an item in the detail panel, marking what is on it as read. */
@@ -1279,6 +1291,7 @@ async function open($: EngineInterface, id: string | null) {
   await update($, noting, () => null)
   await update($, stacking, () => null)
   await update($, parallelAsk, () => null)
+  await update($, revealing, () => id !== null)
   if (id === null) return
   // Inline, a card asks for as much height as the layout spares; the board goes back to the default third.
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true, rows: CARD_ROWS })
@@ -1780,7 +1793,10 @@ export const register: Register = on => {
     if (isCard) await update($, region, () => 'list')
     if (viewScrollMax <= 0) return isCard ? {} : next(e)
     const mode = await read($, view)
-    await update($, viewScrolled, at => ({ ...at, [mode]: Math.max(0, Math.min(viewScrollMax, (at[mode] ?? 0) + e.by)) }))
+    // Moved by the wheel, the list goes on from where it was drawn, the open item's row no longer held in sight.
+    const isRevealing = await read($, revealing)
+    await update($, revealing, () => false)
+    await update($, viewScrolled, at => ({ ...at, [mode]: Math.max(0, Math.min(viewScrollMax, (isRevealing ? viewScrollAt : at[mode] ?? 0) + e.by)) }))
     return {}
   })
 
@@ -1816,6 +1832,7 @@ export const register: Register = on => {
       viewScrolledTo: (await read($, viewScrolled))[await read($, view)] ?? 0,
       region: await read($, region),
       split: await read($, split),
+      isRevealing: await read($, revealing),
       // Without a clock nothing reads as stale: the mark is a hint, never a reason not to draw.
       now: await $.clock.now().catch(() => 0),
     }
@@ -1874,6 +1891,7 @@ export const register: Register = on => {
     const drawn = drawPane($.ui.resolve(e), e, state, actions)
     scrollMax = drawn.scrollMax
     viewScrollMax = drawn.viewScrollMax
+    viewScrollAt = drawn.viewScrollAt
     listEnd = drawn.listEnd
     return drawn.node
   })
