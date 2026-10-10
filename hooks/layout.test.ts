@@ -83,7 +83,8 @@ const VIEWS = [
   ['releases', 'tab-releases', null],
 ] as const
 
-test('every view fits the pane at narrow and wide widths, with and without a docked card', async ($, on) => {
+// (Every view at every size, docked and not: slow on a shared CI runner, so it gets more than the 5 s.)
+test('every view fits the pane at narrow and wide widths, with and without a docked card', { timeoutMs: 30_000 }, async ($, on) => {
   const snap = bigRoadmap()
   on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
   on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
