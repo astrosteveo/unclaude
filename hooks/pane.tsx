@@ -351,7 +351,7 @@ export function drawPane(
         // Cut by an edge: the lines of it in the window, drawn as the painter lays them out.
         paint(one.node as never, width)
           .slice(Math.max(0, at - top), Math.min(one.lines, at + room - top))
-          .forEach((text, i) => nodes.push(<Text key={`${one.key}-cut-${i}`}>{text || ' '}</Text>))
+          .forEach((text, i) => nodes.push(<Text key={`${one.key}-cut-${i}`}>{text.replace(/^ +/, lead => '\u00a0'.repeat(lead.length)) || ' '}</Text>))
     }
     const above = Math.min(at, total)
     const below = Math.max(0, total - at - room)
@@ -706,7 +706,7 @@ export function drawPane(
   const openRelease = releasePrs.find(pr => pr.state === 'open')
   const toPublish = releasePrs.find(pr => pr.state === 'merged' && !shippedVersions.some(one => `release-v${one.version}` === pr.branch))
   const releaseLine = (text: string, key: string) => (
-    <Text key={key} dimColor={!/^- /.test(text)}>
+    <Text key={key} dimColor={!/^\s*- /.test(text)}>
       {text.length > width - 2 ? `${text.slice(0, width - 3)}…` : text || ' '}
     </Text>
   )
@@ -1845,7 +1845,10 @@ export function drawPane(
     top.forEach((child, i) => {
       if (mode === 'board' && i > 0) viewRows.push({ node: <Text key={`gap-${i}`}> </Text>, rows: 1 })
       const key = String((child as { props?: { key?: unknown } } | null)?.props?.key ?? (child as { key?: unknown } | null)?.key ?? '')
-      const parts = mode === 'board' && key.startsWith('col-') && key !== 'col-empty' ? kids(child as never) : [child]
+      // A stacked board's columns and Releases' sections and versions go in line by line, so an edge cuts as
+      // little as it can (a block cut by one is drawn plain).
+      const isSplit = mode === 'board' ? key.startsWith('col-') && key !== 'col-empty' : mode === 'releases' && /^(pending|release)-/.test(key)
+      const parts = isSplit ? kids(child as never) : [child]
       for (const part of parts) if (part !== null && part !== undefined && part !== false && part !== '') viewRows.push({ node: part, rows: Math.max(1, paint(part as never, width).length) })
     })
   }
