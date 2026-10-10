@@ -1258,9 +1258,6 @@ async function askClaude($: EngineInterface, item: Item) {
 /** Moves the keyboard ring to an element of the pane; a pane not holding the keys just stays as it is. */
 const focusOn = ($: EngineInterface, key: string) => $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
 
-// How long a closed card's list is given to redraw before the ring is put back on its row.
-const REFOCUS_MS = 60
-
 // The inline height an open card asks for: more than most cards need; the layout caps it.
 const CARD_ROWS = 40
 
@@ -1270,12 +1267,9 @@ async function closeDetail($: EngineInterface, id: string) {
   await update($, editing, () => false)
   await $.ui.open({ id: PANE, title: 'Roadmap', focus: true })
   const mode = await read($, view)
-  const key = mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`
-  await focusOn($, key)
-  // The ring lands on the row in the drawing still docked; the list redrawn whole, the surface keeps it by its
-  // place, which is another row now (a docked list is scrolled to hold the open one in sight). Once more, then.
-  await new Promise(done => setTimeout(done, REFOCUS_MS))
-  await focusOn($, key)
+  // Open, the row was keyed apart (`…-open`): this key is waited for, so the ring is placed in the list drawn
+  // whole. Placed in the docked drawing, the terminal would keep it by its place there, on another row now.
+  await focusOn($, mode === 'board' ? `card-${id}` : mode === 'roadmap' ? `time-${id}` : `row-${id}`)
 }
 
 /** Opens an item in the detail panel, marking what is on it as read. */

@@ -158,7 +158,7 @@ test('wide board cards: the title on up to two lines, its details on a line unde
   expect(done.slice(2).some(line => /^T\d+ Make the board/.test(line))).toBe(true)
   // The open card's id stands out.
   await ui.press({ key: 'card-T90' })
-  const open = await ui.find({ key: 'card-T90' })
+  const open = await ui.find({ key: 'card-T90-open' })
   expect(JSON.stringify(open)).toContain('"inverse":true')
   await ui.unmount()
 })
@@ -300,7 +300,7 @@ test('tree and timeline: open work first, finished scopes folded to a line, a to
   await ui.press({ key: 'tab-board' })
   await ui.press({ key: 'card-T1' })
   await ui.press({ key: 'tab-plan' })
-  expect(await rowsOf('row-')).toContain('T1')
+  expect(await rowsOf('row-')).toContain('T1-open')
   await ui.press({ key: 'close' })
 
   await ui.press({ key: 'tab-roadmap' })
@@ -941,7 +941,7 @@ test('opened from the board, a card stays in sight in the docked list above it, 
     const last = keys.at(-1)!
     await ui.press({ key: last })
     expect(await ui.find({ key: 'detail' })).toBeDefined()
-    expect(`${width}: ${(await ui.find({ key: last })) ? last : 'gone'}`).toBe(`${width}: ${last}`)
+    expect(`${width}: ${(await ui.find({ key: `${last}-open` })) ? last : 'gone'}`).toBe(`${width}: ${last}`)
     // Side by side, the wheel over the list goes on from where the open card's column was drawn: up a card.
     const above = async () => Number(/↑ (\d+) above/.exec(paintPane(await ui.drawn(), width).lines.join('\n'))?.[1] ?? 0)
     const held = await above()
@@ -952,7 +952,7 @@ test('opened from the board, a card stays in sight in the docked list above it, 
       expect(await above()).toBe(held)
     }
     expect(width < 100 || held > 0).toBe(true)
-    await ui.press({ key: last })
+    await ui.press({ key: `${last}-open` })
     expect(await ui.find({ key: 'detail' })).toBeUndefined()
     await ui.unmount()
   }

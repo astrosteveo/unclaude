@@ -1529,9 +1529,13 @@ test('a card docks under the board: the board stays, another card swaps it, the 
   await ui.press({ key: 'card-T2' })
   expect((await ui.find({ key: 'detail' }))?.text).toContain('Second')
   expect((await ui.find({ key: 'detail' }))?.text).not.toContain('First')
-  // The open card, pressed again, closes it.
-  await ui.press({ key: 'card-T2' })
+  // The open card, pressed again, closes it. Open, its row is keyed apart, so the ring sent back to card-T2
+  // waits for the list drawn whole: the terminal keeps a ring by its place, which the docked list shifts.
+  // (The kit's pane holds no keys, so the ring itself is seen live only.)
+  expect(await ui.find({ key: 'card-T2' })).toBeUndefined()
+  await ui.press({ key: 'card-T2-open' })
   expect(await ui.find({ key: 'detail' })).toBeUndefined()
+  expect(await ui.find({ key: 'card-T2' })).toBeDefined()
   // So does the ✕ on the card's title row.
   await ui.press({ key: 'card-T1' })
   await ui.press({ key: 'close-x' })
