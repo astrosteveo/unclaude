@@ -4,6 +4,59 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-10
+
+### Added
+
+- A board card lights up whole under the mouse, in its column's colour; the tabs no longer show a v: mark.
+- Frames and the divider light up under the mouse pointer, so you can see which one it is over.
+- With a card open, the card takes the room it needs and the list the rest; a divider between them moves the split (k/j).
+- In a wide pane the board's columns size to their content: empty ones shrink to their heading, and each card reads on one line, or a title line and a details line, instead of wrapping raggedly.
+- A stacked PR's card can merge the stack beneath it and then itself, in order.
+- The key hints sit at the bottom of the pane.
+- The mouse wheel scrolls every tab when it runs longer than the pane, not only an open card.
+- Five tabs in the order work lives through them: Inbox, Plan, Roadmap, Board, Releases.
+- The Inbox opens on what needs you: work waiting on your review, comments you haven't read, claims gone quiet and late work, each a press from its card.
+- Sort the inbox: an item becomes a task or an epic, joins existing work as a comment or a checklist entry, or is dropped with a reason; ask Claude to triage and it proposes before it sorts.
+- In a wide pane the roadmap is drawn on a time axis: epics as bars filled by their progress, milestones as markers on their dates, a line for today, and late work in red; w zooms in around today.
+- A Releases tab: what the next release would carry, every version shipped with its notes and the one installs get, and a Release button that runs ship from the board.
+- Done work says where it went: shipped in vX, or merged and waiting for the next release, on its card and row; a milestone counts how much of it is out.
+- Milestones are targets, not containers: epics and tasks point at one, so an epic can span milestones. A Plan tab shows milestones with what targets them, then Unplanned work with the backlog's controls; it replaces the Tree and Backlog tabs.
+- An Inbox: file anything to sort later, with i on the board, /roadmap inbox <text>, or by Claude when it notices something it wasn't asked to do.
+- A task can be closed as won't do, with a reason: kept with its history, but not counted as finished work or released.
+- Setting a task done can tick its checklist in the same call, and inside an epic or milestone you hold it goes straight on to the next ready task
+- claim on an epic or milestone takes it whole: you hold it, its first ready task is claimed, and the answer shows every task in it
+- The tree and the timeline lead with open work and fold finished milestones and epics to one line (▸ opens them); the timeline lines its dates, bars and counts up in columns.
+- The pane's header reads as tabs with a progress bar, keeps its actions together, and fits in one row on a wide pane (two on a narrow one); key hints wrap between hints, most useful first.
+- The board's Done column shows the last week's work, with the rest a press away (· show all beside its heading).
+- In a narrow pane the board folds empty columns into one line, and every card row lines its details up in the same columns.
+
+### Changed
+
+- The plugin's description, the CHANGELOG and the benchmark's messages are rewritten in plain English.
+- The summary Claude gets at the start of a session and the activity log use plainer wording, and error messages say "plugin" in place of "mod".
+- Claude's tool replies and descriptions use plainer wording, such as "blocked by" in place of "waits on".
+- The board's wording is plainer. A claim whose agent stopped working is marked `⌛inactive` (it was `⌛stale`), a card's dependencies say "blocked by", and the comment button's off state reads "With your next prompt".
+- On the wide board a card shows its whole title, up to two lines, with its details on a line beneath.
+- Plan, the Inbox, Releases and the Roadmap list read as tables: a header row over aligned columns.
+- On a wide pane, each Board column sits in a frame of its own.
+- Installing the mod gets the last release, not whatever has merged since.
+- show on an epic or milestone lists each open task with its description and checklist, so one call holds the whole unit
+
+### Fixed
+
+- Closing a docked card puts the focus ring back on that card, even when the list is slow to redraw.
+- Opening a card keeps it in sight in the list above it, and a hovered card keeps its colours on a faint highlight.
+- Releases: an expanded version's notes keep their indent and colour while scrolling.
+- With a card docked, the list and the card fill the pane at every split: moving the divider leaves no gap.
+- With a card open, the list above it scrolls too: the wheel moves whichever is under the mouse, and the one in use has its outline lit.
+- Scrolling a card or a tab moves a line at a time, wrapped lines included.
+- Once a release is tagged and published, ship deletes its release branch, locally and on origin.
+- ship writes the release notes of merged work itself when [Unreleased] is empty, instead of refusing.
+- A card docked under the board is no longer overlapped by a long column whose cards wrap onto two lines.
+- A roadmap is started only at the top of a git repository: a session opened in a subfolder uses the repository's roadmap, and one opened outside any repository is refused instead of quietly starting an empty roadmap, naming the roadmaps it found below. The first write says where a new roadmap was started.
+- A roadmap database from elsewhere (a cloned repo, an import) can no longer run shell commands through undo; ship cuts releases only from an up-to-date main line; a stack merge that hits an unexpected error stops cleanly instead of blocking later merges
+
 ## [0.7.1] - 2026-10-10
 
 ### Fixed
@@ -179,7 +232,8 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.2
 [0.7.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.1
 [0.7.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.0
 [0.6.3]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.3

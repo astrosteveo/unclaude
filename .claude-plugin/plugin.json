@@ -1,6 +1,6 @@
 {
   "name": "roadmap",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "A task tracker inside Claude Code: milestones, epics and tasks that you, Claude and its agents plan and work from together",
   "author": {
     "name": "astrosteveo"
