@@ -4,6 +4,41 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-10
+
+### Added
+
+- A board card lights up whole under the mouse, in its column's colour; the tabs no longer show a v: mark.
+- With no card open, the list keeps its frame and fills the pane.
+- Frames and the divider light up under the mouse pointer, so you can see which one it is over.
+- With a card open, the card takes the room it needs and the list the rest; a divider between them moves the split (k/j).
+- A stacked PR's card can merge the stack beneath it and then itself, in order.
+- The key hints sit at the bottom of the pane.
+- The mouse wheel scrolls every tab when it runs longer than the pane, not only an open card.
+- Five tabs in the order work lives through them: Inbox, Plan, Roadmap, Board, Releases.
+- The Inbox opens on what needs you: work waiting on your review, comments you haven't read, claims gone quiet and late work, each a press from its card.
+- Sort the inbox: an item becomes a task or an epic, joins existing work as a comment or a checklist entry, or is dropped with a reason; ask Claude to triage and it proposes before it sorts.
+- In a wide pane the roadmap is drawn on a time axis: epics as bars filled by their progress, milestones as markers on their dates, a line for today, and late work in red; w zooms in around today.
+- A Releases tab: what the next release would carry, every version shipped with its notes and the one installs get, and a Release button that runs ship from the board.
+- Done work says where it went: shipped in vX, or merged and waiting for the next release, on its card and row; a milestone counts how much of it is out.
+- Milestones are targets, not containers: epics and tasks point at one, so an epic can span milestones. A Plan tab shows milestones with what targets them, then Unplanned work with the backlog's controls; it replaces the Tree and Backlog tabs.
+- An Inbox: file anything to sort later, with i on the board, /roadmap inbox <text>, or by Claude when it notices something it wasn't asked to do.
+- A task can be closed as won't do, with a reason: kept with its history, but not counted as finished work or released.
+
+### Changed
+
+- On the wide board a card shows its whole title, up to two lines, with its details on a line beneath.
+- Plan, the Inbox, Releases and the Roadmap list read as tables: a header row over aligned columns.
+- On a wide pane, each Board column sits in a frame of its own.
+
+### Fixed
+
+- Opening a card keeps it in sight in the list above it, and a hovered card keeps its colours on a faint highlight.
+- Releases: an expanded version's notes keep their indent and colour while scrolling.
+- With a card docked, the list and the card fill the pane at every split: moving the divider leaves no gap.
+- With a card open, the list above it scrolls too: the wheel moves whichever is under the mouse, and the one in use has its outline lit.
+- Scrolling a card or a tab moves a line at a time, wrapped lines included.
+
 ## [0.6.3] - 2026-10-09
 
 ### Changed
@@ -138,7 +173,8 @@ All notable changes to the roadmap mod. The format follows [Keep a Changelog](ht
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.0
 [0.6.3]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.3
 [0.6.2]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.2
 [0.6.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.1
