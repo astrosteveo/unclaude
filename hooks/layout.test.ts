@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Activity, InboxItem, Item, Snapshot } from '../types'
 import { VERSION } from './db'
 import { paintPane } from './paint'
-import { columnWidths, fitHints, progressBar } from './pane'
+import { cellOf, columnWidths, fitColumns, fitHints, progressBar } from './pane'
 
 // Layout at the sizes people use: every view, with and without a card docked under it, drawn at narrow
 // and wide widths and short and tall heights, then laid out by `paint` and checked for what doesn't fit.
@@ -334,7 +334,7 @@ test("won't do on the board: marked on its card and row, left out of the counts;
   expect(card?.text).toContain("✕ won't do")
   expect(JSON.stringify(card)).toContain('"strikethrough":true')
   await ui.press({ key: 'tab-plan' })
-  expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2 Dropped/)
+  expect((await ui.find({ key: 'row-T2' }))?.text).toMatch(/^✕ T2\s+Dropped/)
   // Its card shows Won't do where Done would be.
   await ui.press({ key: 'row-T2' })
   expect((await ui.find({ key: 'set-wontdo' }))?.props.variant).toBe('primary')
@@ -374,8 +374,8 @@ test('inbox: i files a line from any tab; the Inbox tab lists what waits, with w
   expect(await ui.find({ key: 'inbox-input' })).toBeUndefined()
   await ui.press({ key: 'tab-inbox' })
   const { lines } = paintPane(await ui.drawn(), 120)
-  expect(lines.some(line => /^I1 .* — user, 10-09$/.test(line))).toBe(true)
-  expect(lines.some(line => /^I3 .* — general-purpose-implement-the-login-and-session-flow, 10-09$/.test(line))).toBe(true)
+  expect(lines.some(line => /^I1 +.+ +user +2026-10-09$/.test(line))).toBe(true)
+  expect(lines.some(line => /^I3 +.+ +general-purpose… +2026-10-09$/.test(line))).toBe(true)
   await ui.unmount()
 })
 
@@ -448,8 +448,8 @@ test('releases tab: what the next release carries by section, each version newes
   // T2 and T3 merged since; T1 shipped in 0.6.2. By section, Added before Fixed.
   expect(text).toMatch(/Unreleased +2 notes merged since the last release +\[ Release… \]\nAdded\n- New thing\. \(T3\)\nFixed\n- A fix\. \(T2\)/)
   // Newest open with its notes, stable marked; the older one folded to its line.
-  expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +PR #33 +stable ●\n *Changed\n *- Installs get releases\./)
-  expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 task +PR #31\n/)
+  expect(text).toMatch(/▾ v0\.6\.3 +2026-10-09 +#33 +stable ●\n *Changed\n *- Installs get releases\./)
+  expect(text).toMatch(/▸ v0\.6\.2 +2026-10-08 +1 #31 *\n/)
   // Release… suggests the next minor (an Added note waits) and runs ship with what is typed.
   await ui.press({ key: 'release' })
   expect((await ui.find({ key: 'release-version' }))?.props.value).toBe('0.7.0')
@@ -833,4 +833,42 @@ test('docked, the card takes the rows its content needs and the list the rest; t
   expect(await listRows()).toBe(short)
   expect(await ui.find({ key: 'split-auto' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('tables: a header over aligned columns in Plan, the Inbox, Releases and the Roadmap list; the narrowest columns go first', async ($, on) => {
+  const columns = [
+    { key: 'id', label: 'ID', width: 4, drop: 0 },
+    { key: 'title', label: 'Title', width: 'fill' as const, drop: 0, most: 50 },
+    { key: 'due', label: 'Due', width: 10, drop: 2 },
+    { key: 'pri', label: 'Pri', width: 3, drop: 1 },
+  ]
+  expect(fitColumns(columns, 120).map(one => [one.key, one.width])).toEqual([['id', 4], ['title', 50], ['due', 10], ['pri', 3]])
+  expect(fitColumns(columns, 30).map(one => one.key)).toEqual(['id', 'title', 'pri'])
+  expect(fitColumns(columns, 20).map(one => one.key)).toEqual(['id', 'title'])
+  expect(cellOf('Make the board', 8)).toBe('Make th…')
+  expect(cellOf('3/4', 5, 'right')).toBe('  3/4')
+  const snap = bigRoadmap()
+  on('process.run', ($, e) => ({ value: fake(e.init?.stdin, snap) }))
+  on('fs.stat', () => ({ value: { size: 1, mtimeMs: 1 } }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.focus', () => ({}))
+  await $.command.run({ command: 'roadmap', args: '' } as never)
+  for (const width of WIDTHS) {
+    const ui = await $.ui.mount({
+      plugin: 'roadmap', surface: 'terminal', component: 'Pane', requestId: 'roadmap',
+      props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
+    })
+    // Each list has its header; in Plan and the Inbox, the rows' ids sit under the header's.
+    for (const [tab, row] of [['tab-plan', /^\s*ID\s+Title/], ['tab-inbox', /^ID\s+Title/]] as const) {
+      await ui.press({ key: tab })
+      const { lines } = paintPane(await ui.drawn(), width)
+      const at = lines.findIndex(line => row.test(line))
+      expect(at).toBeGreaterThan(-1)
+      const idAt = lines[at]!.indexOf('ID')
+      for (const line of lines.slice(at + 1, at + 6).filter(line => line.trim())) expect(line[idAt]).not.toBe(' ')
+    }
+    await ui.press({ key: 'tab-roadmap' })
+    if (width < 100) expect(paintPane(await ui.drawn(), width).lines.some(line => /^\s*Name\s+Due\s+Progress/.test(line))).toBe(true)
+    await ui.unmount()
+  }
 })
