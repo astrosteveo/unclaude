@@ -4,6 +4,15 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-10
+
+### Changed
+
+- The board's wording is plainer. A claim whose agent stopped working is marked `⌛inactive` (it was `⌛stale`), a card's dependencies say "blocked by", and the comment button's off state reads "With your next prompt".
+- Claude's tool replies and descriptions use plainer wording, such as "blocked by" in place of "waits on".
+- The summary Claude gets at the start of a session and the activity log use plainer wording, and error messages say "plugin" in place of "mod".
+- The plugin's description, the CHANGELOG and the benchmark's messages are rewritten in plain English.
+
 ## [0.7.1] - 2026-10-10
 
 ### Fixed
@@ -179,7 +188,8 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 - Subagents get stable, readable names such as `explore:find-auth-handlers`.
 - A clear error, with install commands, when `sqlite3` is missing.
 
-[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/astrosteveo/unclaude/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.2
 [0.7.1]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.1
 [0.7.0]: https://github.com/astrosteveo/unclaude/releases/tag/v0.7.0
 [0.6.3]: https://github.com/astrosteveo/unclaude/releases/tag/v0.6.3
