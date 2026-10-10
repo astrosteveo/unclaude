@@ -22,7 +22,7 @@ All notable changes to the roadmap plugin. The format follows [Keep a Changelog]
 - The key hints are shown at the bottom of the pane.
 - The mouse wheel scrolls any tab that is longer than the pane, not only an open card.
 - Five tabs, in the order work moves through them: Inbox, Plan, Roadmap, Board, Releases.
-- The Inbox opens with what needs your attention: work waiting for your review, comments you haven't read, claims whose holder has gone quiet, and late work. One press on any of them opens its card.
+- The Inbox opens with what needs your attention: work waiting for your review, comments you haven't read, claims whose agent has stopped working, and late work. One press on any of them opens its card.
 - You can sort the inbox: turn an item into a task or an epic, add it to existing work as a comment or a checklist entry, or drop it with a reason. If you ask Claude to triage, it proposes a sort before it changes anything.
 - In a wide pane, the roadmap is drawn on a timeline: epics are bars filled to show their progress, milestones are markers on their dates, a line marks today, and late work is red. w zooms in around today.
 - A Releases tab shows what the next release would include, every version shipped with its notes, which version new installs get, and a Release button that runs ship from the board.

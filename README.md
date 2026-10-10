@@ -52,19 +52,20 @@ Ask Claude to plan something, for example *"plan the v2 release as milestones, e
 
 ### The five tabs
 
-**Inbox: new ideas, and things waiting on you.** *Needs you* is at the top. It lists work in review, comments you haven't read, claims whose agent has stopped working, and late work. You can act on each one from its card. Below that are items filed to sort later. You file them with `i` or `/roadmap inbox <text>`, and Claude files things it notices but wasn't asked to do. Each item can become a task or an epic (the new-item form opens with its title filled in), be added to existing work (*Into…*: `T12`, or `T12 checklist` to add it as a checklist entry), or be dropped with a reason. If you ask Claude to triage the inbox, it proposes what to do with each item and waits for you to agree before it acts.
+**Inbox: new ideas, and work that needs you.** *Needs you* is at the top. It lists work in review, comments you haven't read, claims whose agent has stopped working, and late work. You can act on each one from its card. Below that are items filed to sort later. You file them with `i` or `/roadmap inbox <text>`, and Claude files things it notices but wasn't asked to do. Each item can become a task or an epic (the new-item form opens with its title filled in), be added to existing work (*Into…*: `T12`, or `T12 checklist` to add it as a checklist entry), or be dropped with a reason. If you ask Claude to triage the inbox, it proposes what to do with each item and waits for you to agree before it acts.
 
 ```
- Inbox 4  v:  Plan   Roadmap   Board   Releases   ███████░ 96/110 done  ● 2 unread
+ Inbox 4   Plan   Roadmap   Board   Releases   ███████░ 96/110 done  ● 2 unread
 Needs you  2
-review  E21 Search
+review    E21 Search
 1 unread  T118 Sort the board by due date
 To sort  2
-I7 Export the roadmap to CSV — user, 10-10
+ID Title                                                       Filed by When
+I7 Export the roadmap to CSV                                   user     2026-10-10
 [ → Task ] [ → Epic ] [ Into… ] [ Drop… ]
-I8 Board flickers on resize — claude, 10-10
+I8 Board flickers on resize                                    claude   2026-10-10
+[ → Task ] [ → Epic ] [ Into… ] [ Drop… ]
   Seen at 84 columns, while a card is docked.
-[ → Task ] [ → Epic ] [ Into… ] [ Drop… ]
 ```
 
 **Plan: all the work by milestone, open work first.** Milestones are listed by date with their progress, each followed by the epics and tasks aimed at it. After them comes **Unplanned**: everything not aimed at a milestone. There, each todo task that nobody holds has a priority picker, a `→ Claude` button, and a ☐ box for picking several tasks to run at once. Finished milestones and epics collapse to one line. To expand one, Tab to its `▸` and press Enter, or click it. Finished tasks with no epic collapse into one line at the bottom. A filter expands everything, and whatever contains the open card stays expanded. Done tasks show the release they shipped in, such as `v0.6.3`, or `unreleased`.
@@ -127,7 +128,7 @@ Added
 - A task can be closed as won't do, with a reason: kept with its history, but not c… (T100)
 ▾ v0.6.3  2026-10-09  1 task  PR #33  stable ●
   Changed
-  - Installing the mod gets the last release, not whatever has merged since.
+  - Installing the plugin gets the latest release, not whatever has been merged since.
 ▸ v0.6.2  2026-10-09  1 task  PR #31
 ```
 
@@ -137,7 +138,7 @@ The header shows the tabs (the current one highlighted, with a count on Inbox), 
 
 - **Session start:** Claude gets a short summary of open milestones, its own tasks, anything blocked, and your recent changes. It also gets a reminder if it has been working without updating its tasks.
 - **Working through an epic or milestone:** Claude uses as few tracker calls as it can. `claim E7` takes the whole epic and starts its first ready task, and the answer includes every task's description and checklist. Setting a task done ticks its checklist and records its release note in the same call, then starts the next ready task. A three-task epic takes four tracker calls. On very small tasks, the work costs about 1.2 times what it costs without the plugin. On tasks that each change several files, the extra cost is smaller than the normal difference between one run and the next (measured with `bench/tokens`).
-- **Claims:** Claude claims a task before starting it. The claim is refused if someone else holds the task or if the task is still waiting on unfinished work, so agents running at the same time don't work on the same thing. A claim stays active while the agent holding it keeps working. If that agent does nothing for 30 minutes, the claim is marked stale (`⌛stale` on the card) and another agent can take the task over. The takeover is logged. Subagents show up by name, such as `explore:find-auth-handlers`.
+- **Claims:** Claude claims a task before starting it. The claim is refused if someone else holds the task or if the task is still blocked by unfinished work, so agents running at the same time don't work on the same thing. A claim stays active while the agent holding it keeps working. If that agent does nothing for 30 minutes, the claim is marked inactive (`⌛inactive` on the card) and another agent can take the task over. The takeover is logged. Subagents show up by name, such as `explore:find-auth-handlers`.
 - **Done:** Claude can't mark a task done until every checklist item is ticked, and its done goes to Review for you to approve.
 - **Handoffs:** when Claude stops working on a task, it leaves a note for the next agent (`release` with a note). The next agent to claim the task gets that note first, along with the task's description, checklist, recent activity and linked commits, so it can continue where the last one stopped.
 - **Planning:** Claude can plan a whole breakdown in one call (`plan`): milestones, epics and tasks nested together, with checklists, labels, and dependencies between the new tasks. The plugin checks the whole plan before it saves anything.

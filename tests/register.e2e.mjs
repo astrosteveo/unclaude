@@ -5,7 +5,7 @@
 //   node --test tests/register.e2e.mjs
 //
 // Node strips the TypeScript itself. The engine's `claude-code` module and the pane (the module's one
-// file with JSX, which Node can't read) are stood in for; everything else is the mod's own code.
+// file with JSX, which Node can't read) are replaced by stand-ins; everything else is the plugin's own code.
 import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
@@ -20,7 +20,7 @@ const FAKES = {
     export const atom = (key, init) => ({ key: key.plugin + ':' + key.key, init })
     export const read = async ($, one) => ($.state.has(one.key) ? $.state.get(one.key) : one.init)
     export const update = async ($, one, fn) => { $.state.set(one.key, fn(await read($, one))) }`,
-  // Drawing is the UI tests' business (hooks/roadmap.test.ts).
+  // The UI tests (hooks/roadmap.test.ts) check drawing.
   pane: `
     export const drawPane = () => ({ node: null, scrollMax: 0 })
     export const drawBand = () => null`,
@@ -54,7 +54,7 @@ let call
 let start
 let hooksAll
 
-/** A stand-in for the engine handle: real processes and files in the project, the rest recorded or quiet. */
+/** A stand-in for the engine handle: real processes and files in the project; everything else is recorded or ignored. */
 function engine(root) {
   const store = {}
   return {
@@ -153,7 +153,7 @@ test('add and plan build the tree; show reads it back', async () => {
   assert.equal(everything(), 'E1 epic todo M1 -; M1 milestone todo - -; T1 task todo E1 -; T2 task todo E1 - | 7 | T1>T2')
   assert.equal(query("SELECT group_concat(text, '|') FROM (SELECT text FROM checks WHERE item_id='T1' ORDER BY n);"), 'form|session')
   const shown = await ok({ action: 'show', id: 'T2' })
-  assert.match(shown, /^T2 ○ todo Logout {2}\(p1, waiting on T1\)/)
+  assert.match(shown, /^T2 ○ todo Logout {2}\(p1, blocked by T1\)/)
   // A plan that fails anywhere writes nothing.
   const before = everything()
   const failed = await call({ action: 'plan', tree: [{ kind: 'task', title: 'a', blocked_by: ['nowhere'] }] })
@@ -165,7 +165,7 @@ test('claim starts a task and names its branch; update writes several fields at 
   await ok({ action: 'add', kind: 'task', title: 'Parser', checklist: ['works'] })
   const claimed = await ok({ action: 'claim', id: 'T1' })
   assert.match(claimed, /^T1 is yours \(claude\), in progress\.\nWork on branch t1-parser/)
-  // A subagent can't take it while the claim is live.
+  // A subagent can't take it while the claim is active.
   const taken = await call({ action: 'claim', id: 'T1' }, 'agent-1')
   assert.equal(taken.ok, false)
   assert.match(taken.text, /T1 is held by claude/)
@@ -200,22 +200,22 @@ test('claim on an epic takes it whole: held by the caller, its first ready task 
   // The p1 task goes first; the answer names its branch and shows every open task whole.
   assert.match(taken, /^E1 is yours \(claude\): its tasks close as you finish them, and it goes to review once they all have\.\nT2 is yours, in progress\.\nWork on branch e1-utils \(E1's/)
   assert.match(taken, /T1 ○ todo Slugify {2}\(0\/1 checked\)\n {4}Add slugify\.\n {4}\[ \] 1\. lowercases/)
-  assert.match(taken, /T3 ○ todo CLI {2}\(0\/1 checked, waiting on T1, T2\)\n {4}\[ \] 1\. prints/)
+  assert.match(taken, /T3 ○ todo CLI {2}\(0\/1 checked, blocked by T1, T2\)\n {4}\[ \] 1\. prints/)
   assert.equal(everything(), 'E1 epic todo - claude; T1 task todo E1 -; T2 task in_progress E1 claude; T3 task todo E1 - | 13 | T1>T3,T2>T3')
   // Claimed again, it carries on with the task already under way.
   assert.match(await ok({ action: 'claim', id: 'E1' }), /\nT2 is yours, in progress\./)
-  // Done ticks its entries and goes straight on to the next ready task; the blocked one comes last.
+  // Setting it done ticks its entries and claims the next ready task; the blocked one comes last.
   assert.match((await call({ action: 'update', id: 'T2', status: 'done', items: [1], note: 'x' })).text, /Next in E1: T1 is yours \(claude\), in progress\./)
   assert.match((await call({ action: 'update', id: 'T1', status: 'done', items: [9], note: 'x' })).text, /T1 has no checklist entry 9/)
   assert.match((await call({ action: 'update', id: 'T1', items: [1] })).text, /items goes with status done/)
   assert.match(await ok({ action: 'update', id: 'T1', status: 'done', items: [1], note: 'y' }), /Next in E1: T3 is yours/)
   const last = await ok({ action: 'update', id: 'T3', status: 'done', items: [1], note: '-' })
-  assert.match(last, /that was the last task in E1, which now waits on the user's review\. Open its pull request, if it has none: push branch e1-utils/)
+  assert.match(last, /that was the last task in E1, which now goes to the user for review\. Open its pull request, if it has none: push branch e1-utils/)
   assert.equal(query("SELECT group_concat(item_id || n || done, ' ') FROM checks;"), 'T111 T211 T311')
   assert.equal(everything().split(' | ')[0], 'E1 epic todo - claude; T1 task done E1 claude; T2 task done E1 claude; T3 task done E1 claude')
 })
 
-test('batch: every op lands in one transaction, refs naming new items; one failing op writes nothing', async () => {
+test('batch: all ops are written in one transaction, and refs name new items; if one op fails, nothing is written', async () => {
   await ok({ action: 'add', kind: 'epic', title: 'E' })
   const reply = await ok({ action: 'batch', ops: [
     { action: 'add', kind: 'task', title: 'First', parent: 'E1', ref: 'a' },
@@ -244,7 +244,7 @@ test('remove takes a subtree only with cascade; export, then import into an empt
   assert.match(saved, /^Exported 3 item\(s\)/)
   assert.equal(await ok({ action: 'remove', id: 'E1', cascade: true }), 'Removed E1, T1, T2')
   assert.equal(query('SELECT count(*) FROM items;'), '0')
-  // Into a roadmap holding anything (the removal's log), import is refused; into a fresh one, it lands.
+  // Into a roadmap holding anything (the removal's log), import is refused; into a fresh one, it succeeds.
   assert.match((await call({ action: 'import', path: 'saved.json' })).text, /import goes only into an empty one/)
   rmSync(join(dir, '.claude'), { recursive: true, force: true })
   const { register } = await import(`../hooks/register.tsx?load=${++loads}`)
@@ -303,7 +303,7 @@ test('a subfolder of a fresh repository starts the roadmap at the top, never in 
   assert.equal(existsSync(join(dir, 'sub/.claude')), false)
 })
 
-test("won't do: a reason closes a task as dropped, not finished; no ticks or note; out of counts and notes; any status reopens it", async () => {
+test("won't do: with a reason, a task is closed as dropped, not finished, with no ticks or note; it is left out of counts and notes; setting any status reopens it", async () => {
   await ok({ action: 'add', kind: 'epic', title: 'Polish' })
   await ok({ action: 'add', kind: 'task', title: 'Kept', parent: 'E1', checklist: ['works'] })
   await ok({ action: 'add', kind: 'task', title: 'Dropped', parent: 'E1', checklist: ['never ticked'], note: 'Should never ship.' })
@@ -311,15 +311,15 @@ test("won't do: a reason closes a task as dropped, not finished; no ticks or not
   // A reason is required, and only tasks are dropped.
   assert.equal((await call({ action: 'update', id: 'T2', wontdo: '  ' })).ok, false)
   assert.match((await call({ action: 'update', id: 'E1', wontdo: 'no' })).text, /Only tasks close as won't do/)
-  // An agent's won't do waits on the user, with no checklist ticked and no note asked for.
+  // An agent's won't do needs the user's approval; no checklist is ticked and no note is asked for.
   const dropped = await ok({ action: 'update', id: 'T2', wontdo: 'superseded by T1' })
-  assert.match(dropped, /waiting on the user's approval to drop it/)
+  assert.match(dropped, /needs the user's approval to drop it/)
   assert.doesNotMatch(dropped, /pull request/)
   assert.equal(query("SELECT status || ' ' || resolution FROM items WHERE id='T2';"), "review wontdo")
   assert.equal(query("SELECT body FROM activity WHERE item_id='T2' AND type='comment';"), "Won't do: superseded by T1")
   await ok({ action: 'update', id: 'T2', status: 'done', approved: true })
   assert.equal(query("SELECT status || ' ' || resolution FROM items WHERE id='T2';"), 'done wontdo')
-  // Closed: the epic rolls up done, counting only the finished task; it reads as won't do; its note never ships.
+  // Once closed, the epic is done, counting only the finished task; the task shows as won't do, and its note is never released.
   const shown = await ok({ action: 'show', id: 'E1' })
   assert.match(shown, /1\/1 tasks/)
   assert.match(await ok({ action: 'show', id: 'T2' }), /T2 ✕ won't do Dropped/)
@@ -332,7 +332,7 @@ test("won't do: a reason closes a task as dropped, not finished; no ticks or not
   assert.equal(query("SELECT status || ' ' || COALESCE(resolution, '-') FROM items WHERE id='T2';"), 'todo -')
 })
 
-test('milestones are targets: under a milestone an epic or task targets it; under an epic a task joins it; old exports map the same', async () => {
+test('milestones are targets: under a milestone an epic or task targets it; under an epic a task joins it; old exports are mapped the same way', async () => {
   await ok({ action: 'add', kind: 'milestone', title: 'v1' })
   await ok({ action: 'add', kind: 'epic', title: 'Auth', parent: 'M1' })
   await ok({ action: 'add', kind: 'task', title: 'Login', parent: 'E1' })
@@ -349,13 +349,13 @@ test('milestones are targets: under a milestone an epic or task targets it; unde
   assert.equal(at('T2'), 'E1 -')
   await ok({ action: 'update', id: 'T1', parent: 'M1' })
   assert.equal(at('T1'), '- M1')
-  // The tree still reads milestone > epic > task.
+  // The tree still shows milestone > epic > task.
   assert.match(await ok({ action: 'show' }), /M1 .*\n  E1 .*\n    T2 /)
-  // Undo takes a move back whole.
+  // Undo reverses a whole move.
   await call({ action: 'show' })
   const undoId = query("SELECT max(op) FROM activity WHERE item_id='T1';")
   assert.ok(undoId)
-  // An export from before targets (epics parented to milestones) imports mapped the same.
+  // An export from before targets existed (epics parented to milestones) is imported and mapped the same way.
   const old = { roadmap: 'export', schema: 6, exported_at: '2026-10-01T00:00:00Z', tables: {
     items: [
       { id: 'M1', kind: 'milestone', title: 'v1', status: 'todo', parent: null, created_at: 'x', updated_at: 'x' },
