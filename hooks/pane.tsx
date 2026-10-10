@@ -400,6 +400,9 @@ export function drawPane(
   const canScroll = e.surface === 'terminal' && bodyRows !== undefined && !draft && !isCompact && (!(pick && find(items, pick)) || isDocked)
   // Pressing the open card again closes it.
   const choose = (id: string | null) => () => (id !== null && id === pick ? act.closeDetail(id) : act.open(id))
+  // A row's button key; the open item's is its own. The terminal keeps the ring by its place among the buttons,
+  // so closing a docked card puts it on `card-<id>` only once the list is drawn whole (the key is waited for).
+  const rowKey = (kind: 'card' | 'row' | 'time', id: string) => (id === pick ? `${kind}-${id}-open` : `${kind}-${id}`)
   const badge = (item: Item) => {
     const count = unread(snap, item.id, USER).length
     return count ? ` ● ${count}` : ''
@@ -521,7 +524,7 @@ export function drawPane(
     return (
       // A keyed box of its own: the card's hover scope.
       <Box key={`card-box-${item.id}`}>
-        <Button key={`card-${item.id}`} plain onPress={choose(item.id)}>
+        <Button key={rowKey('card', item.id)} plain onPress={choose(item.id)}>
           <Text hover={lit('inactive')} dimColor={!isOpen} inverse={isOpen} bold={isOpen}>
             {id}
           </Text>
@@ -853,7 +856,7 @@ export function drawPane(
   const stackSlots = isWide ? undefined : slotsOf(STATUSES.flatMap(status => columns[status].slice(0, caps[status])))
   const heading = (status: Status) => (
     <Button key={`col-${status}-head`} plain hotkey={HOTKEY[status]}
-      onPress={() => columns[status][0] && act.focus(`card-${columns[status][0]!.id}`)}>
+      onPress={() => columns[status][0] && act.focus(rowKey('card', columns[status][0]!.id))}>
       <Text bold color={COLOR[status]}>
         {GLYPH[status]} {LABEL[status]}
       </Text>{' '}
@@ -1014,7 +1017,7 @@ export function drawPane(
             <Text color={picked.includes(item.id) ? 'green' : undefined}>{picked.includes(item.id) ? '☑' : '☐'}</Text>
           </Button>
         ) : <Text key={`pick-${item.id}`}> </Text>)}
-        <Button key={`row-${item.id}`} plain onPress={choose(item.id)}>
+        <Button key={rowKey('row', item.id)} plain onPress={choose(item.id)}>
           {planColumns.map((one, i) => {
             const gap = i ? ' ' : ''
             if (one.key === 'id')
@@ -1261,7 +1264,7 @@ export function drawPane(
         </Box>
       )}
       {axisRows.map(({ item, depth }) => (
-        <Button key={`time-${item.id}`} plain onPress={choose(item.id)}>
+        <Button key={rowKey('time', item.id)} plain onPress={choose(item.id)}>
           <Text bold={item.kind === 'milestone'} color={item.kind === 'milestone' ? undefined : undefined} dimColor={statusOf(items, item) === 'done'}>
             {axisLabel(item, depth)}
           </Text>{' '}
@@ -1303,7 +1306,7 @@ export function drawPane(
         return (
           <Box key={`timeline-${one.id}`} flexDirection="row" columnGap={1} marginLeft={depth * 2}>
             {foldToggle(one, foldsInTimeline(one))}
-            <Button key={`time-${one.id}`} plain onPress={choose(one.id)}>
+            <Button key={rowKey('time', one.id)} plain onPress={choose(one.id)}>
               <Text color={COLOR[st]}>{GLYPH[st]}</Text> <Text dimColor>{one.id}</Text> <Text bold={one.kind === 'milestone'}>{title}</Text>
               {pad}
               <Text dimColor>{`  ${date.padEnd(10)}  `}</Text>
