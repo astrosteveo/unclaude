@@ -95,8 +95,9 @@ const LIST_MIN = 8
 const DIVIDER_ROWS = 1
 const SPLIT_STEP = 2
 
-// The space between board columns side by side.
-const COLUMN_GAP = 2
+// The space between board columns side by side, and what a column's frame (border and padding) takes across.
+const COLUMN_GAP = 1
+const FRAME = 4
 
 /**
  * The width of each board column side by side in `width`: a column with a fixed width (`fixed`, 0 for
@@ -720,9 +721,10 @@ export function drawPane(
   // A heading is drawn with its jump key: "t: ○ Todo 0".
   const headOf = (status: Status) => `${HOTKEY[status]}: ${GLYPH[status]} ${LABEL[status]} ${columns[status].length}`
   const widths = columnWidths(
-    Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length])) as Record<Status, number>,
+    Object.fromEntries(STATUSES.map(status => [status, columns[status].length > 0 ? 0 : headOf(status).length + FRAME])) as Record<Status, number>,
     width, COLUMN_GAP)
-  const roomOf = (status: Status) => (isWide ? widths[status] : width - 2)
+  // Side by side, each column is framed: its border and padding take FRAME of its width.
+  const roomOf = (status: Status) => (isWide ? widths[status] - FRAME : width - 2)
   // Side by side, a narrow column whose cards don't all fit on one line gives every card two, so they line
   // up; a column wide enough to read a title in keeps cards to one line, the title cut.
   const SPLIT_BELOW = 44
@@ -745,7 +747,7 @@ export function drawPane(
   // each heading has its rule under it; stacked, the blocks have a blank row between them.
   const budget = !isDocked && isDoneOpen && bodyRows ? bodyRows - BOARD_CHROME - (isWide ? 0 : STATUSES.length) : Infinity
   const caps = budget !== Infinity
-    ? columnCaps(heights, isWide ? budget - 1 : budget, isWide)
+    ? columnCaps(heights, isWide ? budget - 3 : budget, isWide)
     : (Object.fromEntries(STATUSES.map(status => [status, status === 'done' ? doneShown : canScroll ? Infinity : 15])) as Record<Status, number>)
   // Stacked, the empty columns fold into one line, and every card's pieces sit in slots shared by the board.
   const empties = isWide ? [] : STATUSES.filter(status => columns[status].length === 0)
@@ -779,14 +781,14 @@ export function drawPane(
         const from = isWide && canScroll ? Math.min(wideFrom, Math.max(0, capped.length - wideCap(status))) : 0
         const shown = isWide && canScroll ? capped.slice(from, from + wideCap(status)) : capped
         return (
-          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}>
+          <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
+            {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1 } : {})}>
             {status === 'done' && doneToggle ? (
               <Box key="col-done-top" flexDirection="row" columnGap={1}>
                 {heading(status)}
                 {doneToggle}
               </Box>
             ) : heading(status)}
-            {isWide && <Text key={`col-${status}-rule`} color={COLOR[status]} dimColor>{'─'.repeat(widths[status])}</Text>}
             {from > 0 && <Text key={`col-${status}-above`} dimColor>↑ {from} above</Text>}
             {shown.map(task => card(task, roomOf(status), !isWide || Boolean(wideSlots[status]), isSplit[status], wideSlots[status] ?? stackSlots))}
             {column.length > from + shown.length && (
@@ -1453,7 +1455,8 @@ export function drawPane(
       ? topRows - 2
       : Math.max(4, bodyRows! - headerRows - footerRows - (filterRow ? 1 : 0) - (fileRow ? 1 : 0) - (isIgnoreOffered ? 2 : 0) - (query && !items.some(isShown) ? 1 : 0) - 1)
   // Side by side, scrolling moves every column a card at a time: as many as fit under the headings.
-  const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 4) / (isSplit[status] ? 2 : 1)))
+  // (Under each heading, inside the frame's two borders, with a line for each mark.)
+  const wideCap = (status: Status) => Math.max(1, Math.floor((viewSpace - 5) / (isSplit[status] ? 2 : 1)))
   const wideMax = isWide && canScroll
     ? Math.max(0, ...STATUSES.map(status => Math.min(columns[status].length, caps[status]) - wideCap(status)))
     : 0

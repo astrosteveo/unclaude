@@ -141,12 +141,13 @@ test('wide board cards: one line where all fit, else a title line and a details 
   expect(problems).toEqual([])
   const heads = lines.find(line => line.includes('○ Todo 0'))!
   // Empty Todo, Blocked and Review keep to their headings; In progress and Done share the rest.
-  expect(heads.indexOf('◐ In progress')).toBeLessThan(20)
+  expect(heads.indexOf('◐ In progress')).toBeLessThan(24)
   expect(heads.indexOf('● Done') - heads.indexOf('◐ In progress')).toBeGreaterThan(40)
   const at = heads.indexOf('p: ◐ In progress')
-  const progress = lines.slice(lines.indexOf(heads) + 2).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
+  // (The cards start right under the headings: the frame's border is above them.)
+  const progress = lines.slice(lines.indexOf(heads) + 1).map(line => line.slice(at, heads.indexOf('b: ✗ Blocked')).trim())
   expect(progress.slice(0, 2)).toEqual(['T90 Short', 'T91 Tiny @claude'])
-  const done = lines.slice(lines.indexOf(heads) + 2, lines.indexOf(heads) + 6).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
+  const done = lines.slice(lines.indexOf(heads) + 1, lines.indexOf(heads) + 5).map(line => line.slice(heads.indexOf('d: ● Done')).trim())
   expect(done[0]).toMatch(/^T\d+ Make the board/)
   expect(done[1]).not.toMatch(/^T\d+/)
   expect(done[2]).toMatch(/^T\d+ Make the board/)
@@ -240,8 +241,9 @@ test('the header: views as tabs, a progress bar, actions apart; one row wide, tw
       props: { title: 'Roadmap', isFocused: true, bodyColumns: width, placement: 'dock', scroll: { offset: 0, bodyRows: 50 } } as never,
     })
     const { lines } = paintPane(await ui.drawn(), width)
+    // (Side by side the columns are framed: their top border is a row of its own.)
     const top = lines.findIndex(line => /Todo \d+/.test(line))
-    expect(top).toBe(rows)
+    expect(top).toBe(rows + (width >= 100 ? 1 : 0))
     expect(lines[0]).toMatch(/Inbox \d+ +Plan +Roadmap +Board +v: +Releases +█+░* 30\/60 done +● 7 unread/)
     expect(lines.slice(0, rows).join(' ')).toContain('[ Mark all read ] [ Filter ] [ New ]')
     // The view showing is the tab drawn inverse.
