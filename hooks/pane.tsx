@@ -843,6 +843,8 @@ export function drawPane(
         const shown = isWide && canScroll ? capped.slice(from, from + cardsFrom(status, from)) : capped
         return (
           <Box key={`col-${status}`} flexDirection="column" width={isWide ? widths[status] : undefined}
+            // Side by side and scrolling, every column's frame reaches the foot of the list.
+            height={isWide && canScroll && viewSpace !== Infinity ? viewSpace : undefined}
             {...(isWide ? { borderStyle: 'round', borderColor: COLOR[status], borderDimColor: true, paddingX: 1 } : {})}>
             {status === 'done' && doneToggle ? (
               <Box key="col-done-top" flexDirection="row" columnGap={1}>
@@ -1608,7 +1610,8 @@ export function drawPane(
     if (drawn < space + 1) body.push(<Box key="pad" height={space + 1 - drawn} />)
   }
 
-  const panel = item && status && (
+  // The card; docked, `grow` blank rows at its foot keep the two frames filling the pane, whatever the split.
+  const panelWith = (grow: number) => item && status && (
     <Box key="detail" flexDirection="column" borderStyle="round" paddingX={1}
       borderColor={!isDocked || region === 'card' ? ACTIVE : undefined} borderDimColor={isDocked && region !== 'card'}>
       <Box key="title-row" flexDirection="row" justifyContent="space-between">
@@ -1775,8 +1778,10 @@ export function drawPane(
         </Text>
       )}
       {body}
+      {grow > 0 && <Box key="detail-grow" height={grow} />}
     </Box>
   )
+  const panel = panelWith(0)
 
   // The new-item form: the choices first, the title last (Enter on it creates the item).
   const homes = draft ? homesFor(items, draft.kind) : []
@@ -1903,8 +1908,7 @@ export function drawPane(
                   </Button>
                 )}
               </Box>
-              {pad > 0 && <Box key="card-pad" height={pad} />}
-              {panel}
+              {panelWith(pad)}
             </Box>
           ) : (
             panel ? (

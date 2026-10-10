@@ -689,16 +689,19 @@ test('the key hints sit on a docked pane\'s last row, on every tab, with a card 
       await ui.press({ key: `tab-${tab}` })
       await atBottom(tab)
     }
-    // A card fills from the bottom up: it ends right above the hints.
+    // The list's frame and the card fill the pane: the card starts right under the divider and its frame
+    // reaches the hints, its spare rows inside it, whatever the split.
     await ui.press({ key: 'tab-board' })
     const first = (await ui.findAll({ type: 'Button' })).map(one => String(one.key)).find(key => key.startsWith('card-'))!
     await ui.press({ key: first })
-    await atBottom('card')
-    // (The painter draws the card's border as a blank row: the hints, its bottom border, then its last line.)
-    const drawn = paintPane(await ui.drawn(), width).lines
-    const hintsAt = drawn.findIndex(line => line.startsWith('Tab/↑↓ move'))
-    expect(drawn[hintsAt - 1]!.trim()).toBe('')
-    expect(drawn[hintsAt - 2]!.trim()).not.toBe('')
+    for (const move of [null, 'split-down', 'split-up', 'split-up', 'split-up']) {
+      if (move) await ui.press({ key: move })
+      await atBottom('card')
+      // (The painter draws a border as a blank row: the divider, the card's top border, then its title.)
+      const drawn = paintPane(await ui.drawn(), width).lines
+      const divider = drawn.findIndex(line => /k: ▲ j: ▼/.test(line))
+      expect(`${move}: ${drawn[divider + 2]!.trim()}`).toMatch(new RegExp(`^${move}: task `))
+    }
     await ui.press({ key: 'close' })
     await ui.press({ key: 'new' })
     await atBottom('form')
